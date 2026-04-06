@@ -1,0 +1,257 @@
+# ATC (AirTrafficControl) Protocol — Reverse Engineering Notes
+
+## Overview
+
+`com.apple.atc` is the lockdown service iOS uses for media synchronization (music, video, podcasts). It replaced the older direct-database approach starting with iOS 6 (DBVersion 5+). iTunes and Finder both use this service.
+
+**Status:** FULLY WORKING (2026-04-06). End-to-end video sync to iPad TV app from Python. The protocol is plist-based (legacy mode). Uses replayed 84-byte Grappa blob for authentication.
+
+## Wire Format
+
+**4-byte little-endian length prefix + binary plist**
+
+```python
+def encode(msg: dict) -> bytes:
+    data = plistlib.dumps(msg, fmt=plistlib.FMT_BINARY)
+    return struct.pack("<I", len(data)) + data
+
+def decode(reader) -> dict:
+    length = struct.unpack("<I", reader.read(4))[0]
+    return plistlib.loads(reader.read(length))
+```
+
+## Message Structure
+
+Every message is a plist dict with these standard fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Command` | string | Message name (e.g., "Capabilities", "RequestingSync") |
+| `Params` | dict | Command-specific parameters |
+| `Type` | int | 0 = request, 1 = response |
+| `Session` | int | Session ID (0 for pre-session) |
+| `Id` | int | Auto-incrementing message ID |
+
+## Observed Message Flow (iOS 26.3.1, iPad8,7)
+
+### 1. Connection Handshake
+
+```
+Device → Host:  Capabilities
+    Params.GrappaSupportInfo: {version: 1, deviceType: 0, protocolVersion: 1}
+
+Host → Device:  Capabilities (Type: 1 = response)
+    Params.GrappaSupportInfo: {version: 1, deviceType: 1, protocolVersion: 1}
+    Params.HostVersion: "10.5.0.115"
+
+Device → Host:  InstalledAssets
+    Params.Application._Deleted: []
+```
+
+### 2. Host Identification
+
+```
+Host → Device:  HostInfo
+    Params: {HostName, HostID, Version: "10.5.0.115"}
+
+Device → Host:  AssetMetrics
+    Params._FreeSize: 254312738816
+    Params._PhysicalSize: 510862249984
+    Params.Media.Movie._Count: 11
+    Params.Media.Movie._PhysicalSize: 64142016512
+    Params.Media.TVEpisode._Count: 7
+    Params.Media.TVEpisode._PhysicalSize: 2313490432
+    Params.Media.Music._Count: 0
+    (also: Book, Ringtone, Photo, Application, Logs, UserData stats)
+```
+
+### 3. Sync Request (with Grappa)
+
+```
+Host → Device:  RequestingSync
+    Params.DataclassAnchors: {Media: "0"}
+    Params.Dataclasses: ["Media", "Keybag"]
+    Params.HostInfo: {
+        Grappa: <84 bytes>,      ← REQUIRED (replayed static blob)
+        LibraryID: "<hex>",
+        SyncHostName: "<hostname>",
+        SyncedDataclasses: [],
+        Version: "12.8"
+    }
+
+Device → Host:  SyncAllowed
+Device → Host:  InstalledAssets
+Device → Host:  ReadyForSync
+    Params.DataclassAnchors: {Media: "<syncNum>"}
+    Params.DeviceInfo: {Grappa: <83 bytes>}
+```
+
+**Note**: `BeginSync` / `SendSyncRequest` is the WRONG flow (ErrorCode 12). Use `RequestingSync` with Grappa.
+
+### 4. Metadata Sync + File Transfer (WORKING)
+
+```
+Host: AFC write binary sync plist + CIG to /iTunes_Control/Sync/Media/
+      (plist contains insert_track with is_movie:True, location.kind)
+
+Host → Device:  SendPowerAssertion(true)    ← REQUIRED
+Host → Device:  FinishedSyncingMetadata
+    Params.SyncTypes: {Keybag: 1, Media: 1}
+    Params.DataclassAnchors: {Media: "<syncNum>"}   ← MUST be STRING
+
+Device → Host:  AssetManifest (AssetType=Movie)
+
+Host: AFC upload file to /Airlock/Media/<AssetID>     ← staging, REQUIRED
+Host: AFC upload file to /iTunes_Control/Music/Fxx/   ← final path
+
+Host → Device:  FileBegin
+    Params.AssetID: "<string>"    ← MUST be STRING
+    Params.Dataclass: "Media"
+    Params.FileSize: <bytes>
+    Params.TotalSize: <bytes>
+
+Host → Device:  FileComplete
+    Params.AssetID: "<string>"
+    Params.AssetPath: "/iTunes_Control/Music/Fxx/name.mp4"   ← FINAL path, not Airlock
+    Params.Dataclass: "Media"
+
+Host → Device:  FileError (for any stale pending assets)
+
+Device → Host:  SyncFinished
+    → Entry appears in TV app with media_type=2048, media_kind=2
+```
+
+See `docs/TRACE_ANALYSIS.md` and `docs/ATC_SYNC_FLOW.md` for full analysis.
+
+## Known Commands (from runtime headers)
+
+### Device → Host
+- `Capabilities` — Initial greeting with Grappa support info
+- `InstalledAssets` — List of apps with deletions
+- `AssetMetrics` — Storage usage per media type
+- `SyncAllowed` — Sync permission with constraints
+- `SyncFailed` — Sync rejected with error code
+- `SyncStatus` — Progress during sync
+- `FileComplete` — File transfer completed
+- `FileError` — File transfer failed
+- `FileProgress` — File transfer progress
+- `FinishedSyncingMetadata` — Metadata sync complete
+
+### Host → Device
+- `Capabilities` (response) — Host capabilities
+- `HostInfo` — Host identification
+- `RequestingSync` — Request to begin sync
+- `BeginSync` — Start actual sync session
+- (likely: `SyncData`, `SendFile`, `EndSync`)
+
+## Grappa Authentication (REQUIRED — 84-byte replayable blob)
+
+Grappa IS required for ATC sync. The 84-byte blob is embedded in `RequestingSync.Params.HostInfo.Grappa`. Generated by AirTrafficHost.framework internally for signed processes. For unsigned processes, the same static blob can be replayed — identical to the one found in `yinyajiang/go-tunes` on GitHub.
+- ErrorCode 12: no Grappa blob
+- ErrorCode 4: invalid Grappa blob (dummy bytes)
+- ErrorCode 23: wrong message sequence
+
+"Grappa" is Apple's proprietary signing mechanism for ATC sessions.
+
+### Classes (from AirTrafficDevice.framework headers)
+- `ATGrappaSession` — Manages host-device signing session
+- `ATGrappaSignatureProvider` — Signs/verifies message parameters and payloads
+- `ATMD5SignatureProvider` — Legacy (older devices)
+
+### Flow
+1. Host calls `establishHostSessionWithDeviceInfo:clientRequestData:`
+2. Device calls `establishDeviceSessionWithRequestData:responseData:`
+3. Host calls `beginHostSessionWithDeviceResponseData:`
+4. After handshake: `createSignature:forData:` and `verifySignature:forData:` for each message
+
+### Message Signing
+- `paramsSignature` — HMAC of the `Params` plist data
+- `payloadSignature` — HMAC of file payload data
+- Algorithm: Unknown (likely AES-based, possibly Secure Enclave)
+
+## Protocol Architecture (from runtime headers)
+
+### Frameworks
+- **AirTraffic.framework** (26 classes) — Public API: ATConnection, ATAsset, ATMessage, ATSession
+- **ATFoundation.framework** (36 classes) — Transport: ATPMessage (protobuf), ATMessageParser, ATSocket
+- **AirTrafficDevice.framework** (48 classes) — Device daemon: ATDeviceService, ATDeviceSyncManager
+
+### Two Protocol Modes
+1. **Legacy** (plist-based) — `ATLegacyMessage`, `ATLegacyDeviceSyncManager`, `ATLegacyAssetLink`
+   - Wire format: 4-byte LE length + binary plist
+   - This is what our iPad responds with
+2. **Modern** (protobuf-based) — `ATPMessage`, `ATMessageParser`
+   - Wire format: varint length + protobuf
+   - Used by newer devices/iOS versions
+
+### ATPMessage Protobuf Schema (inferred from headers)
+```protobuf
+message ATPMessage {
+    uint32 messageID = 1;
+    int32 messageType = 2;
+    uint32 sessionID = 3;
+    bool additionalPayload = 4;
+    bytes parameters = 5;
+    bytes paramsSignature = 6;
+    bytes payload = 7;
+    bytes payloadSignature = 8;
+    ATPRequest request = 9;
+    ATPResponse response = 10;
+    ATPError streamError = 11;
+}
+
+message ATPRequest {
+    string command = 1;
+    string dataClass = 2;
+}
+```
+
+## Remote Services (iOS 17+)
+
+On iOS 17+, ATC is also available via RemoteXPC:
+- `com.apple.atc.shim.remote` (Port 49617)
+- `com.apple.atc2.shim.remote` (Port 49612)
+- Require `com.apple.mobile.lockdown.remote.trusted` entitlement
+
+## ErrorCode Reference (observed)
+
+| Code | Meaning |
+|------|---------|
+| 4 | Invalid Grappa blob (present but contents invalid) |
+| 12 | No Grappa — `RequestingSync` sent without `HostInfo.Grappa` field |
+| 23 | Wrong message sequence (e.g., MetadataSyncFinished before RequestingSync) |
+
+## Confirmed: ATC → TV App Works
+
+Videos synced via ATC appear in the TV app:
+- **Finder sync**: "Home Video" classification (media_type=8192, media_kind=1024)
+- **Our sync**: "Movie" classification (media_type=2048, media_kind=2)
+- Both classifications make entries visible in the TV app
+
+The ATC protocol is the only path that creates valid, persistent DB entries. Direct MediaLibrary.sqlitedb modification is reverted by medialibraryd within seconds.
+
+**socat usbmux capture does NOT work on iOS 17+** — Finder uses RemoteXPC tunnels, bypassing usbmuxd entirely. The capture only shows usbmux attach/listen messages, not ATC traffic.
+
+## Next Steps (Updated 2026-04-06)
+
+Core ATC sync is WORKING. Remaining work is productionization:
+
+1. **Integrate into CLI pipeline** — Wire `scripts/atc_proper_sync.py` into the main `mediaporter` CLI
+2. **TV series support** — Test multi-episode sync, season/episode metadata fields
+3. **Error handling & retry** — Handle device disconnects, stale assets, partial transfers
+4. **Clean up orphan files** — Test files accumulated in `/iTunes_Control/Music/F*/`
+5. **Progress reporting** — Surface FileProgress messages to CLI output
+
+## Key Resources
+
+- iOS Runtime Headers: `github.com/nst/iOS-Runtime-Headers`
+  - `/PrivateFrameworks/AirTraffic.framework/`
+  - `/PrivateFrameworks/ATFoundation.framework/`
+  - `/PrivateFrameworks/AirTrafficDevice.framework/`
+- Local capture workflow: [`docs/CAPTURE_WORKFLOW.md`](/Users/faeton/Sites/mediaporter/docs/CAPTURE_WORKFLOW.md)
+- LLDB tracer: [`scripts/lldb_atc_trace.py`](/Users/faeton/Sites/mediaporter/scripts/lldb_atc_trace.py)
+- Attach wrapper: [`scripts/trace_atc_sync.sh`](/Users/faeton/Sites/mediaporter/scripts/trace_atc_sync.sh)
+- libimobiledevice ATC issue: `github.com/libimobiledevice/libimobiledevice/issues/735`
+- SDMMobileDevice ATC issue: `github.com/samdmarshall/SDMMobileDevice/issues/61`
+- idevice-packet-analyzer (socat proxy): `github.com/storoj/idevice-packet-analyzer`
+- pymobiledevice3 protocol docs: `github.com/doronz88/pymobiledevice3/blob/master/misc/understanding_idevice_protocol_layers.md`
