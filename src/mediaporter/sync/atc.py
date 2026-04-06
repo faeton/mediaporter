@@ -12,8 +12,8 @@ from __future__ import annotations
 import datetime
 import plistlib
 import random
-import signal
 import string
+import threading
 from ctypes import POINTER, byref, c_int, c_void_p
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -232,10 +232,12 @@ class ATCSession:
         cig_data: bytes,
         anchor: str,
         progress_cb: Callable[[str, int, int], None] | None = None,
+        files_already_uploaded: bool = False,
     ) -> None:
         """Upload files and complete the ATC sync protocol.
 
         progress_cb(filename, bytes_sent, total_bytes) called during file upload.
+        files_already_uploaded: skip AFC file upload (files pre-uploaded before ATC session).
         """
         ath = self._ath
         k = get_cf_constants()
@@ -290,42 +292,66 @@ class ATCSession:
         if not got_manifest:
             raise SyncError("No AssetManifest received from device")
 
-        # Step 4: Upload files to final path + artwork to Airlock
+        # Step 4: Upload files + FileBegin/FileComplete
         afc.makedirs("/Airlock/Media")
         afc.makedirs("/Airlock/Media/Artwork")
 
         for f in files:
-            afc.makedirs(f"/iTunes_Control/Music/{f.slot}")
             total_size = f.item.file_size
+            str_aid = str(f.asset_id)
 
-            self._log(f"  AFC: uploading -> {f.device_path} ({total_size // 1048576} MB)")
+            # FileBegin — always sent (even for pre-uploaded files)
+            self._log(f"  >> FileBegin (asset={str_aid}, size={total_size // 1048576} MB)")
+            ath.ATHostConnectionSendMessage(self._conn, ath.ATCFMessageCreate(
+                0, cfstr("FileBegin"), cfdict(
+                    AssetID=cfstr(str_aid),
+                    FileSize=cfnum64(total_size),
+                    TotalSize=cfnum64(total_size),
+                    Dataclass=cfstr("Media"),
+                )
+            ))
 
-            def _progress_cb(sent, total, _title=f.item.title, _total=total_size):
-                if progress_cb:
-                    progress_cb(_title, sent, _total)
+            if files_already_uploaded:
+                # Files pre-uploaded before ATC session — skip AFC upload
+                self._log(f"  File already on device: {f.device_path}")
+            else:
+                afc.makedirs(f"/iTunes_Control/Music/{f.slot}")
 
-            afc.write_file_streaming(f.device_path, f.item.file_path, _progress_cb)
+                self._log(f"  AFC: uploading -> {f.device_path} ({total_size // 1048576} MB)")
 
-            # Upload artwork to Airlock if available
+                last_pct = [0]
+
+                def _progress_cb(sent, total, _title=f.item.title, _total=total_size,
+                                 _str_aid=str_aid, _last_pct=last_pct):
+                    if progress_cb:
+                        progress_cb(_title, sent, _total)
+                    if _total > 0:
+                        pct = int(sent * 100 / _total)
+                        if pct >= _last_pct[0] + 10:
+                            _last_pct[0] = pct - (pct % 10)
+                            mb_sent = sent / 1048576
+                            mb_total = _total / 1048576
+                            self._log(f"  AFC: {mb_sent:.0f}/{mb_total:.0f} MB ({pct}%)")
+
+                afc.write_file_streaming(f.device_path, f.item.file_path, _progress_cb)
+
+                # Drain any pending ATC messages (Pings) that accumulated during upload
+                self._log("  Draining ATC messages after upload...")
+                for _ in range(20):
+                    msg, name = self._read_msg(timeout=2)
+                    if name == "TIMEOUT" or name is None:
+                        break
+                    self._log(f"  << {name}")
+                    if name == "Ping":
+                        self._send_pong()
+
+            # Upload artwork to Airlock if available (always, even for pre-uploaded)
             if f.item.poster_data:
                 artwork_path = f"/Airlock/Media/Artwork/{f.asset_id}"
                 self._log(f"  AFC: artwork -> {artwork_path} ({len(f.item.poster_data) // 1024} KB)")
                 afc.write_file(artwork_path, f.item.poster_data)
 
-        # FileBegin + FileProgress + FileComplete for each file
-        for f in files:
-            str_aid = str(f.asset_id)
-
-            self._log(f"  >> FileBegin (asset={str_aid})")
-            ath.ATHostConnectionSendMessage(self._conn, ath.ATCFMessageCreate(
-                0, cfstr("FileBegin"), cfdict(
-                    AssetID=cfstr(str_aid),
-                    FileSize=cfnum64(f.item.file_size),
-                    TotalSize=cfnum64(f.item.file_size),
-                    Dataclass=cfstr("Media"),
-                )
-            ))
-
+            # FileProgress + FileComplete AFTER upload
             ath.ATHostConnectionSendMessage(self._conn, ath.ATCFMessageCreate(
                 0, cfstr("FileProgress"), cfdict(
                     AssetID=cfstr(str_aid),
@@ -357,10 +383,15 @@ class ATCSession:
                     )
                 ))
 
-        # Read SyncFinished (handle Ping→Pong keepalive, max 60s wait)
+        # Read SyncFinished (handle Ping→Pong keepalive, max 120s wait)
+        # For large files, the device may not send SyncFinished explicitly.
+        # Instead it re-sends InstalledAssets/AssetMetrics/SyncAllowed — its idle
+        # handshake cycle — which means it processed the sync and is ready for a
+        # new session. We treat SyncAllowed after FileComplete as success.
         self._log("  Waiting for SyncFinished...")
         timeouts = 0
-        for _ in range(60):
+        got_sync_allowed = False
+        for _ in range(120):
             try:
                 msg, name = self._read_msg(timeout=5)
             except KeyboardInterrupt:
@@ -368,8 +399,12 @@ class ATCSession:
                 return
             if name == "TIMEOUT":
                 timeouts += 1
-                if timeouts >= 6:  # 30s of silence
-                    self._log("  SyncFinished not received (timeout)")
+                if got_sync_allowed:
+                    # Device sent SyncAllowed (idle handshake) — sync is done
+                    self._log("  *** SYNC COMPLETE (device returned to idle) ***")
+                    return
+                if timeouts >= 12:  # 60s of silence
+                    self._log("  SyncFinished not received (timeout after 60s)")
                     return
                 continue
             if name is None:
@@ -382,6 +417,12 @@ class ATCSession:
             if name == "SyncFinished":
                 self._log("  *** SYNC COMPLETE ***")
                 return
+            if name == "SyncAllowed":
+                # Device re-sent its idle handshake — sync processed
+                got_sync_allowed = True
+                continue
+            # InstalledAssets, AssetMetrics, Progress etc. — keep waiting
+            continue
 
     def close(self) -> None:
         """Invalidate and release the ATC connection."""
@@ -459,25 +500,36 @@ class ATCSession:
         )
 
     def _read_msg(self, timeout: int = 15) -> tuple[c_void_p | None, str | None]:
-        """Read an ATC message with SIGALRM timeout."""
-        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-        signal.alarm(timeout)
-        try:
-            msg = self._ath.ATHostConnectionReadMessage(self._conn)
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
-            if not msg:
-                return None, None
-            name = cfstr_to_str(self._ath.ATCFMessageGetName(msg))
-            return msg, name
-        except TimeoutError:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
+        """Read an ATC message with thread-based timeout.
+
+        Uses a background thread for the blocking native call so the main
+        thread stays responsive to Ctrl+C (KeyboardInterrupt).
+        """
+        result: list = [None]  # [msg_or_None]
+        done = threading.Event()
+
+        def _reader():
+            result[0] = self._ath.ATHostConnectionReadMessage(self._conn)
+            done.set()
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+
+        # Wait with short sleeps so Ctrl+C can interrupt
+        elapsed = 0.0
+        while elapsed < timeout:
+            if done.wait(0.25):
+                break
+            elapsed += 0.25
+
+        if not done.is_set():
             return None, "TIMEOUT"
-        except KeyboardInterrupt:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
-            raise
+
+        msg = result[0]
+        if not msg:
+            return None, None
+        name = cfstr_to_str(self._ath.ATCFMessageGetName(msg))
+        return msg, name
 
     def _read_until(
         self, target: str, max_msgs: int = 10, timeout: int = 8
@@ -577,5 +629,3 @@ class ATCSession:
         return random.randint(10**17, 10**18 - 1)
 
 
-def _timeout_handler(signum, frame):
-    raise TimeoutError()

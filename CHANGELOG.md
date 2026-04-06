@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.2.1 — 2026-04-06
+
+Reliability improvements for large file transfers and interactive UX enhancements.
+
+### New
+
+- **Upload-first sync architecture** — files are uploaded via AFC before the ATC session starts. The ATC session is now seconds instead of minutes, eliminating timeouts for multi-GB files. Interrupted uploads no longer leave ghost entries in the TV app.
+- **Interactive subtitle selection** — checkbox multi-select for which subtitle tracks to embed (space to toggle, enter to confirm).
+- **Interactive metadata correction** — when TMDb can't match a filename, prompts for manual title/year input and re-searches.
+- **Fallback poster generation** — auto-generates a dark poster with title text (via Pillow) when TMDb has no poster art. Every file gets a poster.
+- **Verbose upload progress** — `-v` mode now shows upload percentage every 10% during AFC transfer.
+
+### Changed
+
+- **Analysis display moved after selection** — stream actions now reflect the actual plan (selected tracks, force-AAC normalization) instead of showing all streams as "copy" before the user chooses.
+- **Thread-based ATC message reading** — replaced SIGALRM with daemon threads for read timeouts. Ctrl+C now works reliably during sync (previously trapped in native ctypes calls).
+- **SyncAllowed as sync-complete signal** — for large files, the device may send SyncAllowed (idle handshake) instead of explicit SyncFinished. Both are now recognized as success.
+
+### Fixed
+
+- **5GB+ file sync** — previously failed due to ATC session timeout during long AFC uploads. Upload-first architecture eliminates this entirely.
+- **Ghost entries on failed sync** — metadata was registered before file upload, leaving unplayable entries in Movies tab. Now metadata is only registered after files are on device.
+- **Ctrl+C hanging** — native `ATHostConnectionReadMessage` blocked Python signal delivery. Thread-based reads allow clean interruption.
+- **Stale sync plists** — accumulated plists from failed experiments could confuse the device. Cleanup integrated into sync flow.
+
+### Protocol discoveries
+
+- ATC session goes stale during long AFC uploads (>5min) — device resets sync state
+- Device sends InstalledAssets/AssetMetrics/SyncAllowed cycle as idle heartbeat after processing sync
+- Opening new AFC connection (AMDeviceConnect+StartSession) during active ATC session can interfere with ATC state
+- FileBegin before AFC upload keeps ATC session aware of in-progress transfer
+
 ## 0.2.0 — 2026-04-06
 
 Complete rebuild of mediaporter. Replaced pymobiledevice3-based transfer with native ATC protocol implementation via ctypes. Full end-to-end video sync to iPad TV app from Python.

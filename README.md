@@ -103,15 +103,32 @@ Commands:
 
 ## How it works
 
-mediaporter communicates with iOS devices using the ATC (AirTrafficControl) protocol — the same native protocol used by Finder for media sync. Key technical details:
+mediaporter communicates with iOS devices using the ATC (AirTrafficControl) protocol — the same native protocol used by Finder for media sync.
+
+### Upload-first architecture
+
+Large files (5GB+) are handled reliably using an upload-first approach:
+
+1. **AFC upload** — file bytes are transferred to device storage first, with no ATC session active. Safe to interrupt (no ghost entries).
+2. **ATC session** — short handshake + metadata registration + asset linking. Takes seconds, not minutes. No timeout risk.
+
+This eliminates the main failure mode of traditional sync tools where metadata gets registered before the file transfer completes, leaving unplayable ghost entries.
+
+### Protocol details
 
 - **ATC handshake** with Grappa authentication over USB
 - **Binary plist** sync metadata with CIG cryptographic signatures
 - **AFC** (Apple File Conduit) for file upload to device storage
 - **Asset registration** via FileBegin/FileComplete protocol messages
-- **Ping/Pong keepalive** for large file transfers
+- **Ping/Pong keepalive** during device processing
 
 The result is a native media library entry — videos appear in the TV app with correct `media_type=2048`, artwork, and full playback functionality. No jailbreak, no third-party apps on the device.
+
+## Roadmap
+
+- **macOS native app** — Swift/SwiftUI GUI with drag-and-drop, built on the same protocol engine
+- **Batch TV series sync** — drag a season folder, auto-detect episodes
+- **Device cleanup** — remove orphan files from previous failed syncs
 
 ## Interactive workflow
 

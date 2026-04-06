@@ -45,8 +45,8 @@ def create_sync_progress() -> Progress:
 
 
 def print_analysis(jobs) -> None:
-    """Pretty-print analysis results for all files."""
-    from mediaporter.compat import TranscodeDecision
+    """Pretty-print analysis results for all files (after selection)."""
+    from mediaporter.compat import COMPATIBLE_AUDIO_CODECS
     from mediaporter.metadata import EpisodeMetadata, MovieMetadata
 
     for job in jobs:
@@ -56,20 +56,50 @@ def print_analysis(jobs) -> None:
             mi = job.media_info
             decision = job.decision
 
+            # Video
             for s in mi.video_streams:
                 act = decision.stream_actions.get(s.index, "?") if decision else "?"
                 res = f"{s.width}x{s.height}" if s.width and s.height else ""
                 color = "green" if act == "copy" else "yellow"
-                console.print(f"  [{color}]{s.codec_name} {res} -> {act}[/{color}]", end="")
+                console.print(f"  [{color}]{s.codec_name} {res} -> {act}[/{color}]")
 
-            for s in mi.audio_streams:
-                act = decision.stream_actions.get(s.index, "?") if decision else "?"
+            # Audio — only selected tracks, with real action
+            audio_indices = job.selected_audio if job.selected_audio is not None else list(range(len(mi.audio_streams)))
+            selected_streams = [mi.audio_streams[i] for i in audio_indices]
+            codecs_used = {s.codec_name.lower() for s in selected_streams}
+            force_aac = len(audio_indices) > 1 and len(codecs_used) > 1
+
+            for i in audio_indices:
+                s = mi.audio_streams[i]
                 ch = f"{s.channels}ch" if s.channels else ""
                 lang = s.language or "und"
-                color = "green" if act == "copy" else "yellow"
-                console.print(f"  | [{color}]{s.codec_name} {ch} [{lang}] -> {act}[/{color}]", end="")
+                title = f' "{s.title}"' if s.title else ""
+                if force_aac:
+                    act = "AAC" if s.codec_name.lower() != "aac" else "copy"
+                    color = "yellow" if act == "AAC" else "green"
+                    console.print(f"  [{color}]{s.codec_name} {ch} [{lang}]{title} -> {act}[/{color}]")
+                else:
+                    orig_act = decision.stream_actions.get(s.index, "?") if decision else "?"
+                    color = "green" if orig_act == "copy" else "yellow"
+                    console.print(f"  [{color}]{s.codec_name} {ch} [{lang}]{title} -> {orig_act}[/{color}]")
 
-            console.print()
+            # Subtitles — only selected tracks
+            sub_indices = job.selected_subtitles if job.selected_subtitles is not None else list(range(len(mi.subtitle_streams)))
+            shown_subs = 0
+            for i in sub_indices:
+                s = mi.subtitle_streams[i]
+                act = decision.stream_actions.get(s.index, "skip") if decision else "skip"
+                if act in ("copy", "convert_to_mov_text"):
+                    lang = s.language or "und"
+                    title = f' "{s.title}"' if s.title else ""
+                    console.print(f"  [cyan]{s.codec_name} [{lang}]{title} -> mov_text[/cyan]")
+                    shown_subs += 1
+
+            ext_indices = job.selected_external_subs if job.selected_external_subs is not None else list(range(len(mi.external_subtitles)))
+            for i in ext_indices:
+                ext = mi.external_subtitles[i]
+                console.print(f"  [cyan]{ext.format} [{ext.language}] (external) -> mov_text[/cyan]")
+                shown_subs += 1
 
         if job.metadata:
             meta = job.metadata

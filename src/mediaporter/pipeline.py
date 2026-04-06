@@ -494,9 +494,6 @@ def run_pipeline(paths: list[str], options: PipelineOptions) -> None:
     # Analyze
     jobs = analyze(files, options)
 
-    # Display analysis
-    print_analysis(jobs)
-
     failed = [j for j in jobs if j.status == "failed"]
     if failed:
         for j in failed:
@@ -510,8 +507,12 @@ def run_pipeline(paths: list[str], options: PipelineOptions) -> None:
     # Interactive audio + subtitle selection (skip in -y mode)
     if not options.non_interactive:
         for job in analyzable:
+            console.print(f"\n[bold]{job.input_path.name}[/bold]")
             _prompt_audio_selection(job)
             _prompt_subtitle_selection(job)
+
+    # Display analysis AFTER selection so it reflects the actual plan
+    print_analysis(analyzable)
 
     # Dry run — stop here
     if options.dry_run:
