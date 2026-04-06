@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
-from mediaporter.probe import ExternalSubtitle, MediaInfo, StreamInfo
+from mediaporter.probe import ExternalSubtitle, MediaInfo
 
-# Subtitle file extensions we scan for
 SUB_EXTENSIONS = {".srt", ".ass", ".ssa"}
 
-# Map various language representations to ISO 639-2/B codes
 _LANG_MAP: dict[str, str] = {
-    # 2-letter ISO 639-1
     "en": "eng", "fr": "fra", "de": "deu", "es": "spa", "it": "ita",
     "pt": "por", "ru": "rus", "ja": "jpn", "ko": "kor", "zh": "zho",
     "ar": "ara", "hi": "hin", "nl": "nld", "pl": "pol", "sv": "swe",
@@ -20,7 +16,6 @@ _LANG_MAP: dict[str, str] = {
     "hu": "hun", "ro": "ron", "bg": "bul", "hr": "hrv", "sr": "srp",
     "sl": "slv", "uk": "ukr", "el": "ell", "tr": "tur", "th": "tha",
     "vi": "vie", "he": "heb", "id": "ind", "ms": "msa",
-    # 3-letter codes (already correct, but normalize)
     "eng": "eng", "fra": "fra", "fre": "fra", "deu": "deu", "ger": "deu",
     "spa": "spa", "ita": "ita", "por": "por", "rus": "rus", "jpn": "jpn",
     "kor": "kor", "zho": "zho", "chi": "zho", "ara": "ara", "hin": "hin",
@@ -30,7 +25,6 @@ _LANG_MAP: dict[str, str] = {
     "hrv": "hrv", "srp": "srp", "slv": "slv", "ukr": "ukr", "ell": "ell",
     "gre": "ell", "tur": "tur", "tha": "tha", "vie": "vie", "heb": "heb",
     "ind": "ind", "msa": "msa", "may": "msa",
-    # Full language names
     "english": "eng", "french": "fra", "german": "deu", "spanish": "spa",
     "italian": "ita", "portuguese": "por", "russian": "rus", "japanese": "jpn",
     "korean": "kor", "chinese": "zho", "arabic": "ara", "hindi": "hin",
@@ -50,21 +44,8 @@ def normalize_language(lang: str | None) -> str:
     return _LANG_MAP.get(lang.lower().strip(), lang.lower().strip())
 
 
-def _extension_to_format(ext: str) -> str:
-    """Map file extension to subtitle format name."""
-    return ext.lstrip(".").lower()
-
-
 def scan_external_subtitles(media_info: MediaInfo) -> MediaInfo:
-    """Scan for external subtitle files matching the video filename.
-
-    Patterns matched:
-        video.srt                → language "und"
-        video.en.srt             → language "eng"
-        video.eng.srt            → language "eng"
-        video.english.srt        → language "eng"
-        video.forced.eng.srt     → language "eng"
-    """
+    """Scan for external subtitle files matching the video filename."""
     video_path = media_info.path
     video_stem = video_path.stem
     parent = video_path.parent
@@ -77,18 +58,13 @@ def scan_external_subtitles(media_info: MediaInfo) -> MediaInfo:
         if not sub_path.is_file():
             continue
 
-        sub_name = sub_path.stem  # e.g., "movie.en" from "movie.en.srt"
-
-        # Must start with the video filename stem
+        sub_name = sub_path.stem
         if not sub_name.startswith(video_stem):
             continue
 
-        # Extract the language suffix after the video stem
-        remainder = sub_name[len(video_stem):]  # e.g., ".en" or ".english" or ""
-
+        remainder = sub_name[len(video_stem):]
         lang = "und"
         if remainder:
-            # Split by dots and find a language token
             parts = [p for p in remainder.split(".") if p and p.lower() != "forced"]
             for part in parts:
                 normalized = normalize_language(part)
@@ -99,7 +75,7 @@ def scan_external_subtitles(media_info: MediaInfo) -> MediaInfo:
         external_subs.append(ExternalSubtitle(
             path=sub_path,
             language=lang,
-            format=_extension_to_format(sub_path.suffix),
+            format=sub_path.suffix.lstrip(".").lower(),
         ))
 
     media_info.external_subtitles = external_subs

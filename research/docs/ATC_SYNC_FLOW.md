@@ -47,10 +47,8 @@ Host                                              Device
  |                                                  |
  |<--- AssetManifest (AssetType=Movie) -------------|
  |                                                  |
- |== AFC: Upload to /Airlock/Media/<AssetID> =======|
- |   (staging path — device reads media type here) |
- |== AFC: Upload to /iTunes_Control/Music/Fxx/ ====|
- |   (final playback path)                         |
+ |== AFC: Upload to /iTunes_Control/Music/Fxx/ =====|
+ |   (single upload — Airlock NOT needed)           |
  |-- FileBegin ------------------------------------>|
  |   { AssetID: "<string>", FileSize: int,          |
  |     TotalSize: int, Dataclass: "Media" }         |
@@ -223,8 +221,8 @@ CIG sidecar: same path + `.cig` (21 bytes computed from device Grappa + plist by
 
 ## File Paths
 
-- **Airlock staging**: `/Airlock/Media/<AssetID>` (device reads media type from here; REQUIRED for correct media_type)
-- **Final media files**: `/iTunes_Control/Music/F{00-49}/{4-char-random}.mp4` (playback path, used in FileComplete)
+- **Final media files**: `/iTunes_Control/Music/F{00-49}/{4-char-random}.mp4` (playback path, used in FileComplete — single upload target)
+- ~~**Airlock staging**~~: `/Airlock/Media/<AssetID>` — NOT needed. `is_movie: True` in plist sets media_type correctly without Airlock.
 - **Sync plists**: `/iTunes_Control/Sync/Media/Sync_{syncNum:08d}.plist` + `.cig`
 - ~~Dataclass plists: `/iTunes_Control/{Dataclass}/Sync/...`~~ — NOT needed, dead end
 
@@ -254,9 +252,8 @@ Video sync to iPad TV app is fully working from Python. Final implementation: `s
 3. ATC: `SendPowerAssertion(conn, true)` ← REQUIRED
 4. ATC: `FinishedSyncingMetadata` with anchor as STRING ← REQUIRED
 5. Device: `AssetManifest` (AssetType=**Movie**, lists files to transfer)
-6. AFC: upload file to **`/Airlock/Media/<AssetID>`** (staging — device processes media type here)
-7. AFC: upload file to `/iTunes_Control/Music/Fxx/name.mp4` (final playback path)
-8. ATC: `FileBegin` with FINAL path (not Airlock path)
+6. AFC: upload file to `/iTunes_Control/Music/Fxx/name.mp4` (single upload — no Airlock needed)
+7. ATC: `FileBegin` with final path
 9. ATC: `FileComplete` with FINAL path
 10. ATC: `FileError` for stale pending assets
 11. Device: `SyncFinished` → entry appears in TV app
@@ -266,8 +263,8 @@ Video sync to iPad TV app is fully working from Python. Final implementation: `s
 Discovered via LLDB AFC tracing (breakpoints on AFCFileRefWrite):
 
 1. **`is_movie: True`** in the item dict — this is THE key field that triggers media_type=2048.
-2. **`/Airlock/Media/<AssetID>`** staging path — device reads and processes media type from files staged here. Without this, media_type stays 0.
-3. **`location.kind: "MPEG-4 video file"`** — file type descriptor in the location dict, sets location_kind_id=4.
+2. **`location.kind: "MPEG-4 video file"`** — file type descriptor in the location dict, sets location_kind_id=4.
+3. ~~`/Airlock/Media/<AssetID>` staging path~~ — NOT needed. Previously thought essential, but confirmed 2026-04-06 that `is_movie: True` alone sets media_type correctly. Single upload to final path works.
 
 ### DB Entries Created Successfully
 
@@ -287,7 +284,7 @@ Entries appear in TV app immediately.
 
 ### Previous Incorrect Assumptions (Corrected)
 
-- ~~media_type is NOT settable via sync plists~~ — it IS settable with `is_movie: True` + Airlock staging
+- ~~media_type is NOT settable via sync plists~~ — it IS settable with `is_movie: True` + `location.kind` (Airlock NOT needed)
 - ~~media_type/media_kind are ONLY set by framework's internal file transfer~~ — the sync plist approach works when using the correct fields
 - media_type is NOT 8192 (that was Finder's "Home Video" value)
 - media_kind is NOT 1024 (that was Finder's value)

@@ -26,7 +26,6 @@ def load_config() -> Config:
     """Load configuration from file and environment."""
     config = Config()
 
-    # Try loading TOML config
     if CONFIG_FILE.exists():
         try:
             import tomllib
@@ -52,8 +51,28 @@ def load_config() -> Config:
         config.burn_bitmap_subs = subs.get("burn_bitmap", config.burn_bitmap_subs)
         config.preferred_languages = subs.get("preferred_languages", config.preferred_languages)
 
-    # Environment overrides
+    # Load .env file from project directory (walk up to find it)
+    _load_dotenv()
+
     if env_key := os.environ.get("TMDB_API_KEY"):
         config.tmdb_api_key = env_key
 
     return config
+
+
+def _load_dotenv() -> None:
+    """Load .env file from current or parent directories into os.environ."""
+    cwd = Path.cwd()
+    for directory in [cwd, *cwd.parents]:
+        env_file = directory / ".env"
+        if env_file.is_file():
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip("'\"")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+            break

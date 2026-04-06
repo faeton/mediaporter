@@ -298,18 +298,12 @@ for i in range(20):
 
 If `AssetType` is `Music` instead of `Movie`, the `is_movie: True` field is missing from the plist.
 
-### Step 7: Upload File to Airlock + Final Path
+### Step 7: Upload File to Final Path
 
-Write the video file to TWO locations via AFC:
+Upload the video file to a single location via AFC:
 
 ```python
-# 1. STAGING PATH — device processes media type from here
-#    /Airlock/Media/<AssetID>
-await afc.makedirs('/Airlock/Media')
-await afc.makedirs('/Airlock/Media/Artwork')
-await afc.set_file_contents(f'/Airlock/Media/{asset_id}', video_bytes)
-
-# 2. FINAL PATH — where the file lives for playback
+# FINAL PATH — where the file lives for playback
 #    /iTunes_Control/Music/F{00-49}/{4_RANDOM_CHARS}.mp4
 slot = f'F{random.randint(0,49):02d}'
 filename = random_4_uppercase_chars() + '.mp4'
@@ -318,13 +312,9 @@ await afc.makedirs(f'/iTunes_Control/Music/{slot}')
 await afc.set_file_contents(final_path, video_bytes)
 ```
 
-**The `/Airlock/Media/<AssetID>` path is critical.** This is the staging directory that `medialibraryd` monitors. When a file is placed here during an ATC sync, the device:
-1. Reads the file content
-2. Determines media type (sets `media_type=2048` for video)
-3. Creates the DB entry with correct metadata
-4. Consumes (deletes) the Airlock file
+**Airlock staging (`/Airlock/Media/<AssetID>`) is NOT needed.** Previously believed essential for setting `media_type=2048`, but confirmed 2026-04-06 that `is_movie: True` + `location.kind` in the sync plist alone set the correct media type. Single upload to the final path is sufficient.
 
-Without the Airlock write, entries are created with `media_type=0` (invisible in TV app).
+**IMPORTANT for large files:** Steps 5-6 (MetadataSyncFinished → AssetManifest) must happen BEFORE this upload. If you upload first and then send MetadataSyncFinished, the ATC session will time out for multi-GB files. Also, the device sends `Ping` messages during long uploads — respond with `Pong` to keep the session alive.
 
 ### Step 8: Send FileBegin + FileComplete
 
@@ -476,9 +466,11 @@ These approaches were tested and do NOT work:
 | `DYLD_INSERT_LIBRARIES` injection | Blocked by library validation for Apple binaries |
 | Grappa struct patch (offset 0x5C) | Triggers CoreFP but creates entries with empty location |
 | Direct `MediaLibrary.sqlitedb` modification | `medialibraryd` reverts changes within seconds |
-| Setting `media_kind`/`media_type` via sync plist fields | Device ignores ALL field placements (tested exhaustively) |
+| ~~Setting `media_kind`/`media_type` via sync plist fields~~ | **CORRECTED**: `is_movie: True` + `location.kind` DO work. Previous testing missed these specific fields. |
 | Raw ATC connection (manual protocol without ATHostConnection) | Device ignores `MetadataSyncFinished` (connection state not managed) |
-| Writing file only to `/iTunes_Control/Music/Fxx/` (without Airlock) | Creates entry with `media_type=0` (invisible) |
+| ~~Writing file only to `/iTunes_Control/Music/Fxx/` (without Airlock)~~ | **CORRECTED**: Single upload WITHOUT Airlock works when `is_movie: True` is in the plist. Airlock was a red herring. |
+| AFC hardlink/symlink between Airlock and iTunes_Control | `AFCLinkPath` returns error 15 — cross-directory links not allowed on iOS |
+| Uploading large files before MetadataSyncFinished | ATC session times out during multi-GB uploads. Must send MetadataSyncFinished first. |
 
 ---
 
@@ -488,10 +480,9 @@ These approaches were tested and do NOT work:
 |------|---------|
 | `/iTunes_Control/Sync/Media/Sync_XXXX.plist` | Sync operation plist (consumed by device) |
 | `/iTunes_Control/Sync/Media/Sync_XXXX.plist.cig` | CIG signature for plist |
-| `/Airlock/Media/<AssetID>` | Staging area for file transfer (consumed by device) |
-| `/Airlock/Media/Artwork/` | Artwork staging (create empty dir) |
-| `/iTunes_Control/Music/F{00-49}/XXXX.mp4` | Final media file location |
+| `/iTunes_Control/Music/F{00-49}/XXXX.mp4` | Final media file location (single upload target) |
 | `/iTunes_Control/iTunes/MediaLibrary.sqlitedb` | Media library database |
+| `/Airlock/Media/<AssetID>` | ~~Staging area~~ NOT needed — `is_movie: True` in plist suffices |
 
 ---
 

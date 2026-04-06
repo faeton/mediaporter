@@ -15,7 +15,7 @@ class StreamInfo:
     """Information about a single stream in a media file."""
     index: int
     codec_type: str  # video, audio, subtitle
-    codec_name: str  # h264, hevc, aac, ac3, subrip, hdmv_pgs_subtitle, etc.
+    codec_name: str
     profile: str | None = None
     level: int | None = None
     width: int | None = None
@@ -43,7 +43,7 @@ class ExternalSubtitle:
 class MediaInfo:
     """Complete information about a media file."""
     path: Path
-    format_name: str  # matroska, avi, mov
+    format_name: str
     duration: float  # seconds
     bit_rate: int | None = None
     video_streams: list[StreamInfo] = field(default_factory=list)
@@ -114,7 +114,6 @@ def probe_file(path: str | Path) -> MediaInfo:
     for raw in streams:
         stream = _parse_stream(raw)
         if stream.codec_type == "video":
-            # Skip attached pictures (album art in MKV)
             if raw.get("disposition", {}).get("attached_pic", 0):
                 continue
             video_streams.append(stream)

@@ -1,36 +1,45 @@
 # mediaporter
 
-Transfer video files to iPhone and iPad over USB — no iTunes, no Finder, no cloud. Videos appear in the native Apple TV app with full metadata.
+Transfer video files to iPhone and iPad over USB — no iTunes, no Finder, no cloud. Videos appear in the native Apple TV app with full metadata, artwork, and playback support.
 
 An open-source alternative to iTunes/Finder video sync. Push any video from your Mac to your iOS device with automatic transcoding, metadata lookup, and native TV app integration.
 
-**Keywords:** transfer video to iPad, send movie to iPhone without iTunes, sideload video iOS, copy video to iPad over USB, iTunes alternative for video, push video to Apple TV app, video to iPhone CLI, ffmpeg iPad transfer, iOS video sync tool, transfer MKV to iPad, HEVC to iPhone
-
 ## What it does
 
-mediaporter lets you send video files to your iPad or iPhone and have them appear directly in the native TV app — no iTunes, no Finder sync, no cloud services. It handles the entire pipeline:
+```bash
+mediaporter movie.mkv
+```
 
-1. **Probe** — analyzes your video file (codec, resolution, duration)
-2. **Transcode** — converts to Apple-compatible format if needed (HEVC/H.264, via ffmpeg)
-3. **Tag** — sets correct metadata for TV app recognition
-4. **Transfer** — syncs to the device over USB using the native ATC protocol
+That's it. mediaporter handles the entire pipeline:
 
-Videos appear in the TV app with correct metadata, artwork, and playback support — the same result as commercial sync tools, but free and open source.
+1. **Analyze** — probes video streams, checks iPad codec compatibility
+2. **Metadata** — looks up title, year, and poster art from TMDb
+3. **Transcode** — converts to Apple-compatible format if needed (HEVC/H.264 via ffmpeg)
+4. **Tag** — writes MP4 metadata atoms (title, artwork, HD flag, stik type)
+5. **Sync** — transfers to device over USB using native ATC protocol
+
+Videos appear in the TV app immediately — movies in the Movies tab, TV episodes grouped by show and season.
 
 ## Features
 
-- **Any format in, TV app out** — MKV, AVI, MP4, HEVC, H.264, multi-audio, subtitles — mediaporter handles it all
-- **Smart transcoding** — only re-encodes what's needed; copies compatible streams as-is
-- **Hardware acceleration** — uses Apple VideoToolbox for fast HEVC/H.264 encoding on Mac
-- **Movies and TV shows** — proper metadata, season/episode info, show grouping in the TV app
+- **Any format in, TV app out** — MKV, AVI, MP4, HEVC, H.264, VP9, multi-audio, subtitles
+- **Smart transcoding** — only re-encodes incompatible streams; copies the rest as-is
+- **Hardware acceleration** — Apple VideoToolbox for fast HEVC encoding on Mac
+- **Movies and TV shows** — automatic detection, TMDb metadata, season/episode grouping
+- **Poster artwork** — downloaded from TMDb and displayed in the TV app; auto-generated fallback posters when no match is found
+- **Interactive audio selection** — choose which dub/translation per language when multiple exist
+- **Interactive subtitle selection** — checkbox picker for which subtitle tracks to embed
+- **Interactive metadata correction** — manually enter title/year when filenames are unrecognizable
+- **Multiple audio & subtitle tracks** — iPad audio language switcher and CC subtitle support
+- **Mixed codec normalization** — automatically normalizes audio codecs for iPad track switcher compatibility
 - **Direct USB transfer** — no Wi-Fi, no cloud, no Apple ID required
 - **No iTunes or Finder needed** — uses the native ATC sync protocol directly
-- **CLI-first** — scriptable, pipeable, automate your media library
-- **Open source** — GPL v3, built on publicly documented protocol research
+- **Parallel transcoding** — process multiple files simultaneously with `-j N`
+- **CLI-first** — scriptable, no GUI needed
 
 ## Requirements
 
-- macOS (uses Apple frameworks via ctypes)
+- macOS (uses Apple private frameworks via ctypes)
 - Python 3.11+
 - ffmpeg (`brew install ffmpeg`)
 - iOS device connected via USB
@@ -42,46 +51,88 @@ git clone https://github.com/user/mediaporter.git
 cd mediaporter
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
-```
-
-For iOS 17+, the tunnel service needs to be started once:
-
-```bash
-sudo pymobiledevice3 remote start-tunnel
+pip install -e .
 ```
 
 Then:
 
 ```bash
+# Transfer a movie
+mediaporter movie.mkv
+
+# Transfer multiple files with parallel transcoding
+mediaporter movie1.mkv movie2.mkv -j 2
+
+# Analyze without transferring
+mediaporter probe movie.mkv
+
 # Check connected devices
 mediaporter devices
 
-# Transfer a video
-mediaporter send movie.mp4
+# Save locally without syncing
+mediaporter movie.mkv -o output.m4v
+
+# Skip interactive prompts
+mediaporter movie.mkv -y
+
+# Dry run (show plan, don't execute)
+mediaporter movie.mkv --dry-run
+```
+
+## Usage
+
+```
+mediaporter [OPTIONS] [FILES]...
+
+Options:
+  -y, --yes          Skip confirmation prompts
+  -q, --quality      Encoding quality: fast, balanced (default), quality
+  -j, --jobs N       Parallel transcode workers
+  --hw / --no-hw     VideoToolbox hardware encoding (default: on)
+  --no-metadata      Skip TMDb metadata lookup
+  --tmdb-key KEY     TMDb API key (or set TMDB_API_KEY env var)
+  --dry-run          Show plan without executing
+  -o, --output PATH  Save M4V locally instead of syncing to device
+  -v, --verbose      Verbose output
+  --version          Show version
+
+Commands:
+  probe    Analyze a video file's streams and iPad compatibility
+  devices  List connected iOS devices
 ```
 
 ## How it works
 
-mediaporter communicates with iOS devices using the ATC (AirTrafficControl) protocol — the same native protocol used by Finder and commercial tools for media sync. The implementation was developed through independent interoperability research, documented extensively in the `docs/` directory.
+mediaporter communicates with iOS devices using the ATC (AirTrafficControl) protocol — the same native protocol used by Finder for media sync. Key technical details:
 
-The sync flow:
-- Establishes an authenticated ATC session over USB
-- Writes sync metadata (binary plists with CIG signatures) to the device
-- Stages media files via AFC (Apple File Conduit)
-- Completes the transfer with proper asset registration
+- **ATC handshake** with Grappa authentication over USB
+- **Binary plist** sync metadata with CIG cryptographic signatures
+- **AFC** (Apple File Conduit) for file upload to device storage
+- **Asset registration** via FileBegin/FileComplete protocol messages
+- **Ping/Pong keepalive** for large file transfers
 
-The result is a native media library entry — videos appear in the TV app with correct `media_type`, artwork support, and full playback functionality.
+The result is a native media library entry — videos appear in the TV app with correct `media_type=2048`, artwork, and full playback functionality. No jailbreak, no third-party apps on the device.
+
+## Interactive workflow
+
+When you run `mediaporter` on a file with multiple audio or subtitle tracks, it offers interactive selection:
+
+**Audio selection** — when multiple dubs exist for the same language (e.g., three Russian translations), you pick one per language with arrow keys. Single-track languages are auto-included.
+
+**Subtitle selection** — checkbox picker showing all embeddable subtitle tracks (internal + external). Toggle with space, confirm with enter.
+
+**Metadata correction** — if the filename can't be matched on TMDb (e.g., `xz-puzzl3.mkv`), you're prompted to enter the correct title and year. If still no poster is found, a fallback poster is auto-generated.
 
 ## Research and documentation
 
-This project includes extensive protocol research and reverse engineering documentation in the `research/` directory:
+This project includes extensive protocol research and reverse engineering documentation:
 
 | Document | Description |
 |----------|-------------|
-| [ATC Protocol](research/docs/ATC_PROTOCOL.md) | Wire format, message flow, observed commands |
-| [ATC Sync Flow](research/docs/ATC_SYNC_FLOW.md) | Complete reverse-engineered sync flow |
+| [ATC Sync Flow](research/docs/ATC_SYNC_FLOW.md) | Complete reverse-engineered sync flow with Grappa, CIG, and plist format |
 | [Implementation Guide](research/docs/IMPLEMENTATION_GUIDE.md) | Full specification with code examples |
+| [ATC Protocol](research/docs/ATC_PROTOCOL.md) | Wire format, message flow, observed commands |
+| [Trace Analysis](research/docs/TRACE_ANALYSIS.md) | Protocol trace analysis from LLDB sessions |
 | [Media Library DB](research/docs/MEDIA_LIBRARY_DB.md) | MediaLibrary.sqlitedb schema analysis |
 | [Architecture](research/docs/ARCHITECTURE.md) | Module overview and technical decisions |
 
@@ -89,7 +140,7 @@ This project includes extensive protocol research and reverse engineering docume
 
 This project is the result of independent interoperability research into Apple's ATC media sync protocol, conducted under DMCA Section 1201(f) for the purpose of enabling users to transfer their own media to their own devices.
 
-Certain protocol constants (authentication handshake, signature engine) were derived from publicly available open-source implementations of the same protocol on GitHub. See the `docs/` directory for full research methodology, protocol analysis, and references to prior public work.
+Certain protocol constants (authentication handshake, signature engine) were derived from publicly available open-source implementations of the same protocol on GitHub. See the research documentation for full methodology, protocol analysis, and references to prior public work.
 
 This software is intended exclusively for legitimate personal use: transferring media you own to devices you own.
 

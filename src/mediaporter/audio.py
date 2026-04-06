@@ -13,9 +13,9 @@ class AudioAction:
     """Transcode decision for a single audio track."""
     stream: StreamInfo
     action: str  # "copy" or "transcode"
-    target_codec: str | None = None  # e.g., "aac"
+    target_codec: str | None = None
     target_channels: int | None = None
-    target_bitrate: str | None = None  # e.g., "384k"
+    target_bitrate: str | None = None
 
 
 def classify_audio_stream(stream: StreamInfo) -> AudioAction:
@@ -25,11 +25,9 @@ def classify_audio_stream(stream: StreamInfo) -> AudioAction:
     if codec in COMPATIBLE_AUDIO_CODECS:
         return AudioAction(stream=stream, action="copy")
 
-    # Needs transcoding to AAC
     channels = stream.channels or 2
 
     if channels >= 6:
-        # Surround → 5.1 AAC
         return AudioAction(
             stream=stream,
             action="transcode",
@@ -38,7 +36,6 @@ def classify_audio_stream(stream: StreamInfo) -> AudioAction:
             target_bitrate="384k",
         )
     else:
-        # Stereo or mono → stereo AAC
         return AudioAction(
             stream=stream,
             action="transcode",

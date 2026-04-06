@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from mediaporter.audio import AudioAction, classify_all_audio
-from mediaporter.compat import TranscodeDecision, TEXT_SUBTITLE_CODECS
+from mediaporter.compat import TEXT_SUBTITLE_CODECS, TranscodeDecision
 from mediaporter.exceptions import TranscodeError
 from mediaporter.probe import MediaInfo
 
@@ -19,7 +18,7 @@ class QualityPreset:
     """Encoding quality settings."""
     crf: int
     preset: str
-    vt_quality: int  # VideoToolbox quality (0-100, lower=better)
+    vt_quality: int
 
 
 QUALITY_PRESETS = {
@@ -50,6 +49,9 @@ def build_ffmpeg_command(
     hw_accel: bool = True,
     subtitle_mode: str = "embed",
     burn_bitmap_subs: bool = False,
+    selected_audio: list[int] | None = None,
+    selected_subtitles: list[int] | None = None,
+    selected_external_subs: list[int] | None = None,
 ) -> list[str]:
     """Build the complete ffmpeg command for transcoding."""
     preset = QUALITY_PRESETS[quality]
@@ -57,48 +59,48 @@ def build_ffmpeg_command(
 
     cmd: list[str] = ["ffmpeg", "-hide_banner", "-y"]
 
-    # Input file
     cmd.extend(["-i", str(media_info.path)])
 
-    # External subtitle inputs
+    # Track which external subs are included (for correct ffmpeg input indices)
+    ext_sub_input_map: dict[int, int] = {}  # ext_idx -> ffmpeg_input_idx
     if subtitle_mode == "embed":
-        for ext_sub in media_info.external_subtitles:
+        next_input = 1
+        for ext_idx, ext_sub in enumerate(media_info.external_subtitles):
+            if selected_external_subs is not None and ext_idx not in selected_external_subs:
+                continue
             cmd.extend(["-i", str(ext_sub.path)])
+            ext_sub_input_map[ext_idx] = next_input
+            next_input += 1
 
-    # Stream mapping
-    # Video: map first video stream
     if media_info.video_streams:
         cmd.extend(["-map", "0:v:0"])
 
-    # Audio: map all audio streams
-    for i, _ in enumerate(media_info.audio_streams):
+    # Audio: map selected tracks (or all if no selection)
+    audio_indices = selected_audio if selected_audio is not None else list(range(len(media_info.audio_streams)))
+    for i in audio_indices:
         cmd.extend(["-map", f"0:a:{i}"])
 
-    # Subtitles: map compatible subtitle streams from source
     sub_output_idx = 0
     if subtitle_mode == "embed":
         for i, stream in enumerate(media_info.subtitle_streams):
+            if selected_subtitles is not None and i not in selected_subtitles:
+                continue
             action = decision.stream_actions.get(stream.index, "skip")
             if action in ("copy", "convert_to_mov_text"):
                 cmd.extend(["-map", f"0:s:{i}"])
                 sub_output_idx += 1
-            elif action == "skip" and burn_bitmap_subs:
-                pass  # handled via complex filter below
 
-        # Map external subtitle files
-        for ext_idx, ext_sub in enumerate(media_info.external_subtitles):
-            input_idx = 1 + ext_idx  # external subs start at input 1
+        for ext_idx in ext_sub_input_map:
+            input_idx = ext_sub_input_map[ext_idx]
             cmd.extend(["-map", f"{input_idx}:0"])
             sub_output_idx += 1
 
-    # Video codec
     if media_info.video_streams:
         v_stream = media_info.video_streams[0]
         v_action = decision.stream_actions.get(v_stream.index, "transcode")
 
         if v_action == "copy":
             cmd.extend(["-c:v", "copy"])
-            # HEVC in MP4 requires hvc1 tag even when copying
             if v_stream.codec_name.lower() in ("hevc", "h265"):
                 cmd.extend(["-tag:v", "hvc1"])
         elif use_vt:
@@ -116,57 +118,70 @@ def build_ffmpeg_command(
                 "-pix_fmt", "yuv420p",
             ])
 
-    # Audio codecs (per-track)
-    for i, action in enumerate(audio_actions):
-        if action.action == "copy":
-            cmd.extend([f"-c:a:{i}", "copy"])
+    # Audio codecs (per output track)
+    # If multiple audio tracks have mixed codecs, normalize all to AAC
+    # (iPad won't show audio switcher for mixed codec tracks)
+    selected_actions = [audio_actions[i] for i in audio_indices]
+    selected_streams = [media_info.audio_streams[i] for i in audio_indices]
+    codecs_used = {s.codec_name.lower() for s in selected_streams}
+    force_aac = len(audio_indices) > 1 and len(codecs_used) > 1
+
+    for out_idx, (action, stream) in enumerate(zip(selected_actions, selected_streams)):
+        if force_aac:
+            # Normalize all tracks to AAC for iPad compatibility
+            cmd.extend([f"-c:a:{out_idx}", "aac"])
+            channels = stream.channels or 2
+            if channels >= 6:
+                cmd.extend([f"-b:a:{out_idx}", "384k"])
+                cmd.extend([f"-ac:a:{out_idx}", "6"])
+            else:
+                cmd.extend([f"-b:a:{out_idx}", "256k"])
+                cmd.extend([f"-ac:a:{out_idx}", str(channels)])
+        elif action.action == "copy":
+            cmd.extend([f"-c:a:{out_idx}", "copy"])
         else:
-            cmd.extend([f"-c:a:{i}", "aac"])
+            cmd.extend([f"-c:a:{out_idx}", "aac"])
             if action.target_bitrate:
-                cmd.extend([f"-b:a:{i}", action.target_bitrate])
+                cmd.extend([f"-b:a:{out_idx}", action.target_bitrate])
             if action.target_channels:
-                cmd.extend([f"-ac:a:{i}", str(action.target_channels)])
+                cmd.extend([f"-ac:a:{out_idx}", str(action.target_channels)])
 
-    # Audio metadata (language + title)
-    for i, stream in enumerate(media_info.audio_streams):
+    # Audio metadata (per output track)
+    for out_idx, src_idx in enumerate(audio_indices):
+        stream = media_info.audio_streams[src_idx]
         if stream.language:
-            cmd.extend([f"-metadata:s:a:{i}", f"language={stream.language}"])
+            cmd.extend([f"-metadata:s:a:{out_idx}", f"language={stream.language}"])
         if stream.title:
-            cmd.extend([f"-metadata:s:a:{i}", f"title={stream.title}"])
+            cmd.extend([f"-metadata:s:a:{out_idx}", f"handler_name={stream.title}"])
         elif stream.channels and stream.language:
-            # Auto-generate title from language and channels
             ch_label = f"{stream.channels}.0" if stream.channels <= 2 else f"{stream.channels - 1}.1"
-            cmd.extend([f"-metadata:s:a:{i}", f"title={ch_label}"])
+            cmd.extend([f"-metadata:s:a:{out_idx}", f"handler_name={ch_label}"])
 
-    # Subtitle codec
     if subtitle_mode == "embed":
         cmd.extend(["-c:s", "mov_text"])
 
-        # Subtitle metadata (language)
         out_sub_idx = 0
-        for stream in media_info.subtitle_streams:
+        for i, stream in enumerate(media_info.subtitle_streams):
+            if selected_subtitles is not None and i not in selected_subtitles:
+                continue
             action = decision.stream_actions.get(stream.index, "skip")
             if action in ("copy", "convert_to_mov_text"):
                 if stream.language:
                     cmd.extend([f"-metadata:s:s:{out_sub_idx}", f"language={stream.language}"])
                 if stream.title:
-                    cmd.extend([f"-metadata:s:s:{out_sub_idx}", f"title={stream.title}"])
+                    cmd.extend([f"-metadata:s:s:{out_sub_idx}", f"handler_name={stream.title}"])
                 out_sub_idx += 1
 
-        for ext_sub in media_info.external_subtitles:
+        for ext_idx in ext_sub_input_map:
+            ext_sub = media_info.external_subtitles[ext_idx]
             cmd.extend([f"-metadata:s:s:{out_sub_idx}", f"language={ext_sub.language}"])
             out_sub_idx += 1
 
     elif subtitle_mode == "skip":
         cmd.extend(["-sn"])
 
-    # MP4 optimizations
     cmd.extend(["-movflags", "+faststart"])
-
-    # Force mp4 format (m4v extension triggers 'ipod' muxer which doesn't support HEVC)
     cmd.extend(["-f", "mp4"])
-
-    # Output
     cmd.append(str(output_path))
 
     return cmd
@@ -181,6 +196,9 @@ def transcode(
     subtitle_mode: str = "embed",
     burn_bitmap_subs: bool = False,
     progress_callback: Callable[[float], None] | None = None,
+    selected_audio: list[int] | None = None,
+    selected_subtitles: list[int] | None = None,
+    selected_external_subs: list[int] | None = None,
 ) -> Path:
     """Transcode a media file to iPad-compatible M4V."""
     audio_actions = classify_all_audio(media_info.audio_streams)
@@ -194,9 +212,11 @@ def transcode(
         hw_accel=hw_accel,
         subtitle_mode=subtitle_mode,
         burn_bitmap_subs=burn_bitmap_subs,
+        selected_audio=selected_audio,
+        selected_subtitles=selected_subtitles,
+        selected_external_subs=selected_external_subs,
     )
 
-    # Add progress reporting flag
     cmd.insert(1, "-progress")
     cmd.insert(2, "pipe:1")
 
@@ -212,7 +232,6 @@ def transcode(
 
     duration = media_info.duration or 1.0
 
-    # Parse progress from ffmpeg
     if process.stdout:
         for line in process.stdout:
             line = line.strip()

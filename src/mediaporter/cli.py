@@ -1,129 +1,255 @@
 """CLI interface for mediaporter."""
 
+from __future__ import annotations
+
+import sys
+
 import click
-from rich.console import Console
 
 from mediaporter import __version__
+from mediaporter.progress import console
 
-console = Console()
+
+class DefaultSyncGroup(click.Group):
+    """Routes unknown args to 'sync' command automatically.
+
+    mediaporter movie.mkv        → mediaporter sync movie.mkv
+    mediaporter probe movie.mkv  → probe subcommand
+    mediaporter devices          → devices subcommand
+    mediaporter                  → mediaporter sync (interactive)
+    """
+
+    def parse_args(self, ctx, args):
+        # Let --help and --version through to the group
+        if not args or "--help" in args or "--version" in args:
+            return super().parse_args(ctx, args)
+
+        # If first non-option arg is a known subcommand, let Click handle it
+        for arg in args:
+            if arg.startswith("-"):
+                continue
+            if arg in self.commands:
+                return super().parse_args(ctx, args)
+            # First positional is not a subcommand — prepend "sync"
+            args = ["sync"] + list(args)
+            return super().parse_args(ctx, args)
+
+        # Only options, no positional — default to "sync" (interactive mode)
+        args = ["sync"] + list(args)
+        return super().parse_args(ctx, args)
 
 
-@click.group()
+@click.group(cls=DefaultSyncGroup)
 @click.version_option(version=__version__, prog_name="mediaporter")
-@click.option("-v", "--verbose", is_flag=True, help="Increase verbosity.")
-@click.pass_context
-def main(ctx: click.Context, verbose: bool) -> None:
-    """Transfer video files to iOS devices with smart transcoding."""
-    ctx.ensure_object(dict)
-    ctx.obj["verbose"] = verbose
+def main():
+    """Transfer videos to iPad/iPhone TV app.
+
+    \b
+    Examples:
+      mediaporter movie.mkv                Transcode and sync to device
+      mediaporter *.mkv -j4 -y             Parallel transcode, skip confirm
+      mediaporter                           Interactive drag-and-drop mode
+      mediaporter probe movie.mkv           Analyze file compatibility
+      mediaporter devices                   List connected iOS devices
+    """
 
 
 @main.command()
-@click.argument("input_paths", nargs=-1, required=True, type=click.Path(exists=True))
-@click.option("-t", "--type", "media_type", type=click.Choice(["movie", "tv"]), default=None,
-              help="Force media type (auto-detected from filename).")
+@click.argument("files", nargs=-1, type=click.Path())
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation.")
 @click.option("-q", "--quality", type=click.Choice(["fast", "balanced", "quality"]),
               default="balanced", help="Encoding quality preset.")
+@click.option("-j", "--jobs", type=int, default=None, help="Parallel transcode workers.")
 @click.option("--hw/--no-hw", default=True, help="VideoToolbox hardware encoding.")
-@click.option("--subtitle-mode", type=click.Choice(["embed", "burn", "skip"]),
-              default="embed", help="How to handle subtitles.")
-@click.option("--burn-bitmap-subs", is_flag=True, help="Burn bitmap subs (PGS/VobSub) into video.")
 @click.option("--no-metadata", is_flag=True, help="Skip TMDb metadata lookup.")
 @click.option("--tmdb-key", envvar="TMDB_API_KEY", help="TMDb API key.")
-@click.option("--show", "show_name", help="Override TV show name.")
-@click.option("--season", type=int, help="Override season number.")
-@click.option("--episode", type=int, help="Override episode number.")
-@click.option("--keep", is_flag=True, help="Keep transcoded M4V after transfer.")
 @click.option("--dry-run", is_flag=True, help="Show plan without executing.")
-@click.option("-o", "--output", type=click.Path(), help="Save M4V locally instead of transferring.")
-@click.option("--non-interactive", is_flag=True, help="No prompts, auto-select first match.")
-@click.pass_context
-def push(ctx: click.Context, input_paths: tuple[str, ...], media_type: str | None,
-         quality: str, hw: bool, subtitle_mode: str, burn_bitmap_subs: bool,
-         no_metadata: bool, tmdb_key: str | None, show_name: str | None,
-         season: int | None, episode: int | None, keep: bool, dry_run: bool,
-         output: str | None, non_interactive: bool) -> None:
-    """Transcode and transfer video files to a connected iOS device."""
-    from mediaporter.pipeline import run_pipeline, PipelineOptions
+@click.option("-o", "--output", type=click.Path(), help="Save M4V locally instead of syncing.")
+@click.option("-v", "--verbose", is_flag=True, help="Verbose output.")
+def sync(files, yes, quality, jobs, hw, no_metadata, tmdb_key, dry_run, output, verbose):
+    """Transcode and transfer video files to device."""
+    from mediaporter.config import load_config
+    from mediaporter.pipeline import PipelineOptions, run_pipeline
+    from mediaporter.progress import prompt_for_files
+
+    config = load_config()
+
+    file_list = list(files) if files else []
+    if not file_list:
+        file_list = prompt_for_files()
+        if not file_list:
+            raise click.Abort()
 
     options = PipelineOptions(
-        media_type=media_type,
         quality=quality,
         hw_accel=hw,
-        subtitle_mode=subtitle_mode,
-        burn_bitmap_subs=burn_bitmap_subs,
         fetch_metadata=not no_metadata,
-        tmdb_key=tmdb_key,
-        show_override=show_name,
-        season_override=season,
-        episode_override=episode,
-        keep_files=keep,
+        tmdb_key=tmdb_key or config.tmdb_api_key,
         dry_run=dry_run,
         output_path=output,
-        non_interactive=non_interactive,
-        verbose=ctx.obj["verbose"],
+        non_interactive=yes,
+        verbose=verbose,
+        jobs=jobs,
+        subtitle_mode=config.subtitle_mode,
+        burn_bitmap_subs=config.burn_bitmap_subs,
+        keep_files=config.keep_files,
     )
 
-    for path in input_paths:
-        run_pipeline(path, options)
+    run_pipeline(file_list, options)
 
 
 @main.command()
 @click.argument("file", type=click.Path(exists=True))
-def probe(file: str) -> None:
-    """Analyze video file streams and iPad compatibility."""
+@click.option("--tmdb-key", envvar="TMDB_API_KEY", help="TMDb API key for metadata lookup.")
+def probe(file, tmdb_key):
+    """Analyze video file: streams, compatibility, metadata, cover art."""
+    from pathlib import Path
+
+    from mediaporter.audio import classify_all_audio
+    from mediaporter.compat import evaluate_compatibility, get_hd_flag
+    from mediaporter.metadata import lookup_metadata, parse_filename
     from mediaporter.probe import probe_file
-    from mediaporter.compat import evaluate_compatibility
     from mediaporter.subtitles import scan_external_subtitles
 
     media_info = probe_file(file)
     media_info = scan_external_subtitles(media_info)
     decision = evaluate_compatibility(media_info)
+    audio_actions = classify_all_audio(media_info.audio_streams)
 
-    console.print(f"\n[bold]{media_info.path.name}[/bold]")
-    console.print(f"  Container: {media_info.format_name}  Duration: {media_info.duration:.1f}s\n")
+    file_size_mb = Path(file).stat().st_size / 1048576
+    mins, secs = divmod(int(media_info.duration), 60)
+    hours, mins = divmod(mins, 60)
+    dur_str = f"{hours}:{mins:02d}:{secs:02d}" if hours else f"{mins}:{secs:02d}"
+    console.print(f"\n[bold]{media_info.path.name}[/bold]  ({file_size_mb:.1f} MB, {dur_str})")
+    console.print(f"  Container: {media_info.format_name}")
+    if media_info.bit_rate:
+        console.print(f"  Bitrate: {media_info.bit_rate // 1000} kbps")
 
+    console.print()
     for s in media_info.video_streams:
-        action = "copy" if decision.stream_actions.get(s.index) == "copy" else "[red]transcode[/red]"
-        console.print(f"  Video #{s.index}: {s.codec_name} {s.width}x{s.height} → {action}")
+        action = decision.stream_actions.get(s.index, "?")
+        color = "green" if action == "copy" else "red"
+        hd = get_hd_flag(s.width, s.height)
+        hd_label = {0: "SD", 1: "720p HD", 2: "1080p+ HD"}.get(hd, "")
+        profile_str = f" ({s.profile})" if s.profile else ""
+        console.print(
+            f"  [bold]Video[/bold] #{s.index}: {s.codec_name}{profile_str} "
+            f"{s.width}x{s.height} {hd_label} [{color}]{action}[/{color}]"
+        )
 
-    for s in media_info.audio_streams:
-        action = "copy" if decision.stream_actions.get(s.index) == "copy" else "[yellow]transcode→AAC[/yellow]"
+    for i, (s, aa) in enumerate(zip(media_info.audio_streams, audio_actions)):
+        action = aa.action
+        color = "green" if action == "copy" else "yellow"
         lang = s.language or "und"
+        ch_label = f"{s.channels}ch" if s.channels else ""
         title = f' "{s.title}"' if s.title else ""
-        console.print(f"  Audio #{s.index}: {s.codec_name} {s.channels}ch [{lang}]{title} → {action}")
+        detail = ""
+        if action == "transcode":
+            detail = f" -> AAC {aa.target_channels}ch {aa.target_bitrate}"
+        console.print(
+            f"  [bold]Audio[/bold] #{s.index}: {s.codec_name} {ch_label} [{lang}]{title} "
+            f"[{color}]{action}{detail}[/{color}]"
+        )
 
-    for s in media_info.subtitle_streams:
-        action = decision.stream_actions.get(s.index, "skip")
-        lang = s.language or "und"
-        console.print(f"  Sub   #{s.index}: {s.codec_name} [{lang}] → {action}")
+    if media_info.subtitle_streams:
+        for s in media_info.subtitle_streams:
+            action = decision.stream_actions.get(s.index, "skip")
+            lang = s.language or "und"
+            title = f' "{s.title}"' if s.title else ""
+            color = "green" if action in ("copy", "convert_to_mov_text") else "dim"
+            console.print(
+                f"  [bold]Sub[/bold]   #{s.index}: {s.codec_name} [{lang}]{title} [{color}]{action}[/{color}]"
+            )
 
-    for ext_sub in media_info.external_subtitles:
-        console.print(f"  Sub   [ext]: {ext_sub.path.name} [{ext_sub.language}] → embed")
+    if media_info.external_subtitles:
+        for ext_sub in media_info.external_subtitles:
+            console.print(
+                f"  [bold]Sub[/bold]   [ext]: {ext_sub.path.name} [{ext_sub.language}] [green]embed[/green]"
+            )
 
-    console.print(f"\n  Needs transcode: {'[red]yes[/red]' if decision.needs_transcode else '[green]no (remux only)[/green]'}")
+    if decision.needs_transcode:
+        console.print(f"\n  Transcode: [red]yes (video or audio needs re-encoding)[/red]")
+    elif decision.needs_remux:
+        console.print(f"\n  Transcode: [yellow]remux only (container change)[/yellow]")
+    else:
+        console.print(f"\n  Transcode: [green]not needed (already compatible)[/green]")
+
+    console.print()
+    try:
+        guess = parse_filename(Path(file))
+        guessed_type = guess.get("type", "movie")
+
+        if guessed_type == "episode":
+            show = guess.get("title", "?")
+            season = guess.get("season", "?")
+            episode = guess.get("episode", "?")
+            console.print(f"  [bold]Detected[/bold]: TV Series")
+            console.print(f"    Show: {show}")
+            console.print(f"    Season {season}, Episode {episode}")
+        else:
+            title = guess.get("title", Path(file).stem)
+            year = guess.get("year", "")
+            year_str = f" ({year})" if year else ""
+            console.print(f"  [bold]Detected[/bold]: Movie")
+            console.print(f"    Title: {title}{year_str}")
+
+        config = None
+        api_key = tmdb_key
+        if not api_key:
+            from mediaporter.config import load_config
+            config = load_config()
+            api_key = config.tmdb_api_key
+
+        if api_key:
+            meta = lookup_metadata(Path(file), api_key=api_key)
+            if meta:
+                from mediaporter.metadata import EpisodeMetadata, MovieMetadata
+                if isinstance(meta, EpisodeMetadata):
+                    console.print(f"    TMDb: [green]{meta.show_name}[/green] "
+                                  f"S{meta.season:02d}E{meta.episode:02d} "
+                                  f'"{meta.episode_title or "?"}"')
+                    if meta.genre:
+                        console.print(f"    Genre: {meta.genre}")
+                    if meta.network:
+                        console.print(f"    Network: {meta.network}")
+                    poster = meta.poster_data or meta.show_poster_data
+                    if poster:
+                        console.print(f"    Cover: [green]{len(poster) // 1024} KB poster downloaded[/green]")
+                    else:
+                        console.print(f"    Cover: [yellow]no poster found[/yellow]")
+                elif isinstance(meta, MovieMetadata):
+                    year_s = f" ({meta.year})" if meta.year else ""
+                    console.print(f"    TMDb: [green]{meta.title}{year_s}[/green]")
+                    if meta.genre:
+                        console.print(f"    Genre: {meta.genre}")
+                    if meta.director:
+                        console.print(f"    Director: {meta.director}")
+                    if meta.overview:
+                        console.print(f"    Overview: {meta.overview[:80]}...")
+                    if meta.poster_data:
+                        console.print(f"    Cover: [green]{len(meta.poster_data) // 1024} KB poster downloaded[/green]")
+                    else:
+                        console.print(f"    Cover: [yellow]no poster found[/yellow]")
+        else:
+            console.print(f"    TMDb: [dim]no API key (set TMDB_API_KEY or --tmdb-key)[/dim]")
+            console.print(f"    Cover: [dim]skipped (needs TMDb)[/dim]")
+
+    except Exception as e:
+        console.print(f"  [dim]Metadata detection failed: {e}[/dim]")
 
 
 @main.command()
-def devices() -> None:
+def devices():
     """List connected iOS devices."""
-    from mediaporter.device import list_devices
+    try:
+        from mediaporter.sync.device import list_devices
 
-    devs = list_devices()
-    if not devs:
-        console.print("[yellow]No iOS devices found. Is your device connected and trusted?[/yellow]")
-        return
+        devs = list_devices()
+        if not devs:
+            console.print("[yellow]No iOS devices found. Is your device connected and trusted?[/yellow]")
+            return
 
-    for d in devs:
-        console.print(f"  {d.name} ({d.model}) — iOS {d.ios_version} — UDID: {d.udid}")
-
-
-@main.command("test-videos")
-@click.argument("outdir", type=click.Path())
-@click.option("--quick", is_flag=True, help="Generate minimal set (3 files).")
-def test_videos(outdir: str, quick: bool) -> None:
-    """Generate a suite of test video files for development and testing."""
-    from tests.fixtures.generate_test_videos import generate_all
-
-    generate_all(outdir, quick=quick)
-    console.print(f"[green]Test videos generated in {outdir}[/green]")
+        for d in devs:
+            console.print(f"  UDID: {d.udid}")
+    except Exception as e:
+        console.print(f"[red]Device discovery failed: {e}[/red]")

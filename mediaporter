@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Convenience launcher — activates venv and runs mediaporter
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$DIR/.venv/bin/mediaporter" "$@"

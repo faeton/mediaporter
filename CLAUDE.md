@@ -54,10 +54,15 @@ Then: `mediaporter devices` to verify connection.
 5. **ffmpeg .m4v output needs `-f mp4`** — the .m4v extension triggers the ipod muxer which doesn't support HEVC.
 6. **HEVC copy mode still needs `-tag:v hvc1`** — Apple devices require this tag even when not re-encoding.
 7. **pymobiledevice3 v9.x is fully async** — use a persistent background event loop thread for sync wrappers.
-8. **media_type/media_kind ARE settable via sync plists** — requires three key fields: `is_movie: True` in item dict, file staged to `/Airlock/Media/<AssetID>`, and `location.kind: "MPEG-4 video file"`. Without these, device defaults to media_type=0.
+8. **media_type/media_kind ARE settable via sync plists** — requires `is_movie: True` in item dict and `location.kind: "MPEG-4 video file"`. These alone set media_type=2048 correctly.
 9. **Correct DB values for TV app**: `media_type=2048`, `media_kind=2`, `location_kind_id=4` (NOT Finder's 8192/1024 which creates "Home Video" entries). These make entries appear correctly in TV app.
-10. **`/Airlock/Media/<AssetID>` staging path is essential** — device processes media type from the Airlock staging location. File must be uploaded there AND to the final `/iTunes_Control/Music/Fxx/` path.
+10. ~~**`/Airlock/Media/<AssetID>` staging path is essential**~~ — **CORRECTED 2026-04-06**: Airlock staging is NOT needed. `is_movie: True` + `location.kind` in the plist alone sets media_type=2048. Single upload to `/iTunes_Control/Music/Fxx/` is sufficient. Confirmed working without Airlock.
 11. **Binary plist format required** — binary plist (not XML) for sync plists. Matches what the device expects.
+12. **Ping/Pong keepalive required for large files** — device sends `Ping` during long operations, must respond with `Pong` or session drops. Without this, syncs of large files (>100MB) fail with session reset.
+13. **MetadataSyncFinished must be sent BEFORE file upload** — for large files, sending it after upload causes ATC session timeout. Correct order: plist+CIG → MetadataSyncFinished → AssetManifest → file upload → FileBegin/FileComplete.
+14. **Stale pending assets must be cleared from AssetManifest** — device accumulates pending download assets from previous failed syncs. Parse AssetManifest, send `FileError` for any AssetID that isn't ours, or device waits forever (no SyncFinished).
+15. **iPad requires same audio codec for track switcher** — mixed codecs (e.g., AAC + EAC3) in the same file = iPad won't show audio language selector. All audio tracks must be normalized to the same codec (AAC) for the switcher to appear. Confirmed 2026-04-06.
+16. **Artwork via Airlock** — poster JPEG uploaded to `/Airlock/Media/Artwork/<AssetID>` + `artwork_cache_id` in plist item dict → TV app shows poster. AssetParts jumps from 1 to 3 when artwork is present.
 
 ## Design Priorities
 
@@ -178,14 +183,14 @@ Then: `mediaporter devices` to verify connection.
 - **End-to-end video sync to iPad TV app from Python is WORKING**
 - **Three breakthroughs from LLDB AFC tracing**:
   1. **`is_movie: True`** in the item dict of the insert_track plist
-  2. **`/Airlock/Media/<AssetID>`** staging path — device processes media type from files staged here
+  2. ~~**`/Airlock/Media/<AssetID>`** staging path~~ — originally thought essential, but see 2026-04-06 correction below
   3. **`location.kind: "MPEG-4 video file"`** — file type descriptor in the location dict
-- **File must be uploaded to TWO paths**: `/Airlock/Media/<AssetID>` (staging, device reads media type here) AND `/iTunes_Control/Music/Fxx/name.mp4` (final playback path)
+- ~~**File must be uploaded to TWO paths**~~ — **CORRECTED**: Single upload to `/iTunes_Control/Music/Fxx/name.mp4` is sufficient. Airlock staging is NOT needed when `is_movie: True` + `location.kind` are set in the plist.
 - **FileBegin/FileComplete use the FINAL path** (not the Airlock path)
 - **AssetManifest now returns AssetType=Movie** (previously returned Music)
 - **DB entries created with correct values**: media_type=2048, media_kind=2, location_kind_id=4
 - **Binary plist format** (not XML) required for sync plists
-- **Previous assumption "media_type not settable via sync plists" was WRONG** — it IS settable with the correct fields (`is_movie`, `location.kind`, Airlock staging)
+- **Previous assumption "media_type not settable via sync plists" was WRONG** — it IS settable with the correct fields (`is_movie`, `location.kind`). Airlock staging is NOT required for this.
 
 ### Full insert_track Plist Format (decoded from binary plist via AFC trace)
 
@@ -237,7 +242,7 @@ Then: `mediaporter devices` to verify connection.
 }
 ```
 
-### Complete Working Sync Flow
+### Complete Working Sync Flow (Updated 2026-04-06)
 
 ```
 1. ATC handshake with replayed 84-byte Grappa blob → ReadyForSync
@@ -245,10 +250,10 @@ Then: `mediaporter devices` to verify connection.
 3. ATC: SendPowerAssertion(conn, true)
 4. ATC: FinishedSyncingMetadata with STRING anchor
 5. Device: AssetManifest (AssetType=Movie)
-6. AFC: upload file to /Airlock/Media/<AssetID> (staging)
-7. AFC: upload file to /iTunes_Control/Music/Fxx/name.mp4 (final path)
-8. ATC: FileBegin + FileComplete with FINAL path (not Airlock)
-9. ATC: FileError for any stale pending assets
+6. AFC: upload file to /iTunes_Control/Music/Fxx/name.mp4 (single upload, no Airlock needed)
+7. ATC: FileBegin + FileComplete with final path
+8. ATC: FileError for stale pending assets (parsed from AssetManifest)
+9. ATC: Ping/Pong keepalive during processing
 10. Device: SyncFinished → entry appears in TV app with media_type=2048
 ```
 
@@ -279,7 +284,7 @@ Then: `mediaporter devices` to verify connection.
 
 ## ATC+AFC Sync Flow (Updated 2026-04-06) — COMPLETE WORKING SOLUTION
 
-### Working Sync Flow (FULLY WORKING)
+### Working Sync Flow (Updated 2026-04-06 — single upload, no Airlock needed)
 
 ```
 1. ATC handshake with replayed 84-byte Grappa blob → ReadyForSync
@@ -287,23 +292,27 @@ Then: `mediaporter devices` to verify connection.
    to /iTunes_Control/Sync/Media/Sync_XXXXXXXX.plist + .cig
 3. ATC: SendPowerAssertion(conn, true)
 4. ATC: FinishedSyncingMetadata (anchor as STRING!)
-5. Device: AssetManifest (AssetType=Movie)
-6. AFC: upload file to /Airlock/Media/<AssetID> (staging — device reads media type)
-7. AFC: upload file to /iTunes_Control/Music/Fxx/name.mp4 (final playback path)
-8. ATC: FileBegin { AssetID: str, FileSize: int, TotalSize: int, Dataclass: "Media" }
-9. ATC: FileComplete { AssetID: str, AssetPath: "/iTunes_Control/Music/Fxx/name.mp4", Dataclass: "Media" }
-10. ATC: FileError for any stale pending assets
+5. Device: AssetManifest (AssetType=Movie) — respond to Ping with Pong
+6. AFC: upload file to /iTunes_Control/Music/Fxx/name.mp4 (single upload)
+7. ATC: FileBegin { AssetID: str, FileSize: int, TotalSize: int, Dataclass: "Media" }
+8. ATC: FileComplete { AssetID: str, AssetPath: "/iTunes_Control/Music/Fxx/name.mp4", Dataclass: "Media" }
+9. ATC: FileError for any stale pending assets from AssetManifest
+10. ATC: respond to Ping with Pong while waiting
 11. Device: SyncFinished → entry in TV app with media_type=2048, media_kind=2
 ```
 
-**Status**: FULLY WORKING. Videos appear in TV app with correct metadata.
+**Status**: FULLY WORKING. Videos appear in TV app with correct metadata. Tested with 5GB+ files.
 
-**Five critical elements for correct video sync:**
+**Critical elements for correct video sync:**
 1. `ATHostConnectionSendPowerAssertion(conn, true)` before MetadataSyncFinished
 2. Anchor passed as STRING (not int) in MetadataSyncFinished
 3. `is_movie: True` in the item dict of insert_track plist
 4. `location.kind: "MPEG-4 video file"` in the location dict
-5. File staged to `/Airlock/Media/<AssetID>` before FileBegin/FileComplete
+5. MetadataSyncFinished sent BEFORE file upload (avoids ATC session timeout for large files)
+6. Ping/Pong keepalive during long operations
+7. FileError for stale pending assets parsed from AssetManifest
+
+**Airlock staging is NOT needed** — `is_movie: True` + `location.kind` alone set media_type=2048. Previously thought essential (finding #10 from 2026-04-06), but confirmed 2026-04-06 that single upload to final path works correctly.
 
 ### Correct Wire Command Names (from deep trace)
 
@@ -325,20 +334,22 @@ Then: `mediaporter devices` to verify connection.
 
 ## Next Steps (Updated 2026-04-06)
 
-Core sync is WORKING for both movies and TV series. Remaining work is productionization:
+CLI v0.2.0 is WORKING with full pipeline: probe → transcode → tag → sync via ATC. Remaining:
 
-1. **Integrate into CLI pipeline** — Wire `scripts/atc_nodeps_sync.py` into the main `mediaporter` CLI (probe → transcode → tag → sync via ATC)
+1. ~~**Integrate into CLI pipeline**~~ — DONE (v0.2.0)
 2. **Multi-episode batch sync** — Test syncing multiple episodes in a single ATC session
-3. **Error handling & retry** — Handle device disconnects, stale assets, partial transfers gracefully
-4. **Clean up orphan files on device** — Dozens of test files accumulated in `/iTunes_Control/Music/F*/` from failed attempts. Need cleanup script.
-5. **Progress reporting** — Surface FileProgress messages to CLI output
-6. **Handle stale pending assets** — Device accumulates pending download assets from failed syncs. Currently we send FileError for the known stale PID but there might be others.
+3. ~~**Handle stale pending assets**~~ — DONE (parse AssetManifest, send FileError for stale IDs)
+4. **Clean up orphan files on device** — Dozens of test files accumulated in `/iTunes_Control/Music/F*/`
+5. ~~**Progress reporting**~~ — DONE (Rich progress bars for transcode + sync)
+6. **Parallel transcode** — ThreadPoolExecutor with `-j N` (implemented, needs real-world testing)
 
-## Resolved Questions (2026-04-06)
+## Resolved Questions (Updated 2026-04-06)
 
-- **How to set media_type=2048?** — ANSWERED: via `is_movie: True` in the insert_track plist item dict, `location.kind: "MPEG-4 video file"` in location dict, and staging file to `/Airlock/Media/<AssetID>`
-- **What does the framework write via AFC between FileBegin/FileComplete?** — ANSWERED: file is staged to `/Airlock/Media/<AssetID>`, device processes media type from there
-- **Are media_type/media_kind settable via sync plists?** — ANSWERED: YES, with the correct fields (is_movie, location.kind, Airlock staging). Previous exhaustive testing missed these specific fields.
+- **How to set media_type=2048?** — ANSWERED: `is_movie: True` + `location.kind: "MPEG-4 video file"` in the insert_track plist. Airlock staging NOT required.
+- **Is Airlock staging needed?** — ANSWERED: NO. `is_movie: True` in plist alone sets media_type=2048. Single upload to `/iTunes_Control/Music/Fxx/` is sufficient. Tested and confirmed.
+- **Are media_type/media_kind settable via sync plists?** — ANSWERED: YES, with `is_movie` + `location.kind`. No Airlock needed.
+- **Why do large file syncs fail?** — ANSWERED: Two causes: (1) ATC session timeout if MetadataSyncFinished sent after long upload — fix: send it before upload. (2) Ping/Pong keepalive — device sends Ping, must respond with Pong or session drops.
+- **Why does device never send SyncFinished?** — ANSWERED: Stale pending assets. Device waits for ALL assets in AssetManifest. Must send FileError for stale ones.
 
 ## Research Docs
 

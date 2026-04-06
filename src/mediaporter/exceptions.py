@@ -29,13 +29,9 @@ class DeviceNotFoundError(DeviceError):
     """No iOS device connected or detected."""
 
 
-class DeviceNotPairedError(DeviceError):
-    """Device is connected but not paired/trusted."""
-
-
 class TransferError(MediaPorterError):
     """File transfer to device failed."""
 
 
-class MediaDBError(MediaPorterError):
-    """MediaLibrary.sqlitedb manipulation failed."""
+class SyncError(MediaPorterError):
+    """ATC sync protocol failed."""
