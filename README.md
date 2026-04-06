@@ -1,6 +1,10 @@
 # mediaporter
 
-Open-source CLI tool for transferring video to iOS devices with smart transcoding and native TV app integration.
+Transfer video files to iPhone and iPad over USB — no iTunes, no Finder, no cloud. Videos appear in the native Apple TV app with full metadata.
+
+An open-source alternative to iTunes/Finder video sync. Push any video from your Mac to your iOS device with automatic transcoding, metadata lookup, and native TV app integration.
+
+**Keywords:** transfer video to iPad, send movie to iPhone without iTunes, sideload video iOS, copy video to iPad over USB, iTunes alternative for video, push video to Apple TV app, video to iPhone CLI, ffmpeg iPad transfer, iOS video sync tool, transfer MKV to iPad, HEVC to iPhone
 
 ## What it does
 
@@ -12,6 +16,17 @@ mediaporter lets you send video files to your iPad or iPhone and have them appea
 4. **Transfer** — syncs to the device over USB using the native ATC protocol
 
 Videos appear in the TV app with correct metadata, artwork, and playback support — the same result as commercial sync tools, but free and open source.
+
+## Features
+
+- **Any format in, TV app out** — MKV, AVI, MP4, HEVC, H.264, multi-audio, subtitles — mediaporter handles it all
+- **Smart transcoding** — only re-encodes what's needed; copies compatible streams as-is
+- **Hardware acceleration** — uses Apple VideoToolbox for fast HEVC/H.264 encoding on Mac
+- **Movies and TV shows** — proper metadata, season/episode info, show grouping in the TV app
+- **Direct USB transfer** — no Wi-Fi, no cloud, no Apple ID required
+- **No iTunes or Finder needed** — uses the native ATC sync protocol directly
+- **CLI-first** — scriptable, pipeable, automate your media library
+- **Open source** — GPL v3, built on publicly documented protocol research
 
 ## Requirements
 

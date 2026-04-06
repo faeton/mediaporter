@@ -1,11 +1,16 @@
 [project]
 name = "mediaporter"
 version = "0.1.0"
-description = "Transfer video files to iOS devices over USB with smart transcoding and native TV app integration"
+description = "Transfer videos to iPhone/iPad TV app over USB — no iTunes, no cloud, automatic transcoding"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.11"
 authors = [{ name = "mediaporter contributors" }]
-keywords = ["ios", "ipad", "video", "transcode", "transfer", "tv-app", "ffmpeg"]
+keywords = [
+    "ios", "ipad", "iphone", "video", "transfer", "transcode",
+    "tv-app", "apple-tv", "ffmpeg", "hevc", "h264", "mkv", "mp4",
+    "usb", "sideload", "itunes-alternative", "finder-sync",
+    "media-sync", "video-converter", "cli",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -15,6 +20,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Multimedia :: Video :: Conversion",
+    "Topic :: Multimedia :: Video",
+    "Topic :: System :: Hardware",
+    "Topic :: Utilities",
 ]
 dependencies = [
     "click>=8.1",
