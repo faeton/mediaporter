@@ -64,19 +64,25 @@ def print_analysis(jobs) -> None:
                 console.print(f"  [{color}]{s.codec_name} {res} -> {act}[/{color}]")
 
             # Audio — only selected tracks, with real action
+            from mediaporter.audio import pick_normalization_codec
+
             audio_indices = job.selected_audio if job.selected_audio is not None else list(range(len(mi.audio_streams)))
             selected_streams = [mi.audio_streams[i] for i in audio_indices]
-            codecs_used = {s.codec_name.lower() for s in selected_streams}
-            force_aac = len(audio_indices) > 1 and len(codecs_used) > 1
+            norm_codec = pick_normalization_codec(selected_streams)
 
             for i in audio_indices:
                 s = mi.audio_streams[i]
                 ch = f"{s.channels}ch" if s.channels else ""
                 lang = s.language or "und"
                 title = f' "{s.title}"' if s.title else ""
-                if force_aac:
-                    act = "AAC" if s.codec_name.lower() != "aac" else "copy"
-                    color = "yellow" if act == "AAC" else "green"
+                if norm_codec:
+                    # Mixed-codec file: normalize to best codec present.
+                    if s.codec_name.lower() == norm_codec:
+                        act = "copy"
+                        color = "green"
+                    else:
+                        act = norm_codec.upper()
+                        color = "yellow"
                     console.print(f"  [{color}]{s.codec_name} {ch} [{lang}]{title} -> {act}[/{color}]")
                 else:
                     orig_act = decision.stream_actions.get(s.index, "?") if decision else "?"

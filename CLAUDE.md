@@ -332,16 +332,43 @@ Then: `mediaporter devices` to verify connection.
 - **`is_hd: True`** in `video_info` for 1080p content
 - **Test script**: `scripts/atc_tv_series_test.py` — confirmed working with Breaking Bad S01E01
 
-## Next Steps (Updated 2026-04-06)
+## CLI Improvements (2026-04-10) — Python v0.3.1
 
-CLI v0.2.0 is WORKING with full pipeline: probe → transcode → tag → sync via ATC. Remaining:
+Real-world two-file run (Send.Help 4.7 GB + Avatar 15 GB) exposed a batch of issues that are all fixed now:
 
-1. ~~**Integrate into CLI pipeline**~~ — DONE (v0.2.0)
-2. **Multi-episode batch sync** — Test syncing multiple episodes in a single ATC session
-3. ~~**Handle stale pending assets**~~ — DONE (parse AssetManifest, send FileError for stale IDs)
-4. **Clean up orphan files on device** — Dozens of test files accumulated in `/iTunes_Control/Music/F*/`
-5. ~~**Progress reporting**~~ — DONE (Rich progress bars for transcode + sync)
-6. **Parallel transcode** — ThreadPoolExecutor with `-j N` (implemented, needs real-world testing)
+1. **ffmpeg stderr pipe deadlock** — long transcodes froze partway (user saw "63% stuck"). Root cause: `subprocess.Popen(stderr=PIPE)` with only stdout drained; once ffmpeg's stderr filled the ~64 KB OS pipe, ffmpeg blocked on `write(2)` and stopped producing stdout progress. Fix: background stderr-drain thread in `transcode.py` with a rolling 200-line tail (+ live passthrough under `-v`).
+2. **Ctrl+C didn't kill ffmpeg** — `ThreadPoolExecutor.__exit__` blocked on workers that were themselves stuck on ffmpeg output. Fix: module-level Popen registry in `transcode.py` + `cancel_all()` helper; `transcode_and_sync` / `transcode_all` catch `KeyboardInterrupt` → cancel pending futures → `cancel_all()` → executor shutdown.
+3. **Sequential upload waited for all transcodes** — old `transcode_all` → `sync_all` sequence was not pipelined. Fix: new `transcode_and_sync()` runs a single-threaded uploader alongside the ThreadPoolExecutor; as each transcode completes, the job is queued for upload and streams immediately over the same held-open AFC connection. Registration is a single short ATC session at the end. Split `sync_files()` into `make_sync_file_info()` + `afc_upload_one()` + `register_uploaded_files()` so the pipeline can drive each phase independently.
+4. **Mixed-codec files always re-encoded to AAC** — wasteful because AC3/EAC3 play natively in the TV app. Fix: `pick_normalization_codec()` picks the best codec already in the file (EAC3 > AC3 > AAC) and uses `-c:a copy` for matching tracks. For typical ac3+eac3 rips, the EAC3 Original now copies through bit-perfect and only the AC3 dub is re-encoded. Also: `_partition_jobs` promotes mixed-codec files to `needs_remux=True` even for MP4 containers so the switcher rule can't be silently skipped.
+5. **No disk-space preflight** — transcodes could fill `/tmp` or the device mid-run. Fix: `_check_disk_space()` queries `shutil.disk_usage(tempfile.gettempdir())` for the Mac and `query_device_disk_space()` (lockdown `com.apple.disk_usage`) for the device, comparing against `sum(source_sizes) * 1.1`. Fails fast with a clear error.
+6. **No run summary** — users couldn't tell what the actual throughput was. Fix: `PipelineStats` dataclass + `_print_summary()` report total/transcode/upload wall clocks, bytes transferred, peak file speed, avg sustained speed, Mac + device free space before/after with deltas.
+7. **`mediaporter` with no args printed --help** — should have been interactive. Fix: `DefaultSyncGroup.parse_args` now routes `[]` → `["sync"]`, which hits `prompt_for_files()`.
+8. **`devices` command only showed UDID** — now queries `AMDeviceCopyValue` on a short lockdown session for DeviceName/ProductType/ProductVersion/DeviceClass/ModelNumber and prints a friendly model name, native display resolution, and recommended transcode target. Added ~60 iPad/iPhone ProductType → friendly-name+resolution mappings in `sync/device.py`.
+
+### Observed throughput
+
+USB-C iPad Pro 12.9" (3rd gen / iPad8,7): Rich's `TransferSpeedColumn` reported ~176 MB/s (1.41 Gbps) sustained during AFC upload over usbmuxd. USB 3.1 Gen 1 practical limit is ~450–500 MB/s, so there's still headroom if the bottleneck ever moves upstream. Lightning iPads cap around 30–40 MB/s by comparison.
+
+### MacApp (Swift) parity gap
+
+The SwiftUI MacApp (v0.3.0, `MacApp/MediaPorter`) shipped the full pipeline but was written BEFORE these Python improvements landed. The following need to be ported to Swift for parity:
+
+- **Pipelined transcode+upload** — `PipelineController.swift` currently runs transcode → upload sequentially per-file. Needs an async task group where transcode tasks feed an upload actor.
+- **ffmpeg stderr drain** — `Transcoder.swift` must drain ffmpeg's stderr pipe (or redirect to `/dev/null`) to avoid the same 64 KB pipe deadlock on long files. Swift `Process` + `Pipe` has the same issue if you only read one stream.
+- **Smart audio normalization** — `Transcode/Transcoder.swift` + `Analysis/AudioClassifier.swift` currently mirror the old "force AAC" logic. Port the EAC3 > AC3 > AAC ranking from `src/mediaporter/audio.py` (`pick_normalization_codec`, `target_bitrate_for`).
+- **Mixed-codec detection in compat** — `Analysis/Compatibility.swift` should force a remux when selected audio tracks span multiple codecs, matching `_partition_jobs` in `pipeline.py`.
+- **Disk-space preflight** — needs `query_device_disk_space` equivalent (lockdown `com.apple.disk_usage` domain via `AMDeviceCopyValue`) plus `URL.resourceValues(forKeys: [.volumeAvailableCapacityKey])` for the Mac side. Wire into `PipelineController` before starting any ffmpeg.
+- **Run summary** — collect per-file transcode/upload timings and bytes; show in the `BottomBarView` or a post-run sheet.
+- **Richer device info in UI** — port the `_DEVICE_MODELS` table and `describe_model()` / `optimal_transcode_resolution()` helpers. `Sync/Device.swift` currently only exposes UDID + basic name.
+
+Keep the Python module as the reference implementation — land fixes in Python first, port to Swift once validated.
+
+## Next Steps
+
+1. **Multi-episode batch sync** — Test syncing multiple episodes in a single ATC session (pipelined uploader should handle this naturally now).
+2. **Clean up orphan files on device** — Dozens of test files accumulated in `/iTunes_Control/Music/F*/`.
+3. **Cross-language audio prompt** — When codecs are mixed across languages (e.g., Russian AC3 + English EAC3), offer to drop the lower-quality track instead of normalizing, so no re-encode is needed.
+4. **Port 2026-04-10 improvements to the Swift MacApp** — see parity gap list above.
 
 ## Resolved Questions (Updated 2026-04-06)
 

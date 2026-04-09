@@ -3,11 +3,43 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from mediaporter.audio import AudioAction, classify_all_audio
+# Registry of active ffmpeg processes so callers (e.g. the pipeline) can
+# terminate them on Ctrl+C without having to plumb a handle through every call.
+_active_procs: set[subprocess.Popen] = set()
+_active_procs_lock = threading.Lock()
+
+
+def cancel_all() -> None:
+    """Terminate every ffmpeg process currently running under transcode()."""
+    with _active_procs_lock:
+        procs = list(_active_procs)
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    # Give them a moment to exit cleanly, then hard-kill stragglers.
+    for p in procs:
+        try:
+            p.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+from mediaporter.audio import (
+    AudioAction,
+    classify_all_audio,
+    pick_normalization_codec,
+    target_bitrate_for,
+)
 from mediaporter.compat import TEXT_SUBTITLE_CODECS, TranscodeDecision
 from mediaporter.exceptions import TranscodeError
 from mediaporter.probe import MediaInfo
@@ -118,24 +150,28 @@ def build_ffmpeg_command(
                 "-pix_fmt", "yuv420p",
             ])
 
-    # Audio codecs (per output track)
-    # If multiple audio tracks have mixed codecs, normalize all to AAC
-    # (iPad won't show audio switcher for mixed codec tracks)
+    # Audio codecs (per output track).
+    #
+    # The iPad TV app's language switcher needs every audio track to share a
+    # codec. For mixed-codec files we normalize to the BEST codec already
+    # present in the file (EAC3 > AC3 > AAC) instead of blindly re-encoding
+    # everything to AAC — that way surround tracks stay in Dolby and only the
+    # mismatched track gets re-encoded.
     selected_actions = [audio_actions[i] for i in audio_indices]
     selected_streams = [media_info.audio_streams[i] for i in audio_indices]
-    codecs_used = {s.codec_name.lower() for s in selected_streams}
-    force_aac = len(audio_indices) > 1 and len(codecs_used) > 1
+    norm_codec = pick_normalization_codec(selected_streams)
 
     for out_idx, (action, stream) in enumerate(zip(selected_actions, selected_streams)):
-        if force_aac:
-            # Normalize all tracks to AAC for iPad compatibility
-            cmd.extend([f"-c:a:{out_idx}", "aac"])
-            channels = stream.channels or 2
-            if channels >= 6:
-                cmd.extend([f"-b:a:{out_idx}", "384k"])
-                cmd.extend([f"-ac:a:{out_idx}", "6"])
+        src_codec = stream.codec_name.lower()
+        channels = stream.channels or 2
+
+        if norm_codec:
+            if src_codec == norm_codec:
+                # Already in the target codec — pass it through untouched.
+                cmd.extend([f"-c:a:{out_idx}", "copy"])
             else:
-                cmd.extend([f"-b:a:{out_idx}", "256k"])
+                cmd.extend([f"-c:a:{out_idx}", norm_codec])
+                cmd.extend([f"-b:a:{out_idx}", target_bitrate_for(norm_codec, channels)])
                 cmd.extend([f"-ac:a:{out_idx}", str(channels)])
         elif action.action == "copy":
             cmd.extend([f"-c:a:{out_idx}", "copy"])
@@ -199,6 +235,7 @@ def transcode(
     selected_audio: list[int] | None = None,
     selected_subtitles: list[int] | None = None,
     selected_external_subs: list[int] | None = None,
+    verbose: bool = False,
 ) -> Path:
     """Transcode a media file to iPad-compatible M4V."""
     audio_actions = classify_all_audio(media_info.audio_streams)
@@ -226,28 +263,76 @@ def transcode(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            bufsize=1,  # line-buffered so progress updates arrive promptly
         )
     except FileNotFoundError:
         raise TranscodeError("ffmpeg not found. Install ffmpeg: brew install ffmpeg")
 
+    with _active_procs_lock:
+        _active_procs.add(process)
+
+    # Drain stderr on a background thread. If we don't, ffmpeg will block on
+    # stderr writes once the OS pipe buffer fills (~64 KB on macOS) — which
+    # freezes its stdout progress output and appears as a stuck % in the UI.
+    # We also expose the tail in verbose mode so the user can see what ffmpeg
+    # is actually doing when something gets stuck.
+    stderr_tail: list[str] = []
+    tag = output_path.name
+
+    def _drain_stderr() -> None:
+        if not process.stderr:
+            return
+        try:
+            for line in process.stderr:
+                stderr_tail.append(line)
+                if len(stderr_tail) > 200:
+                    del stderr_tail[:100]  # keep a rolling tail
+                if verbose:
+                    sys.stderr.write(f"[{tag}] {line}")
+                    sys.stderr.flush()
+        except Exception:
+            pass
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
     duration = media_info.duration or 1.0
 
-    if process.stdout:
-        for line in process.stdout:
-            line = line.strip()
-            if line.startswith("out_time_ms="):
-                try:
-                    time_ms = int(line.split("=")[1])
-                    pct = min(time_ms / (duration * 1_000_000), 1.0)
-                    if progress_callback:
-                        progress_callback(pct)
-                except (ValueError, ZeroDivisionError):
-                    pass
+    try:
+        if process.stdout:
+            for line in process.stdout:
+                line = line.strip()
+                if line.startswith("out_time_ms="):
+                    try:
+                        time_ms = int(line.split("=")[1])
+                        pct = min(time_ms / (duration * 1_000_000), 1.0)
+                        if progress_callback:
+                            progress_callback(pct)
+                    except (ValueError, ZeroDivisionError):
+                        pass
 
-    return_code = process.wait()
+        return_code = process.wait()
+    except BaseException:
+        # KeyboardInterrupt or any other unwind: make sure ffmpeg dies so we
+        # don't leave a zombie transcoding a 15 GB file in the background.
+        try:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        except Exception:
+            pass
+        raise
+    finally:
+        with _active_procs_lock:
+            _active_procs.discard(process)
+        stderr_thread.join(timeout=2)
+
     if return_code != 0:
-        stderr = process.stderr.read() if process.stderr else "unknown error"
-        raise TranscodeError(f"ffmpeg exited with code {return_code}: {stderr}")
+        err = "".join(stderr_tail[-50:]).strip() or "unknown error"
+        raise TranscodeError(f"ffmpeg exited with code {return_code}: {err}")
 
     if not output_path.exists():
         raise TranscodeError(f"Output file was not created: {output_path}")

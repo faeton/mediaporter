@@ -1,15 +1,24 @@
 """Sync engine — transfers files to iOS device via ATC protocol.
 
-Public API: sync_files() handles the complete flow:
-  AFC upload (pre-upload) → ATC handshake → plist + CIG → register → SyncFinished
+Public API:
+  sync_files()              — one-shot: upload + register, sequential.
+  make_sync_file_info()     — reserve an asset_id / device_path for an item.
+  afc_upload_one()          — upload a single prepared file over AFC.
+  register_uploaded_files() — short ATC session to register pre-uploaded files.
 
-Files are uploaded via AFC BEFORE the ATC session starts. This keeps the ATC
-session short, avoiding timeouts during multi-GB transfers and preventing ghost
+The split lets the pipeline overlap transcoding and uploading: as each transcode
+completes, its file is uploaded immediately (via afc_upload_one) while other
+files are still transcoding. register_uploaded_files() then runs the short ATC
+metadata session after everything is on the device.
+
+Files are always uploaded via AFC BEFORE the ATC session starts. This keeps the
+ATC session short, avoids timeouts during multi-GB transfers, and prevents ghost
 entries (metadata without file) on interruption.
 """
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -29,97 +38,84 @@ class SyncResult:
     device_path: str | None = None
 
 
-def sync_files(
-    items: list[SyncItem],
+def make_sync_file_info(item: SyncItem) -> _SyncFileInfo:
+    """Reserve an asset_id + device_path for a SyncItem.
+
+    Does not touch the device — this is pure ID generation so the upload phase
+    can start before the ATC session opens.
+    """
+    device_path, slot = ATCSession.generate_device_path()
+    asset_id = ATCSession.generate_asset_id()
+    return _SyncFileInfo(
+        item=item,
+        asset_id=asset_id,
+        device_path=device_path,
+        slot=slot,
+    )
+
+
+def afc_upload_one(
+    afc: NativeAFC,
+    info: _SyncFileInfo,
     progress_cb: Callable[[str, int, int], None] | None = None,
+) -> None:
+    """Upload a single prepared file to its final device path via AFC."""
+    afc.makedirs(f"/iTunes_Control/Music/{info.slot}")
+
+    total = info.item.file_size
+    title = info.item.title
+
+    def _cb(sent: int, _total: int) -> None:
+        if progress_cb:
+            progress_cb(title, sent, total)
+
+    afc.write_file_streaming(info.device_path, info.item.file_path, _cb)
+
+
+def register_uploaded_files(
+    device: DeviceInfo,
+    files: list[_SyncFileInfo],
     verbose: bool = False,
 ) -> list[SyncResult]:
-    """Sync multiple files to a connected iOS device.
+    """Run the short ATC metadata session over files already uploaded via AFC.
 
-    Flow: upload files via AFC first, then short ATC session for metadata + registration.
-    This avoids ATC session timeouts during large file transfers and prevents ghost
-    entries if the transfer is interrupted.
-
-    Args:
-        items: Files to sync with metadata.
-        progress_cb: Optional callback(filename, bytes_sent, total_bytes).
-        verbose: Print protocol messages.
-
-    Returns:
-        List of SyncResult, one per input item.
+    Assumes `files` have been written to their device_path already (e.g. via
+    afc_upload_one). Opens a fresh ATC session, sends the sync plist + CIG,
+    waits for AssetManifest, sends FileBegin/FileComplete for each asset,
+    clears any stale pending assets, then waits for SyncFinished.
     """
-    if not items:
+    if not files:
         return []
 
-    # Discover device
-    device = discover_device()
-
-    # Prepare file info
-    sync_files_info: list[_SyncFileInfo] = []
-    for item in items:
-        device_path, slot = ATCSession.generate_device_path()
-        asset_id = ATCSession.generate_asset_id()
-        sync_files_info.append(_SyncFileInfo(
-            item=item,
-            asset_id=asset_id,
-            device_path=device_path,
-            slot=slot,
-        ))
-
     results: list[SyncResult] = []
-
     try:
-        # Step 1: Upload all files via AFC BEFORE ATC session
-        # No metadata is registered yet, so interruption here is safe
-        # (just orphan files on device, no ghost entries in TV app)
-        if verbose:
-            import sys
-            print("  Pre-uploading files via AFC...", file=sys.stderr)
-
-        with NativeAFC(device.handle) as afc:
-            for f in sync_files_info:
-                afc.makedirs(f"/iTunes_Control/Music/{f.slot}")
-                if verbose:
-                    print(f"  AFC: uploading {f.item.file_path.name} -> {f.device_path}"
-                          f" ({f.item.file_size // 1048576} MB)", file=sys.stderr)
-
-                def _progress_cb(sent, total, _title=f.item.title, _total=f.item.file_size):
-                    if progress_cb:
-                        progress_cb(_title, sent, _total)
-
-                afc.write_file_streaming(f.device_path, f.item.file_path, _progress_cb)
-
-        # Step 2: Short ATC session — metadata + registration only
-        # Files are already on device, so this is fast (seconds, not minutes)
         with ATCSession(device, verbose=verbose) as session:
             device_grappa, anchor_str = session.handshake()
             new_anchor = str(int(anchor_str) + 1)
 
-            plist_data = session.build_sync_plist(sync_files_info, int(new_anchor))
+            plist_data = session.build_sync_plist(files, int(new_anchor))
             cig_data = session.compute_cig(device_grappa, plist_data)
 
-            # Open fresh AFC for plist write + artwork upload
             with NativeAFC(device.handle) as afc:
                 session.upload_and_register(
                     afc=afc,
-                    files=sync_files_info,
+                    files=files,
                     plist_data=plist_data,
                     cig_data=cig_data,
                     anchor=new_anchor,
-                    progress_cb=None,  # upload already done
+                    progress_cb=None,
                     files_already_uploaded=True,
                 )
 
-            for f in sync_files_info:
+            for f in files:
                 results.append(SyncResult(
                     path=f.item.file_path,
                     success=True,
                     device_path=f.device_path,
                 ))
-
     except SyncError as e:
         synced = {r.path for r in results}
-        for f in sync_files_info:
+        for f in files:
             if f.item.file_path not in synced:
                 results.append(SyncResult(
                     path=f.item.file_path,
@@ -128,3 +124,44 @@ def sync_files(
                 ))
 
     return results
+
+
+def sync_files(
+    items: list[SyncItem],
+    progress_cb: Callable[[str, int, int], None] | None = None,
+    verbose: bool = False,
+) -> list[SyncResult]:
+    """Sync multiple files to a connected iOS device.
+
+    Flow: upload all files via AFC first, then short ATC session for metadata
+    + registration. This avoids ATC session timeouts during large file
+    transfers and prevents ghost entries if the transfer is interrupted.
+    """
+    if not items:
+        return []
+
+    device = discover_device()
+    sync_files_info = [make_sync_file_info(item) for item in items]
+
+    # Step 1: Upload all files via AFC BEFORE opening the ATC session.
+    if verbose:
+        print("  Pre-uploading files via AFC...", file=sys.stderr)
+
+    try:
+        with NativeAFC(device.handle) as afc:
+            for f in sync_files_info:
+                if verbose:
+                    print(
+                        f"  AFC: uploading {f.item.file_path.name} -> {f.device_path}"
+                        f" ({f.item.file_size // 1048576} MB)",
+                        file=sys.stderr,
+                    )
+                afc_upload_one(afc, f, progress_cb=progress_cb)
+    except SyncError as e:
+        return [
+            SyncResult(path=f.item.file_path, success=False, error=str(e))
+            for f in sync_files_info
+        ]
+
+    # Step 2: Short ATC session — metadata + registration only.
+    return register_uploaded_files(device, sync_files_info, verbose=verbose)

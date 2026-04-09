@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.3.1 — 2026-04-10
+
+Pipelined transcode+upload, smarter audio normalization, safer ffmpeg handling, and disk-space-aware runs with a full summary at the end.
+
+### New
+
+- **Pipelined transcode + upload** — each file streams to the device via AFC as soon as its transcode finishes, instead of waiting for the entire batch. A dedicated uploader thread drains a queue fed by the transcode workers; the short ATC registration session still runs once at the end. Two progress displays (transcode above, upload below) render simultaneously via `rich.Live` + `Group`.
+- **Smart audio normalization** — mixed-codec files now normalize to the best codec already present in the file (EAC3 > AC3 > AAC) instead of always AAC. Tracks that already match the target use `-c:a copy`, so an `ac3 + eac3` file re-encodes only the AC3 track and preserves the EAC3 surround bit-perfect. New helpers: `mediaporter.audio.pick_normalization_codec()` and `target_bitrate_for()`.
+- **Disk space preflight** — before launching any ffmpeg, checks Mac temp (`shutil.disk_usage`) and device free space (lockdown `com.apple.disk_usage` domain) against an upper bound of `sum(source_sizes) * 1.1`. Fails fast with a clear error instead of filling temp or the device mid-transcode.
+- **End-of-run summary** — total time, transcode wall clock (parallel), upload wall clock, bytes transferred, peak per-file speed, average sustained speed, Mac + device free space before/after with deltas.
+- **Richer `devices` command** — shows device name, model friendly name (iPad Pro 12.9" (3rd gen) etc.), iOS/iPadOS version, model number, native display resolution, and optimal transcode target. Added ~60 iPad/iPhone ProductType → model mappings (iPad7–16, iPhone XS through 16). Queries via `AMDeviceCopyValue` on a short lockdown session.
+- **Interactive mode with no args** — `mediaporter` by itself now routes to interactive drag-and-drop mode (was printing `--help`).
+- **Verbose ffmpeg passthrough** — `-v` mode now tags each stderr line with the output filename, so you can see what both parallel transcodes are doing side by side.
+
+### Changed
+
+- **Forced remux on mixed-codec audio** — `_partition_jobs` now promotes files with mixed audio codecs to `needs_remux=True` even when the container is already MP4, so the iPad audio switcher stays functional.
+- **Split sync module** — `mediaporter.sync` exposes `make_sync_file_info()`, `afc_upload_one()`, and `register_uploaded_files()` so the pipeline can drive upload and registration independently. `sync_files()` is now a thin wrapper around these helpers.
+- **Python version** — bumped to 0.3.1 (the 0.3.0 tag was the native SwiftUI app release; this is the Python CLI catching up with its own minor version).
+
+### Fixed
+
+- **ffmpeg stderr pipe deadlock** — long transcodes (2h+ 1080p files) would freeze partway through with a stuck progress percentage. Root cause: `subprocess.Popen(..., stderr=PIPE)` with only stdout being drained; once ffmpeg's stderr filled the ~64 KB OS pipe buffer, ffmpeg blocked on its `write(2)` and stopped emitting stdout progress. Now `transcode()` drains stderr on a background thread into a rolling 200-line tail for error reporting (and live passthrough in `-v` mode).
+- **Ctrl+C doesn't kill ffmpeg** — the old `ThreadPoolExecutor` shutdown would hang waiting for workers that were themselves blocked on ffmpeg output. A new module-level process registry in `transcode.py` and a `cancel_all()` helper let the pipeline explicitly `terminate()` every in-flight ffmpeg on `KeyboardInterrupt`, then wait 5 s before escalating to `kill()`. Workers unblock cleanly and the executor shuts down.
+- **`sync_all()` removed** — the old dead helper was replaced by the pipelined `transcode_and_sync()` path.
+
+### Protocol / framework additions
+
+- `AMDeviceCopyValue` and `AMDeviceStopSession` wired into the ctypes bindings.
+- `CFNumberGetValue` added with a `cfnumber_to_int()` helper for reading numeric lockdown values (disk capacity/free bytes).
+- `query_device_details(device)` and `query_device_disk_space(device)` — short-session lockdown queries that return device name, ProductType, iOS version, model number, and `(free_bytes, total_bytes)`.
+
 ## 0.2.1 — 2026-04-06
 
 Reliability improvements for large file transfers and interactive UX enhancements.

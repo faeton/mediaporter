@@ -127,6 +127,17 @@ def cfstr_to_str(cf_ref: c_void_p) -> str | None:
     return None
 
 
+def cfnumber_to_int(cf_ref: c_void_p) -> int | None:
+    """Convert a CFNumber to a Python int (via kCFNumberSInt64Type=4)."""
+    if not cf_ref:
+        return None
+    cf = get_cf()
+    val = ctypes.c_int64()
+    if cf.CFNumberGetValue(cf_ref, 4, ctypes.byref(val)):
+        return val.value
+    return None
+
+
 def cfnum32(v: int) -> c_void_p:
     """Create a CFNumber (32-bit int)."""
     cf = get_cf()
@@ -204,6 +215,7 @@ def _setup_cf(cf):
         ("CFRunLoopRunInMode", c_int, [c_void_p, ctypes.c_double, ctypes.c_bool]),
         ("CFShow", None, [c_void_p]),
         ("CFNumberCreate", c_void_p, [c_void_p, c_int, c_void_p]),
+        ("CFNumberGetValue", ctypes.c_bool, [c_void_p, c_int, c_void_p]),
         ("CFDataCreate", c_void_p, [c_void_p, c_char_p, c_long]),
         ("CFDataGetBytePtr", ctypes.POINTER(ctypes.c_ubyte), [c_void_p]),
         ("CFDataGetLength", c_long, [c_void_p]),
@@ -223,9 +235,11 @@ def _setup_md(md):
         ("AMDeviceNotificationSubscribe", c_int,
          [AMDeviceNotificationCallback, c_uint, c_uint, c_void_p, POINTER(c_void_p)]),
         ("AMDeviceCopyDeviceIdentifier", c_void_p, [c_void_p]),
+        ("AMDeviceCopyValue", c_void_p, [c_void_p, c_void_p, c_void_p]),
         ("AMDeviceRetain", c_void_p, [c_void_p]),
         ("AMDeviceConnect", c_int, [c_void_p]),
         ("AMDeviceStartSession", c_int, [c_void_p]),
+        ("AMDeviceStopSession", c_int, [c_void_p]),
         ("AMDeviceStartService", c_int, [c_void_p, c_void_p, POINTER(c_void_p), c_void_p]),
         ("AMDeviceDisconnect", c_int, [c_void_p]),
         ("AFCConnectionOpen", c_int, [c_void_p, c_uint, POINTER(c_void_p)]),

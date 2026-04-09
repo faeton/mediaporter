@@ -21,8 +21,12 @@ class DefaultSyncGroup(click.Group):
 
     def parse_args(self, ctx, args):
         # Let --help and --version through to the group
-        if not args or "--help" in args or "--version" in args:
+        if "--help" in args or "--version" in args:
             return super().parse_args(ctx, args)
+
+        # No args at all — launch interactive drag-and-drop sync mode
+        if not args:
+            return super().parse_args(ctx, ["sync"])
 
         # If first non-option arg is a known subcommand, let Click handle it
         for arg in args:
@@ -240,16 +244,49 @@ def probe(file, tmdb_key):
 
 @main.command()
 def devices():
-    """List connected iOS devices."""
+    """List connected iOS devices with model info and transcode guidance."""
     try:
-        from mediaporter.sync.device import list_devices
+        from mediaporter.sync.device import (
+            describe_model,
+            list_devices,
+            optimal_transcode_resolution,
+        )
 
-        devs = list_devices()
+        devs = list_devices(with_details=True)
         if not devs:
             console.print("[yellow]No iOS devices found. Is your device connected and trusted?[/yellow]")
             return
 
-        for d in devs:
-            console.print(f"  UDID: {d.udid}")
+        def _row(label: str, value: str) -> str:
+            return f"  {label:<10}{value}"
+
+        for i, d in enumerate(devs):
+            if i > 0:
+                console.print()
+
+            model_name, native_res = describe_model(d.product_type)
+            header = d.name or model_name or "iOS device"
+            console.print(f"[bold green]{header}[/bold green]")
+
+            if d.product_type:
+                if model_name != d.product_type:
+                    console.print(_row("Model:", f"{model_name} [dim]({d.product_type})[/dim]"))
+                else:
+                    console.print(_row("Model:", d.product_type))
+            if d.product_version:
+                dc = (d.device_class or "").lower()
+                version_label = "iPadOS:" if dc == "ipad" else "iOS:"
+                console.print(_row(version_label, d.product_version))
+            if d.model_number:
+                console.print(_row("Model #:", d.model_number))
+            console.print(_row("UDID:", f"[dim]{d.udid}[/dim]"))
+
+            if native_res:
+                console.print(_row("Display:", native_res))
+            console.print(_row(
+                "Optimal:",
+                f"[cyan]{optimal_transcode_resolution(d.product_type)}[/cyan]"
+                " [dim](target for transcoding)[/dim]",
+            ))
     except Exception as e:
         console.print(f"[red]Device discovery failed: {e}[/red]")

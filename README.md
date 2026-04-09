@@ -25,16 +25,21 @@ Videos appear in the TV app immediately — movies in the Movies tab, TV episode
 - **Any format in, TV app out** — MKV, AVI, MP4, HEVC, H.264, VP9, multi-audio, subtitles
 - **Smart transcoding** — only re-encodes incompatible streams; copies the rest as-is
 - **Hardware acceleration** — Apple VideoToolbox for fast HEVC encoding on Mac
+- **Pipelined transcode + upload** — each file streams to the device as soon as its transcode finishes, overlapping with ongoing transcodes of other files. No waiting for the whole batch
+- **Smart audio normalization** — mixed-codec files normalize to the best codec already present (EAC3 > AC3 > AAC), so your EAC3 surround track copies through bit-perfect while only the mismatched track gets re-encoded
+- **Parallel transcoding** — process multiple files simultaneously with `-j N`, saturating all cores
+- **Disk space preflight** — checks Mac temp and device free space before any ffmpeg runs. Fail fast, not mid-transcode
+- **Run summary** — wall-clock totals, peak and average transfer speed, Mac + device free-space deltas at the end of every run
 - **Movies and TV shows** — automatic detection, TMDb metadata, season/episode grouping
 - **Poster artwork** — downloaded from TMDb and displayed in the TV app; auto-generated fallback posters when no match is found
 - **Interactive audio selection** — choose which dub/translation per language when multiple exist
 - **Interactive subtitle selection** — checkbox picker for which subtitle tracks to embed
 - **Interactive metadata correction** — manually enter title/year when filenames are unrecognizable
+- **Interactive drag-and-drop mode** — just run `mediaporter` with no args, drop a file on the terminal, press enter
 - **Multiple audio & subtitle tracks** — iPad audio language switcher and CC subtitle support
-- **Mixed codec normalization** — automatically normalizes audio codecs for iPad track switcher compatibility
+- **Rich device info** — `mediaporter devices` shows model name (e.g., "iPad Pro 12.9\" (3rd gen)"), iOS version, native display resolution, and recommended transcode target
 - **Direct USB transfer** — no Wi-Fi, no cloud, no Apple ID required
 - **No iTunes or Finder needed** — uses the native ATC sync protocol directly
-- **Parallel transcoding** — process multiple files simultaneously with `-j N`
 - **CLI-first** — scriptable, no GUI needed
 
 ## Requirements
@@ -113,6 +118,16 @@ Large files (5GB+) are handled reliably using an upload-first approach:
 2. **ATC session** — short handshake + metadata registration + asset linking. Takes seconds, not minutes. No timeout risk.
 
 This eliminates the main failure mode of traditional sync tools where metadata gets registered before the file transfer completes, leaving unplayable ghost entries.
+
+### Pipelined transcode + upload
+
+When multiple files are queued, mediaporter runs transcoding and uploading in parallel:
+
+- Parallel ffmpeg workers handle transcoding (`-j N` or auto).
+- A dedicated uploader thread streams each file to the device over AFC the moment its transcode finishes — no waiting for the whole batch.
+- A single short ATC session at the very end registers every file at once.
+
+On a USB-C iPad Pro, file transfers hit ~150–180 MB/s (1.2–1.5 Gbps), so the upload phase typically finishes well inside the transcode phase for parallel runs.
 
 ### Protocol details
 
