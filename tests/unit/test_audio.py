@@ -14,8 +14,23 @@ def test_aac_copy():
     assert action.target_codec is None
 
 
-def test_ac3_copy():
+def test_ac3_transcode():
+    # AC3 decodes on iPad but the TV app's audio-language switcher silently
+    # drops AC3 tracks from its list, so we transcode them to AAC.
+    # See research/docs/AUDIO_SWITCHER_RULE.md.
     action = classify_audio_stream(_stream("ac3"))
+    assert action.action == "transcode"
+    assert action.target_codec == "aac"
+
+    surround = classify_audio_stream(_stream("ac3", channels=6))
+    assert surround.action == "transcode"
+    assert surround.target_codec == "aac"
+    assert surround.target_channels == 6
+    assert surround.target_bitrate == "384k"
+
+
+def test_eac3_copy():
+    action = classify_audio_stream(_stream("eac3"))
     assert action.action == "copy"
 
 

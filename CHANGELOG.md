@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.2 — 2026-04-13
+
+Corrects the iPad audio-language-switcher rule and drops a lot of incidental re-encoding along the way. Previous versions believed "every audio track must share a codec or the switcher disappears" and normalized the whole track set; the real rule is codec-specific and much cheaper.
+
+### Changed
+
+- **AC3 → AAC transcode, AAC + EAC3 copy.** The iPad TV app decodes AC3 but silently drops AC3 tracks from the audio-language selector. AAC and EAC3 are both listable and can coexist freely. The pipeline now transcodes only the AC3 tracks (stereo 256k / 5.1 384k AAC) and copies AAC + EAC3 through untouched, so a typical `ac3 + eac3` release gets its 5.1 EAC3 preserved bit-perfect instead of being re-encoded. `compat.COMPATIBLE_AUDIO_CODECS` drops `ac3`.
+- **Exactly one default audio track, enforced at ffmpeg invocation.** A track that carries `default` disposition on every audio stream (or inherits multiple defaults from a careless source) kills the switcher entirely. `build_ffmpeg_command` now always emits `-disposition:a:0 default` plus `-disposition:a:N 0` for the rest, regardless of source state. The MP4 muxer still forces at least one default, so "no defaults" is not a failure mode.
+- **`_partition_jobs` no longer force-remuxes mixed-codec files.** Per-stream codec decisions in `compat.evaluate_compatibility` are authoritative — files with AC3 partition into `needs_transcode` naturally, files with only compatible codecs in different flavors (e.g. `aac + eac3`) pass through as copy.
+
+### Removed
+
+- `mediaporter.audio.pick_normalization_codec()` and `target_bitrate_for()` — both existed only to implement the incorrect "pick the best codec and normalize everything to it" rule. Their callers in `transcode.py`, `pipeline.py`, and `progress.py` have been simplified accordingly.
+
+### Research
+
+- **`research/docs/AUDIO_SWITCHER_RULE.md`** — full experimental matrix (11 variants A–K) proving the codec-specific rule. Source file: `The.Luckiest.Man.in.America.2024.AMZN.WEB-DL.1080p.mkv` with 4 audio tracks (2× RU AC3, 1× UK AAC, 1× EN EAC3 5.1). Every outcome is explained by "AAC/EAC3 listable, AC3 silently filtered, need ≥2 listable tracks, exactly one default."
+- **`scripts/test_audio_switcher.py`** — reproducible test harness. Builds all 11 variants from one MKV, generates distinct labeled cover JPEGs per variant (so they're identifiable on-device by color and big letter), and syncs them via `mediaporter.sync.sync_files`. Supports `--only A,B,C`, `--no-build`, `--no-sync` for iterative workflows.
+- **CLAUDE.md finding #15** rewritten. The 2026-04-06 "all tracks must share a codec" assumption was conflating the AC3-specific filter with a codec-uniformity requirement.
+
 ## 0.3.1 — 2026-04-10
 
 Pipelined transcode+upload, smarter audio normalization, safer ffmpeg handling, and disk-space-aware runs with a full summary at the end.

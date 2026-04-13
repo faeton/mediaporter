@@ -361,15 +361,12 @@ def _transcode_one(
 def _partition_jobs(jobs: list[FileJob]) -> tuple[list[FileJob], list[FileJob]]:
     """Split analyzed jobs into (needs_work, already_ok).
 
-    Several conditions force a remux even when every stream individually
-    copies cleanly:
-      - Track selection: the user picked a subset of audio/subtitles.
-      - Mixed-codec audio: the selected set has multiple audio codecs, which
-        breaks the iPad TV app's language switcher. build_ffmpeg_command
-        normalizes to the best codec present (EAC3 > AC3 > AAC).
+    Track selection (the user picked a subset of audio/subtitles) forces a
+    remux even when every stream individually copies cleanly. Per-stream
+    codec compatibility is already encoded in decision.needs_transcode by
+    compat.evaluate_compatibility — files containing AC3 audio will land in
+    needs_work automatically because AC3 is no longer listed as compatible.
     """
-    from mediaporter.audio import pick_normalization_codec
-
     for j in jobs:
         if not j.decision or not j.media_info:
             continue
@@ -381,16 +378,6 @@ def _partition_jobs(jobs: list[FileJob]) -> tuple[list[FileJob], list[FileJob]]:
         )
         if has_selection and not j.decision.needs_transcode and not j.decision.needs_remux:
             j.decision.needs_remux = True
-
-        audio_idx = (
-            j.selected_audio
-            if j.selected_audio is not None
-            else list(range(len(j.media_info.audio_streams)))
-        )
-        selected_streams = [j.media_info.audio_streams[i] for i in audio_idx]
-        if pick_normalization_codec(selected_streams):
-            if not j.decision.needs_transcode and not j.decision.needs_remux:
-                j.decision.needs_remux = True
 
     needs_work = [
         j for j in jobs

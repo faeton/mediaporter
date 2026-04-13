@@ -34,12 +34,7 @@ def cancel_all() -> None:
             except Exception:
                 pass
 
-from mediaporter.audio import (
-    AudioAction,
-    classify_all_audio,
-    pick_normalization_codec,
-    target_bitrate_for,
-)
+from mediaporter.audio import AudioAction, classify_all_audio
 from mediaporter.compat import TEXT_SUBTITLE_CODECS, TranscodeDecision
 from mediaporter.exceptions import TranscodeError
 from mediaporter.probe import MediaInfo
@@ -152,28 +147,15 @@ def build_ffmpeg_command(
 
     # Audio codecs (per output track).
     #
-    # The iPad TV app's language switcher needs every audio track to share a
-    # codec. For mixed-codec files we normalize to the BEST codec already
-    # present in the file (EAC3 > AC3 > AAC) instead of blindly re-encoding
-    # everything to AAC — that way surround tracks stay in Dolby and only the
-    # mismatched track gets re-encoded.
+    # AAC and EAC3 are iPad-compatible AND appear in the TV app's audio
+    # selector — copy them through untouched. AC3 decodes but is silently
+    # excluded from the selector, so we transcode it to AAC (with every
+    # other incompatible codec). See research/docs/AUDIO_SWITCHER_RULE.md.
     selected_actions = [audio_actions[i] for i in audio_indices]
     selected_streams = [media_info.audio_streams[i] for i in audio_indices]
-    norm_codec = pick_normalization_codec(selected_streams)
 
-    for out_idx, (action, stream) in enumerate(zip(selected_actions, selected_streams)):
-        src_codec = stream.codec_name.lower()
-        channels = stream.channels or 2
-
-        if norm_codec:
-            if src_codec == norm_codec:
-                # Already in the target codec — pass it through untouched.
-                cmd.extend([f"-c:a:{out_idx}", "copy"])
-            else:
-                cmd.extend([f"-c:a:{out_idx}", norm_codec])
-                cmd.extend([f"-b:a:{out_idx}", target_bitrate_for(norm_codec, channels)])
-                cmd.extend([f"-ac:a:{out_idx}", str(channels)])
-        elif action.action == "copy":
+    for out_idx, (action, _stream) in enumerate(zip(selected_actions, selected_streams)):
+        if action.action == "copy":
             cmd.extend([f"-c:a:{out_idx}", "copy"])
         else:
             cmd.extend([f"-c:a:{out_idx}", "aac"])
@@ -181,6 +163,16 @@ def build_ffmpeg_command(
                 cmd.extend([f"-b:a:{out_idx}", action.target_bitrate])
             if action.target_channels:
                 cmd.extend([f"-ac:a:{out_idx}", str(action.target_channels)])
+
+    # Audio disposition — exactly one default track.
+    #
+    # The TV app switcher breaks if multiple audio tracks carry the `default`
+    # flag (variant A in the test matrix). The mp4 muxer will happily copy
+    # multiple defaults through from the source, so we pin a:0 as the only
+    # default and clear the rest regardless of what the source had.
+    for out_idx in range(len(audio_indices)):
+        flag = "default" if out_idx == 0 else "0"
+        cmd.extend([f"-disposition:a:{out_idx}", flag])
 
     # Audio metadata (per output track)
     for out_idx, src_idx in enumerate(audio_indices):

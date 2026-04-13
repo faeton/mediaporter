@@ -1,6 +1,6 @@
 [project]
 name = "mediaporter"
-version = "0.3.1"
+version = "0.3.2"
 description = "Transfer videos to iPhone/iPad TV app over USB — no iTunes, no cloud, automatic transcoding"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.11"

@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from mediaporter.probe import MediaInfo
 
 COMPATIBLE_VIDEO_CODECS = {"h264", "hevc", "h265"}
-COMPATIBLE_AUDIO_CODECS = {"aac", "ac3", "eac3", "alac", "mp3"}
+# AC3 is deliberately excluded: the iPad TV app decodes it but silently
+# drops it from the audio-language switcher. See
+# research/docs/AUDIO_SWITCHER_RULE.md. AC3 tracks are transcoded to AAC.
+COMPATIBLE_AUDIO_CODECS = {"aac", "eac3", "alac", "mp3"}
 TEXT_SUBTITLE_CODECS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt"}
 BITMAP_SUBTITLE_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "pgssub"}
 

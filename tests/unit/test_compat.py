@@ -50,9 +50,12 @@ def test_aac_copy():
     assert d.stream_actions[1] == "copy"
 
 
-def test_ac3_copy():
+def test_ac3_transcode():
+    # AC3 is marked incompatible because the iPad TV app drops AC3 tracks
+    # from the audio-language selector (see research/docs/AUDIO_SWITCHER_RULE.md).
     d = evaluate_compatibility(_mi(audio_codec="ac3"))
-    assert d.stream_actions[1] == "copy"
+    assert d.stream_actions[1] == "transcode"
+    assert d.needs_transcode
 
 
 def test_eac3_copy():
