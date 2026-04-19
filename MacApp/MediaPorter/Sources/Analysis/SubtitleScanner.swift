@@ -77,11 +77,11 @@ func scanExternalSubtitles(mediaInfo: inout MediaInfo) {
 }
 
 /// Check if a subtitle codec is bitmap-based.
-func isBitmapSubtitle(_ codecName: String) -> Bool {
+public func isBitmapSubtitle(_ codecName: String) -> Bool {
     CodecSets.bitmapSubtitles.contains(codecName)
 }
 
 /// Check if a subtitle codec is text-based.
-func isTextSubtitle(_ codecName: String) -> Bool {
+public func isTextSubtitle(_ codecName: String) -> Bool {
     CodecSets.textSubtitles.contains(codecName)
 }

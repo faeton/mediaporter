@@ -23,6 +23,8 @@ public struct StreamInfo {
     public let title: String?
     public let isDefault: Bool
     public let isForced: Bool
+    /// hearing_impaired disposition — SDH subs (captions describing sounds + dialog).
+    public let isHearingImpaired: Bool
 
     public init(
         index: Int,
@@ -39,7 +41,8 @@ public struct StreamInfo {
         language: String? = nil,
         title: String? = nil,
         isDefault: Bool = false,
-        isForced: Bool = false
+        isForced: Bool = false,
+        isHearingImpaired: Bool = false
     ) {
         self.index = index
         self.codecType = codecType
@@ -56,6 +59,7 @@ public struct StreamInfo {
         self.title = title
         self.isDefault = isDefault
         self.isForced = isForced
+        self.isHearingImpaired = isHearingImpaired
     }
 }
 
@@ -189,7 +193,8 @@ public func probeFile(url: URL) async throws -> MediaInfo {
             language: tags["language"],
             title: tags["title"],
             isDefault: disposition["default"] as? Int == 1,
-            isForced: disposition["forced"] as? Int == 1
+            isForced: disposition["forced"] as? Int == 1,
+            isHearingImpaired: disposition["hearing_impaired"] as? Int == 1
         )
 
         switch codecType {

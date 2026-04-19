@@ -115,7 +115,7 @@ struct FileRowView: View {
             }
             MetaDot(theme: theme)
             if let v = job.mediaInfo?.videoStreams.first {
-                Text("\(v.width)×\(v.height) · \(v.codecName.uppercased())")
+                Text(videoDimensionSummary(v))
                     .font(.system(size: 11))
                     .foregroundStyle(theme.textDim)
             }
@@ -180,7 +180,7 @@ struct FileRowView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     if let v = job.mediaInfo?.videoStreams.first {
-                        Text("\(v.codecName.uppercased()) · \(v.width)×\(v.height)" + (v.profile.map { " · \($0)" } ?? ""))
+                        Text(videoExpandedSummary(v))
                             .font(.system(size: 12)).foregroundStyle(theme.text)
                     }
                     ActionChip(action: videoAction, theme: theme)
@@ -240,6 +240,129 @@ struct FileRowView: View {
         return decision.streamActions[firstV.index] ?? (decision.needsTranscode ? "transcode" : "copy")
     }
 
+    /// Compact video dimensions for the meta row. Unwrap Int? explicitly so
+    /// string interpolation doesn't leak "Optional(3840)".
+    private func videoDimensionSummary(_ v: StreamInfo) -> String {
+        let dims = (v.width.flatMap { w in v.height.map { h in "\(w)×\(h)" } }) ?? ""
+        let codec = v.codecName.uppercased()
+        return dims.isEmpty ? codec : "\(dims) · \(codec)"
+    }
+
+    /// Fuller video line for the expanded section (codec · dims · profile).
+    private func videoExpandedSummary(_ v: StreamInfo) -> String {
+        let dims = (v.width.flatMap { w in v.height.map { h in "\(w)×\(h)" } }) ?? ""
+        var parts: [String] = [v.codecName.uppercased()]
+        if !dims.isEmpty { parts.append(dims) }
+        if let p = v.profile, !p.isEmpty { parts.append(p) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Short human label for the codec column in the subtitle list.
+    private func subtitleKindLabel(_ s: StreamInfo) -> String {
+        switch s.codecName {
+        case "subrip", "srt": return "SRT"
+        case "ass", "ssa": return "ASS"
+        case "mov_text": return "MOV_TEXT"
+        case "webvtt": return "WEBVTT"
+        case "hdmv_pgs_subtitle", "pgssub": return "PGS"
+        case "dvd_subtitle": return "VOBSUB"
+        case "dvb_subtitle": return "DVB"
+        default: return s.codecName.uppercased()
+        }
+    }
+
+    /// Disposition flags worth surfacing per subtitle track. "default" is only
+    /// shown when it contradicts the language (e.g. default on a non-primary
+    /// language), since "default" on a single-language sub is meaningless.
+    private func subtitleDispositionTags(_ s: StreamInfo) -> [String] {
+        var tags: [String] = []
+        if s.isForced { tags.append("forced") }
+        if s.isHearingImpaired { tags.append("SDH") }
+        if s.isDefault { tags.append("default") }
+        return tags
+    }
+
+    /// A single subtitle track row (checkbox + language + codec + flags + chip).
+    /// Extracted so the ViewBuilder in subtitlesSection doesn't get tangled in
+    /// nested ForEach type inference.
+    @ViewBuilder
+    private func subtitleRow(subs: [StreamInfo], index i: Int) -> some View {
+        let s = subs[i]
+        let rawAction = job.decision?.streamActions[s.index] ?? "embed"
+        let act: String = {
+            if rawAction == "skip" { return isBitmapSubtitle(s.codecName) ? "bitmap" : "skip" }
+            if rawAction == "convert_to_mov_text" { return "convert" }
+            return rawAction
+        }()
+        let disabled = rawAction == "skip" && isBitmapSubtitle(s.codecName)
+        let on = job.selectedSubtitles.contains(i)
+
+        SelectableLine(
+            checked: on, theme: theme, accent: accent, disabled: disabled,
+            onTap: { toggleSubtitle(i) }
+        ) {
+            HStack(spacing: 8) {
+                Text(s.language ?? "und")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.text)
+                    .frame(minWidth: 50, alignment: .leading)
+                Text(subtitleKindLabel(s))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+                ForEach(subtitleDispositionTags(s), id: \.self) { tag in
+                    Text(tag)
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(theme.pill, in: RoundedRectangle(cornerRadius: 3))
+                        .foregroundStyle(theme.pillText)
+                }
+                if let t = s.title, !t.isEmpty {
+                    Text("· \(t)")
+                        .font(.system(size: 11).italic())
+                        .foregroundStyle(theme.textFaint)
+                        .lineLimit(1).truncationMode(.tail)
+                }
+                Spacer(minLength: 8)
+                ActionChip(action: act, theme: theme)
+            }
+        }
+    }
+
+    /// One-line explainer shown above the subtitle checklist. Message depends
+    /// on what kinds of subs the file actually has, so it's informative instead
+    /// of generic ("drop a .srt next to the file" wouldn't help if the user
+    /// already has text subs available).
+    @ViewBuilder
+    private var subtitleExplainer: some View {
+        let subs = job.mediaInfo?.subtitleStreams ?? []
+        let hasAnyText = subs.contains { !isBitmapSubtitle($0.codecName) }
+        let hasAnyBitmap = subs.contains { isBitmapSubtitle($0.codecName) }
+        let onlyBitmap = !subs.isEmpty && !hasAnyText && hasAnyBitmap
+
+        if onlyBitmap {
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textDim)
+                Text("All subtitles are bitmap (PGS/VOBSUB) — the TV app can't display those in MP4. Drop a .srt alongside the file to add text subs.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.bottom, 6)
+        } else if hasAnyBitmap && hasAnyText {
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textDim)
+                Text("Bitmap subtitles (PGS/VOBSUB) can't be embedded — only text subs will ship.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textDim)
+            }
+            .padding(.bottom, 6)
+        }
+    }
+
     private func audioSection(audios: [StreamInfo]) -> some View {
         OptionsRow(label: "Audio", systemImage: "waveform", theme: theme) {
             VStack(alignment: .leading, spacing: 2) {
@@ -281,38 +404,10 @@ struct FileRowView: View {
     private var subtitlesSection: some View {
         OptionsRow(label: "Subtitles", systemImage: "captions.bubble", theme: theme) {
             VStack(alignment: .leading, spacing: 2) {
+                subtitleExplainer
                 if let subs = job.mediaInfo?.subtitleStreams {
                     ForEach(subs.indices, id: \.self) { i in
-                        let s = subs[i]
-                        let act = job.decision?.streamActions[s.index] ?? "embed"
-                        let disabled = act == "skip-bitmap"
-                        let on = job.selectedSubtitles.contains(i)
-                        SelectableLine(checked: on, theme: theme, accent: accent,
-                                       disabled: disabled,
-                                       onTap: { toggleSubtitle(i) }) {
-                            HStack(spacing: 8) {
-                                Text(s.language ?? "Unknown")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(theme.text)
-                                    .frame(minWidth: 80, alignment: .leading)
-                                Text(s.codecName.uppercased())
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(theme.textDim)
-                                if s.isForced {
-                                    Text("[forced]")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(theme.textFaint)
-                                }
-                                if let t = s.title, !t.isEmpty {
-                                    Text("· \(t)")
-                                        .font(.system(size: 11).italic())
-                                        .foregroundStyle(theme.textFaint)
-                                        .lineLimit(1).truncationMode(.tail)
-                                }
-                                Spacer(minLength: 8)
-                                ActionChip(action: act, theme: theme)
-                            }
-                        }
+                        subtitleRow(subs: subs, index: i)
                     }
                 }
                 if let ext = job.mediaInfo?.externalSubtitles {
@@ -778,7 +873,12 @@ struct ActionChip: View {
         case "copy":        return (theme.chipCopy, theme.chipCopyText, "copy")
         case "transcode":   return (theme.chipTranscode, theme.chipTranscodeText, "transcode")
         case "embed":       return (theme.chipCopy, theme.chipCopyText, "embed")
-        case "skip-bitmap": return (theme.chipSkip, theme.chipSkipText, "bitmap · skip")
+        case "skip":        return (theme.pill, theme.pillText, "skip")
+        // Bitmap subs can't go into MP4 — it's a container limit, not an error.
+        // Neutral pill instead of red-alert so the row doesn't look broken.
+        case "bitmap":      return (theme.pill, theme.pillText, "bitmap · can't embed")
+        case "convert":     return (theme.chipRemux, theme.chipRemuxText, "convert to mov_text")
+        case "skip-bitmap": return (theme.pill, theme.pillText, "bitmap · can't embed")
         case "remux":       return (theme.chipRemux, theme.chipRemuxText, "remux")
         default:            return (theme.pill, theme.pillText, action)
         }
