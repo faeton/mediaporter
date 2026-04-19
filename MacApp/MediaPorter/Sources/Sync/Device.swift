@@ -7,10 +7,108 @@ public struct DeviceInfo {
     public let handle: UnsafeRawPointer
     public var deviceName: String = "iOS Device"
     public var productType: String = ""      // e.g. "iPad13,4", "iPhone15,2"
+    public var productVersion: String = ""   // e.g. "17.4.1"
     public var deviceClass: String = ""      // "iPad", "iPhone", "iPod"
+    public var modelNumber: String = ""
     public var screenPixelHeight: Int = 2048 // native pixel height (longest edge)
     public var screenScale: Int = 2          // retina scale factor (2x or 3x)
 }
+
+// MARK: - Device Model Table
+//
+// ProductType → (friendly name, native display resolution in "WxH" form).
+// Ported from src/mediaporter/sync/device.py — covers common iPads and iPhones
+// from ~2019 onward. Unknown product types fall back to the raw identifier.
+
+private let deviceModels: [String: (name: String, resolution: String)] = [
+    // iPads
+    "iPad7,1": ("iPad Pro 12.9\" (2nd gen)", "2732x2048"),
+    "iPad7,2": ("iPad Pro 12.9\" (2nd gen)", "2732x2048"),
+    "iPad7,3": ("iPad Pro 10.5\"", "2224x1668"),
+    "iPad7,4": ("iPad Pro 10.5\"", "2224x1668"),
+    "iPad7,5": ("iPad (6th gen)", "2048x1536"),
+    "iPad7,6": ("iPad (6th gen)", "2048x1536"),
+    "iPad7,11": ("iPad (7th gen)", "2160x1620"),
+    "iPad7,12": ("iPad (7th gen)", "2160x1620"),
+    "iPad8,1": ("iPad Pro 11\" (1st gen)", "2388x1668"),
+    "iPad8,2": ("iPad Pro 11\" (1st gen)", "2388x1668"),
+    "iPad8,3": ("iPad Pro 11\" (1st gen)", "2388x1668"),
+    "iPad8,4": ("iPad Pro 11\" (1st gen)", "2388x1668"),
+    "iPad8,5": ("iPad Pro 12.9\" (3rd gen)", "2732x2048"),
+    "iPad8,6": ("iPad Pro 12.9\" (3rd gen)", "2732x2048"),
+    "iPad8,7": ("iPad Pro 12.9\" (3rd gen)", "2732x2048"),
+    "iPad8,8": ("iPad Pro 12.9\" (3rd gen)", "2732x2048"),
+    "iPad8,9": ("iPad Pro 11\" (2nd gen)", "2388x1668"),
+    "iPad8,10": ("iPad Pro 11\" (2nd gen)", "2388x1668"),
+    "iPad8,11": ("iPad Pro 12.9\" (4th gen)", "2732x2048"),
+    "iPad8,12": ("iPad Pro 12.9\" (4th gen)", "2732x2048"),
+    "iPad11,1": ("iPad mini (5th gen)", "2048x1536"),
+    "iPad11,2": ("iPad mini (5th gen)", "2048x1536"),
+    "iPad11,3": ("iPad Air (3rd gen)", "2224x1668"),
+    "iPad11,4": ("iPad Air (3rd gen)", "2224x1668"),
+    "iPad11,6": ("iPad (8th gen)", "2160x1620"),
+    "iPad11,7": ("iPad (8th gen)", "2160x1620"),
+    "iPad12,1": ("iPad (9th gen)", "2160x1620"),
+    "iPad12,2": ("iPad (9th gen)", "2160x1620"),
+    "iPad13,1": ("iPad Air (4th gen)", "2360x1640"),
+    "iPad13,2": ("iPad Air (4th gen)", "2360x1640"),
+    "iPad13,4": ("iPad Pro 11\" (3rd gen)", "2388x1668"),
+    "iPad13,5": ("iPad Pro 11\" (3rd gen)", "2388x1668"),
+    "iPad13,6": ("iPad Pro 11\" (3rd gen)", "2388x1668"),
+    "iPad13,7": ("iPad Pro 11\" (3rd gen)", "2388x1668"),
+    "iPad13,8": ("iPad Pro 12.9\" (5th gen)", "2732x2048"),
+    "iPad13,9": ("iPad Pro 12.9\" (5th gen)", "2732x2048"),
+    "iPad13,10": ("iPad Pro 12.9\" (5th gen)", "2732x2048"),
+    "iPad13,11": ("iPad Pro 12.9\" (5th gen)", "2732x2048"),
+    "iPad13,16": ("iPad Air (5th gen)", "2360x1640"),
+    "iPad13,17": ("iPad Air (5th gen)", "2360x1640"),
+    "iPad13,18": ("iPad (10th gen)", "2360x1640"),
+    "iPad13,19": ("iPad (10th gen)", "2360x1640"),
+    "iPad14,1": ("iPad mini (6th gen)", "2266x1488"),
+    "iPad14,2": ("iPad mini (6th gen)", "2266x1488"),
+    "iPad14,3": ("iPad Pro 11\" (4th gen)", "2388x1668"),
+    "iPad14,4": ("iPad Pro 11\" (4th gen)", "2388x1668"),
+    "iPad14,5": ("iPad Pro 12.9\" (6th gen)", "2732x2048"),
+    "iPad14,6": ("iPad Pro 12.9\" (6th gen)", "2732x2048"),
+    "iPad14,8": ("iPad Air 11\" (M2)", "2360x1640"),
+    "iPad14,9": ("iPad Air 11\" (M2)", "2360x1640"),
+    "iPad14,10": ("iPad Air 13\" (M2)", "2732x2048"),
+    "iPad14,11": ("iPad Air 13\" (M2)", "2732x2048"),
+    "iPad16,3": ("iPad Pro 11\" (M4)", "2420x1668"),
+    "iPad16,4": ("iPad Pro 11\" (M4)", "2420x1668"),
+    "iPad16,5": ("iPad Pro 13\" (M4)", "2752x2064"),
+    "iPad16,6": ("iPad Pro 13\" (M4)", "2752x2064"),
+    // iPhones
+    "iPhone11,2": ("iPhone XS", "2436x1125"),
+    "iPhone11,4": ("iPhone XS Max", "2688x1242"),
+    "iPhone11,6": ("iPhone XS Max", "2688x1242"),
+    "iPhone11,8": ("iPhone XR", "1792x828"),
+    "iPhone12,1": ("iPhone 11", "1792x828"),
+    "iPhone12,3": ("iPhone 11 Pro", "2436x1125"),
+    "iPhone12,5": ("iPhone 11 Pro Max", "2688x1242"),
+    "iPhone12,8": ("iPhone SE (2nd gen)", "1334x750"),
+    "iPhone13,1": ("iPhone 12 mini", "2340x1080"),
+    "iPhone13,2": ("iPhone 12", "2532x1170"),
+    "iPhone13,3": ("iPhone 12 Pro", "2532x1170"),
+    "iPhone13,4": ("iPhone 12 Pro Max", "2778x1284"),
+    "iPhone14,2": ("iPhone 13 Pro", "2532x1170"),
+    "iPhone14,3": ("iPhone 13 Pro Max", "2778x1284"),
+    "iPhone14,4": ("iPhone 13 mini", "2340x1080"),
+    "iPhone14,5": ("iPhone 13", "2532x1170"),
+    "iPhone14,6": ("iPhone SE (3rd gen)", "1334x750"),
+    "iPhone14,7": ("iPhone 14", "2532x1170"),
+    "iPhone14,8": ("iPhone 14 Plus", "2778x1284"),
+    "iPhone15,2": ("iPhone 14 Pro", "2556x1179"),
+    "iPhone15,3": ("iPhone 14 Pro Max", "2796x1290"),
+    "iPhone15,4": ("iPhone 15", "2556x1179"),
+    "iPhone15,5": ("iPhone 15 Plus", "2796x1290"),
+    "iPhone16,1": ("iPhone 15 Pro", "2556x1179"),
+    "iPhone16,2": ("iPhone 15 Pro Max", "2796x1290"),
+    "iPhone17,1": ("iPhone 16 Pro", "2622x1206"),
+    "iPhone17,2": ("iPhone 16 Pro Max", "2868x1320"),
+    "iPhone17,3": ("iPhone 16", "2556x1179"),
+    "iPhone17,4": ("iPhone 16 Plus", "2796x1290"),
+]
 
 extension DeviceInfo {
     /// Effective point height = pixels / scale. This is what matters for video.
@@ -39,15 +137,25 @@ extension DeviceInfo {
         "\(screenPixelHeight / screenScale)p"
     }
 
-    /// Human-readable device description.
+    /// Friendly model name from the product-type table, or the raw ProductType if unknown.
+    public var modelName: String {
+        if let entry = deviceModels[productType] { return entry.name }
+        return productType.isEmpty ? (deviceClass.isEmpty ? "iOS Device" : deviceClass) : productType
+    }
+
+    /// Native display resolution (e.g. "2732x2048") if known.
+    public var nativeResolution: String? { deviceModels[productType]?.resolution }
+
+    /// Recommended transcode target. 1080p plays natively on every shipped iPad/iPhone
+    /// and is indistinguishable from 2K+ source at typical viewing distances.
+    public var optimalTranscodeResolution: String { "1920x1080 (1080p H.264/HEVC)" }
+
+    /// Human-readable device description — prefers user-set DeviceName, falls back to model name.
     public var displayName: String {
         if !deviceName.isEmpty && deviceName != "iOS Device" {
             return deviceName
         }
-        if !productType.isEmpty {
-            return "\(deviceClass.isEmpty ? "iOS" : deviceClass) (\(productType))"
-        }
-        return String(udid.prefix(12)) + "..."
+        return modelName
     }
 }
 
@@ -83,7 +191,9 @@ private func queryDeviceInfo(device: UnsafeRawPointer, udid: String) -> DeviceIn
 
     info.deviceName = readDeviceValue(device, key: "DeviceName") ?? "iOS Device"
     info.productType = readDeviceValue(device, key: "ProductType") ?? ""
+    info.productVersion = readDeviceValue(device, key: "ProductVersion") ?? ""
     info.deviceClass = readDeviceValue(device, key: "DeviceClass") ?? ""
+    info.modelNumber = readDeviceValue(device, key: "ModelNumber") ?? ""
 
     // Map product types to screen specs
     let (pixels, scale) = screenSpecsForProduct(info.productType, deviceClass: info.deviceClass)
@@ -91,6 +201,29 @@ private func queryDeviceInfo(device: UnsafeRawPointer, udid: String) -> DeviceIn
     info.screenScale = scale
 
     return info
+}
+
+/// Query (freeBytes, totalBytes) from the device via the lockdown `com.apple.disk_usage`
+/// domain. Returns nil if connection/session/values fail. Mirrors Python's
+/// `query_device_disk_space()`.
+public func queryDeviceDiskSpace(device: UnsafeRawPointer) -> (free: Int64, total: Int64)? {
+    guard MD.connect(device) == 0 else { return nil }
+    defer { /* framework manages connection lifecycle */ }
+    guard MD.startSession(device) == 0 else { return nil }
+
+    let domain = "com.apple.disk_usage" as CFString
+    let totalRef = MD.copyValue(device, domain, "TotalDiskCapacity" as CFString)
+    let freeRef = MD.copyValue(device, domain, "AmountDataAvailable" as CFString)
+
+    func asInt64(_ ref: CFTypeRef?) -> Int64? {
+        guard let ref else { return nil }
+        if CFGetTypeID(ref) != CFNumberGetTypeID() { return nil }
+        var v: Int64 = 0
+        guard CFNumberGetValue((ref as! CFNumber), .sInt64Type, &v) else { return nil }
+        return v
+    }
+    guard let total = asInt64(totalRef), let free = asInt64(freeRef) else { return nil }
+    return (free, total)
 }
 
 /// Map ProductType to (pixel height, scale factor).

@@ -28,12 +28,10 @@ struct ContentView: View {
     }
 
     /// Continue from analyzed → transcode → sync (for jobs already analyzed).
+    /// Uses the pipelined runner so upload of file N overlaps transcode of file N+1.
     private func continueToSync() {
         guard !pipeline.isRunning else { return }
-        Task {
-            await pipeline.transcodeAll()
-            await pipeline.syncToDevice()
-        }
+        Task { await pipeline.runPipelined() }
     }
 
     var body: some View {

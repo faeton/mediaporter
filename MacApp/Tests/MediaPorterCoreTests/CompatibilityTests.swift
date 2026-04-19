@@ -62,10 +62,12 @@ final class CompatibilityTests: XCTestCase {
         XCTAssertEqual(d.streamActions[1], "copy")
     }
 
-    // BASELINE: AC3 currently copies. Phase 1 flips this to "transcode".
-    func testAC3CopyBaseline() {
+    // Post-0.3.2 rule: AC3 must transcode because the iPad TV app drops AC3
+    // from the audio-language switcher (see research/docs/AUDIO_SWITCHER_RULE.md).
+    func testAC3Transcodes() {
         let d = evaluateCompatibility(mediaInfo: mediaInfo(audioCodec: "ac3"))
-        XCTAssertEqual(d.streamActions[1], "copy")
+        XCTAssertEqual(d.streamActions[1], "transcode")
+        XCTAssertTrue(d.needsTranscode)
     }
 
     func testEAC3Copy() {

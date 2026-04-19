@@ -15,10 +15,21 @@ final class AudioClassifierTests: XCTestCase {
         XCTAssertNil(a.targetCodec)
     }
 
-    // BASELINE: AC3 currently copies. Phase 1 flips this to "transcode" → aac.
+    // Post-0.3.2 rule: AC3 is excluded from compatible-audio because the iPad TV
+    // app silently drops AC3 tracks from the audio-language switcher. Forced to AAC.
     func testAC3CopyBaseline() {
-        let a = classifyAudioStream(stream("ac3"))
-        XCTAssertEqual(a.action, "copy")
+        let a = classifyAudioStream(stream("ac3", channels: 6))
+        XCTAssertEqual(a.action, "transcode")
+        XCTAssertEqual(a.targetCodec, "aac")
+        XCTAssertEqual(a.targetChannels, 6)
+        XCTAssertEqual(a.targetBitrate, "384k")
+    }
+
+    func testAC3StereoTranscodes() {
+        let a = classifyAudioStream(stream("ac3", channels: 2))
+        XCTAssertEqual(a.action, "transcode")
+        XCTAssertEqual(a.targetCodec, "aac")
+        XCTAssertEqual(a.targetBitrate, "256k")
     }
 
     func testEAC3Copy() {

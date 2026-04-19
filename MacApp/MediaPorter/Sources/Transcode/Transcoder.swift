@@ -16,7 +16,75 @@ enum TranscodeError: LocalizedError {
     }
 }
 
-enum Transcoder {
+/// Thread-safe registry of running ffmpeg processes so we can cancel them all on Ctrl+C or
+/// user-initiated cancel. Mirrors transcode.py's _active_procs set + cancel_all().
+private final class ActiveProcesses: @unchecked Sendable {
+    static let shared = ActiveProcesses()
+    private let lock = NSLock()
+    private var procs: Set<ObjectIdentifier> = []
+    private var byID: [ObjectIdentifier: Process] = [:]
+
+    func add(_ p: Process) {
+        lock.lock(); defer { lock.unlock() }
+        let id = ObjectIdentifier(p)
+        procs.insert(id)
+        byID[id] = p
+    }
+
+    func remove(_ p: Process) {
+        lock.lock(); defer { lock.unlock() }
+        let id = ObjectIdentifier(p)
+        procs.remove(id)
+        byID[id] = nil
+    }
+
+    func cancelAll() {
+        lock.lock()
+        let running = Array(byID.values)
+        lock.unlock()
+        for p in running where p.isRunning {
+            p.terminate()
+        }
+    }
+}
+
+/// Thread-safe rolling-tail buffer for ffmpeg stderr. Keeps the last N lines so we can
+/// include them in error messages without letting the 64 KB OS pipe fill up and deadlock
+/// ffmpeg's write(2). Mirrors transcode.py's stderr-drain thread.
+private final class StderrTail: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    private let maxLines: Int
+    private var carry = ""
+
+    init(maxLines: Int = 200) { self.maxLines = maxLines }
+
+    func append(_ chunk: Data) {
+        guard let s = String(data: chunk, encoding: .utf8), !s.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        let combined = carry + s
+        let parts = combined.components(separatedBy: "\n")
+        carry = parts.last ?? ""
+        for part in parts.dropLast() where !part.isEmpty {
+            lines.append(part)
+            if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
+        }
+    }
+
+    func joined() -> String {
+        lock.lock(); defer { lock.unlock() }
+        var out = lines
+        if !carry.isEmpty { out.append(carry) }
+        return out.joined(separator: "\n")
+    }
+}
+
+public enum Transcoder {
+    /// Terminate every ffmpeg process that's currently running.
+    public static func cancelAll() {
+        ActiveProcesses.shared.cancelAll()
+    }
+
     /// Detect if VideoToolbox HEVC encoder is available.
     static func detectVideoToolbox() -> Bool {
         guard let ffmpeg = FFmpegLocator.ffmpeg else { return false }
@@ -113,20 +181,13 @@ enum Transcoder {
             }
         }
 
-        // Audio codec — check if we need to normalize mixed codecs to AAC
-        let selectedActions = audioIndices.compactMap { i -> AudioAction? in
-            guard i < audioActions.count else { return nil }
-            return audioActions[i]
-        }
-        let codecs = Set(selectedActions.map { $0.action == "copy" ? $0.stream.codecName : "aac" })
-        let forceMixedToAAC = codecs.count > 1 && selectedActions.count > 1
-
+        // Audio codec — per-track copy vs transcode (AC3 is NOT compatible; forced to AAC).
+        // Mixed codecs (e.g. aac+eac3) are fine and play correctly in the TV app.
         for (outIdx, audioIdx) in audioIndices.enumerated() {
             guard audioIdx < audioActions.count else { continue }
             let aa = audioActions[audioIdx]
 
-            if forceMixedToAAC || aa.action == "transcode" {
-                // Transcode to AAC
+            if aa.action == "transcode" {
                 let channels = aa.targetChannels ?? (aa.stream.channels ?? 2)
                 let bitrate = aa.targetBitrate ?? (channels >= 6 ? "384k" : "256k")
                 cmd += ["-c:a:\(outIdx)", "aac", "-b:a:\(outIdx)", bitrate, "-ac:a:\(outIdx)", String(min(channels, 6))]
@@ -140,6 +201,10 @@ enum Transcoder {
             if let title = aa.stream.title {
                 cmd += ["-metadata:s:a:\(outIdx)", "handler_name=\(title)"]
             }
+
+            // Disposition: pin track 0 as the only default — the mp4 muxer forces
+            // a default if none is set, and multiple defaults break the switcher entirely.
+            cmd += ["-disposition:a:\(outIdx)", outIdx == 0 ? "default" : "0"]
         }
 
         // Subtitle codec
@@ -202,10 +267,28 @@ enum Transcoder {
         proc.executableURL = ffmpeg
         proc.arguments = Array(cmd.dropFirst()) // drop the ffmpeg path itself
         let outPipe = Pipe()
+        let errPipe = Pipe()
         proc.standardOutput = outPipe
-        proc.standardError = FileHandle.nullDevice
+        proc.standardError = errPipe
+
+        // Drain stderr on a background queue into a rolling tail. Without this, ffmpeg's
+        // stderr pipe fills its 64 KB OS buffer and blocks on write(2) mid-transcode.
+        let tail = StderrTail()
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+            } else {
+                tail.append(data)
+            }
+        }
 
         try proc.run()
+        ActiveProcesses.shared.add(proc)
+        defer {
+            ActiveProcesses.shared.remove(proc)
+            errPipe.fileHandleForReading.readabilityHandler = nil
+        }
 
         let durationUs = mediaInfo.duration * 1_000_000
         let fileHandle = outPipe.fileHandleForReading
@@ -232,7 +315,11 @@ enum Transcoder {
 
         proc.waitUntilExit()
         guard proc.terminationStatus == 0 else {
-            throw TranscodeError.failed("exit code \(proc.terminationStatus)")
+            let errOutput = tail.joined()
+            let lastLines = errOutput.split(separator: "\n").suffix(8).joined(separator: "\n")
+            let detail = lastLines.isEmpty ? "exit code \(proc.terminationStatus)"
+                                           : "exit code \(proc.terminationStatus)\n\(lastLines)"
+            throw TranscodeError.failed(detail)
         }
         guard FileManager.default.fileExists(atPath: outputPath.path) else {
             throw TranscodeError.outputMissing

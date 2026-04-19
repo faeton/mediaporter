@@ -68,24 +68,43 @@ struct DeviceColumnView: View {
                 Text(info.displayName)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(theme.text)
-                Text(info.deviceClass.isEmpty ? info.productType : "\(info.deviceClass) · \(info.productType)")
+                Text(modelLine(info))
                     .font(.system(size: 11))
                     .foregroundStyle(theme.textDim)
-                Text(info.screenDescription)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(theme.textFaint)
+                    .multilineTextAlignment(.center)
+                if let res = info.nativeResolution {
+                    Text("\(res)  ·  \(info.screenDescription)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(theme.textFaint)
+                } else {
+                    Text(info.screenDescription)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(theme.textFaint)
+                }
             }
             .frame(maxWidth: .infinity)
 
-            // Storage bar — approximation (device free-space probe is a TODO on Swift side)
-            StorageBar(theme: theme, accent: accent, jobs: jobs)
+            StorageBar(
+                theme: theme, accent: accent, jobs: jobs,
+                deviceFree: pipeline.deviceFreeBytes,
+                deviceTotal: pipeline.deviceTotalBytes
+            )
 
-            // Connection state card
             connectionCard
 
-            // Resolution recommendation
             recommendationCard(info: info)
+
+            if let stats = pipeline.lastRunStats, stats.runEnd != nil {
+                RunSummaryCard(theme: theme, accent: accent, stats: stats)
+            }
         }
+    }
+
+    private func modelLine(_ info: DeviceInfo) -> String {
+        var parts: [String] = []
+        if !info.modelName.isEmpty { parts.append(info.modelName) }
+        if !info.productVersion.isEmpty { parts.append("iOS \(info.productVersion)") }
+        return parts.joined(separator: " · ")
     }
 
     private var noDeviceBlock: some View {
@@ -177,34 +196,151 @@ private struct StorageBar: View {
     let theme: Theme
     let accent: AccentKey
     let jobs: [FileJob]
+    let deviceFree: Int64?
+    let deviceTotal: Int64?
 
-    // Without a device-free-space probe on Swift side, show incoming-batch size only.
-    private var incomingGB: Double {
-        let mb = jobs.filter { ![.synced, .failed].contains($0.status) }
-            .reduce(0) { $0 + $1.fileSizeMB }
-        return Double(mb) / 1024.0
+    private var incomingBytes: Int64 {
+        Int64(jobs.filter { ![.synced, .failed].contains($0.status) }
+            .reduce(0) { $0 + $1.fileSize })
     }
 
     var body: some View {
+        if let total = deviceTotal, let free = deviceFree, total > 0 {
+            realBar(total: total, free: free)
+        } else {
+            placeholderBar
+        }
+    }
+
+    private func realBar(total: Int64, free: Int64) -> some View {
+        let used = max(0, total - free)
+        let incoming = min(incomingBytes, free) // can't project more than free
+        let usedFrac = Double(used) / Double(total)
+        let incomingFrac = Double(incoming) / Double(total)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Device storage")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textDim)
+                Spacer()
+                Text("\(ByteFormat.short(free)) free")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(theme.text)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(theme.divider)
+                    // Already used
+                    Capsule().fill(theme.textDim.opacity(0.35))
+                        .frame(width: geo.size.width * usedFrac)
+                    // Incoming (projected)
+                    Capsule().fill(accent.solid.opacity(0.65))
+                        .frame(width: geo.size.width * incomingFrac)
+                        .offset(x: geo.size.width * usedFrac)
+                }
+            }
+            .frame(height: 8)
+            HStack {
+                Text("\(ByteFormat.short(used)) used · \(ByteFormat.short(total)) total")
+                    .font(.system(size: 9))
+                    .foregroundStyle(theme.textFaint)
+                Spacer()
+                if incoming > 0 {
+                    Text("+\(ByteFormat.short(incoming)) incoming")
+                        .font(.system(size: 9))
+                        .foregroundStyle(accent.solid.opacity(0.85))
+                }
+            }
+        }
+    }
+
+    private var placeholderBar: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("Incoming")
                     .font(.system(size: 11))
                     .foregroundStyle(theme.textDim)
                 Spacer()
-                Text(String(format: "%.1f GB", incomingGB))
+                Text(ByteFormat.short(incomingBytes))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(theme.text)
             }
-            // Simple bar — all incoming, with accent
             ZStack(alignment: .leading) {
                 Capsule().fill(theme.divider).frame(height: 8)
                 Capsule().fill(accent.solid.opacity(0.4))
-                    .frame(width: min(240, incomingGB * 6), height: 8)
+                    .frame(width: min(240, Double(incomingBytes) / 1e9 * 6), height: 8)
             }
-            Text("Free-space probe on device: coming soon")
+            Text("Polling device storage…")
                 .font(.system(size: 9))
                 .foregroundStyle(theme.textFaint)
+        }
+    }
+}
+
+// MARK: - Run summary
+
+private struct RunSummaryCard: View {
+    let theme: Theme
+    let accent: AccentKey
+    let stats: PipelineStats
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Color(red: 0.19, green: 0.82, blue: 0.35))
+                    .font(.system(size: 12))
+                Text("Last run")
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.3)
+                    .foregroundStyle(theme.text)
+                Spacer()
+                Text(fmtDuration(stats.totalWallSeconds))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+            }
+
+            if stats.totalUploadBytes > 0 {
+                summaryRow(
+                    label: "Uploaded",
+                    value: "\(ByteFormat.short(stats.totalUploadBytes)) in \(fmtDuration(stats.totalUploadSeconds))"
+                )
+                if let avg = stats.avgUploadMBps {
+                    let peak = stats.peakUploadMBps ?? avg
+                    summaryRow(
+                        label: "Throughput",
+                        value: String(format: "avg %.0f MB/s · peak %.0f MB/s", avg, peak)
+                    )
+                }
+            }
+            if stats.totalTranscodeSeconds > 0 {
+                summaryRow(label: "Transcoded", value: fmtDuration(stats.totalTranscodeSeconds))
+            }
+            if let macDelta = stats.macFreeDelta {
+                summaryRow(label: "Mac free", value: ByteFormat.signed(macDelta))
+            }
+            if let devDelta = stats.deviceFreeDelta {
+                summaryRow(label: "Device free", value: ByteFormat.signed(devDelta))
+            }
+        }
+        .padding(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
+        .background(theme.panel, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(theme.panelBorder, lineWidth: 1)
+        )
+    }
+
+    private func summaryRow(label: String, value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundStyle(theme.textDim)
+            Spacer()
+            Text(value)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(theme.text)
         }
     }
 }

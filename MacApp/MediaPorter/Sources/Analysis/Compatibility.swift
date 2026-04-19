@@ -6,7 +6,10 @@ import Foundation
 
 public enum CodecSets {
     public static let compatibleVideo: Set<String> = ["h264", "hevc", "h265"]
-    public static let compatibleAudio: Set<String> = ["aac", "ac3", "eac3", "alac", "mp3"]
+    // NOTE: AC3 is intentionally excluded — the iPad TV app silently drops AC3 tracks
+    // from the audio-language switcher. Force AC3 → AAC at transcode time.
+    // See research/docs/AUDIO_SWITCHER_RULE.md.
+    public static let compatibleAudio: Set<String> = ["aac", "eac3", "alac", "mp3"]
     public static let textSubtitles: Set<String> = ["subrip", "srt", "ass", "ssa", "mov_text", "webvtt"]
     public static let bitmapSubtitles: Set<String> = ["hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "pgssub"]
     public static let compatibleContainers: Set<String> = ["mov", "mp4", "m4v", "mov,mp4,m4a,3gp,3g2,mj2"]
