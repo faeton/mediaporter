@@ -70,7 +70,10 @@ def main():
 @click.option("--dry-run", is_flag=True, help="Show plan without executing.")
 @click.option("-o", "--output", type=click.Path(), help="Save M4V locally instead of syncing.")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output.")
-def sync(files, yes, quality, jobs, hw, no_metadata, tmdb_key, dry_run, output, verbose):
+@click.option("--device", "device_udid", default=None,
+              help="Target a specific device UDID (use `mediaporter devices` to list). "
+                   "Default: auto-pick iPad over iPhone when multiple are attached.")
+def sync(files, yes, quality, jobs, hw, no_metadata, tmdb_key, dry_run, output, verbose, device_udid):
     """Transcode and transfer video files to device."""
     from mediaporter.config import load_config
     from mediaporter.pipeline import PipelineOptions, run_pipeline
@@ -97,6 +100,7 @@ def sync(files, yes, quality, jobs, hw, no_metadata, tmdb_key, dry_run, output, 
         subtitle_mode=config.subtitle_mode,
         burn_bitmap_subs=config.burn_bitmap_subs,
         keep_files=config.keep_files,
+        device_udid=device_udid,
     )
 
     run_pipeline(file_list, options)

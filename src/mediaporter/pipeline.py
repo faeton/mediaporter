@@ -89,6 +89,8 @@ class PipelineOptions:
     non_interactive: bool = False
     verbose: bool = False
     jobs: int | None = None
+    # When multiple devices are attached, sync to this UDID. None = auto (iPad first).
+    device_udid: str | None = None
 
 
 def collect_video_files(paths: list[str]) -> list[Path]:
@@ -614,7 +616,12 @@ def transcode_and_sync(jobs: list[FileJob], options: PipelineOptions) -> None:
         NativeAFC,
         register_uploaded_files,
     )
-    from mediaporter.sync.device import query_device_details, query_device_disk_space
+    from mediaporter.sync.device import (
+        list_devices,
+        pick_device,
+        query_device_details,
+        query_device_disk_space,
+    )
     from mediaporter.transcode import cancel_all
     from rich.console import Group
     from rich.live import Live
@@ -630,17 +637,46 @@ def transcode_and_sync(jobs: list[FileJob], options: PipelineOptions) -> None:
     stats = PipelineStats(pipeline_start=time.monotonic())
 
     # Discover device up front so we fail fast before running any ffmpeg.
+    # Scan for ALL attached devices so a connected iPhone doesn't steal a sync
+    # intended for the iPad sitting next to it — pick iPad first.
     try:
-        device = discover_device()
-    except SyncError as e:
-        print_error(f"Device not found: {e}")
+        devices = list_devices(with_details=True)
+    except Exception as e:
+        print_error(f"Device scan failed: {e}")
         return
 
-    # Populate device name for the summary (best-effort).
-    try:
-        query_device_details(device)
-    except Exception:
-        pass
+    if not devices:
+        # Fall back to the single-shot path so timeouts still get DeviceNotFoundError.
+        try:
+            device = discover_device()
+            query_device_details(device)
+            devices = [device]
+        except SyncError as e:
+            print_error(f"Device not found: {e}")
+            return
+
+    if len(devices) > 1:
+        names = ", ".join(
+            f"{d.name or d.product_type or d.udid[:8]} ({(d.device_class or '?').lower()})"
+            for d in devices
+        )
+        print_warning(f"{len(devices)} devices attached: {names}")
+
+    device = pick_device(devices, prefer_udid=options.device_udid)
+    if device is None:
+        if options.device_udid:
+            print_error(f"Requested device {options.device_udid} is not connected.")
+        else:
+            print_error("No usable device found")
+        return
+
+    if len(devices) > 1:
+        tag = f"Selected {device.name or device.product_type or device.udid[:8]} ({(device.device_class or '?').lower()})."
+        if options.device_udid:
+            print_warning(tag)
+        else:
+            print_warning(f"{tag} Pass --device <udid> to override.")
+
     stats.device_name = device.name or "iPad/iPhone"
 
     # Preflight disk space check — Mac temp + device.

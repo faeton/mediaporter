@@ -151,6 +151,35 @@ class DeviceInfo:
     model_number: str | None = None
 
 
+_DEVICE_CLASS_PRIORITY = {"ipad": 0, "iphone": 1, "ipod": 2}
+
+
+def _device_priority(dev: DeviceInfo) -> int:
+    """Lower = better. iPad wins over iPhone wins over anything else."""
+    dc = (dev.device_class or "").lower()
+    return _DEVICE_CLASS_PRIORITY.get(dc, 3)
+
+
+def pick_device(
+    devices: list[DeviceInfo],
+    prefer_udid: str | None = None,
+) -> DeviceInfo | None:
+    """Select the best device from a list.
+
+    If `prefer_udid` is given, returns that device if attached, otherwise None
+    (strict: the caller asked for a specific device and it's not here).
+    Otherwise: iPad → iPhone → iPod → anything. Returns None for empty list.
+    """
+    if not devices:
+        return None
+    if prefer_udid:
+        for d in devices:
+            if d.udid == prefer_udid:
+                return d
+        return None
+    return min(devices, key=_device_priority)
+
+
 def discover_device(timeout: float = 5.0) -> DeviceInfo:
     """Find the first connected iOS device.
 

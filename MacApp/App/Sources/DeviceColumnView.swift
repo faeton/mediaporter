@@ -13,11 +13,17 @@ struct DeviceColumnView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Destination")
-                .font(.system(size: 11, weight: .bold))
-                .tracking(0.8)
-                .textCase(.uppercase)
-                .foregroundStyle(theme.textDim)
+            HStack {
+                Text("Destination")
+                    .font(.system(size: 11, weight: .bold))
+                    .tracking(0.8)
+                    .textCase(.uppercase)
+                    .foregroundStyle(theme.textDim)
+                Spacer()
+                if pipeline.availableDevices.count > 1 {
+                    DevicePickerMenu(theme: theme, accent: accent)
+                }
+            }
 
             HStack {
                 Spacer()
@@ -187,6 +193,56 @@ struct DeviceColumnView: View {
         case .uhd4k: return "4K"
         case .original: return "Original"
         }
+    }
+}
+
+// MARK: - Device picker
+
+/// Compact menu shown only when ≥2 devices are attached. Lets the user override
+/// the auto-pick (iPad preferred). Sticky until the chosen device disconnects.
+private struct DevicePickerMenu: View {
+    let theme: Theme
+    let accent: AccentKey
+    @Environment(PipelineController.self) private var pipeline
+
+    var body: some View {
+        Menu {
+            Button {
+                pipeline.selectDevice(udid: nil)
+            } label: {
+                Label("Auto (iPad first)", systemImage: pipeline.selectedDeviceUDID == nil ? "checkmark" : "")
+            }
+            Divider()
+            ForEach(pipeline.availableDevices, id: \.udid) { dev in
+                Button {
+                    pipeline.selectDevice(udid: dev.udid)
+                } label: {
+                    let checked = pipeline.selectedDeviceUDID == dev.udid
+                    Label(
+                        "\(dev.displayName) · \(dev.deviceClass.isEmpty ? "iOS" : dev.deviceClass)",
+                        systemImage: checked ? "checkmark" : ""
+                    )
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "rectangle.stack.badge.play")
+                    .font(.system(size: 10, weight: .medium))
+                Text("\(pipeline.availableDevices.count) devices")
+                    .font(.system(size: 10, weight: .medium))
+                    .tracking(0.2)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .foregroundStyle(accent.solid)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(accent.soft, in: Capsule())
+            .overlay(Capsule().strokeBorder(accent.ring, lineWidth: 0.5))
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
     }
 }
 

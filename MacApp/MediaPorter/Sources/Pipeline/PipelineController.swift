@@ -12,6 +12,9 @@ public class PipelineController {
     public var deviceName: String?
     public var isDeviceConnected = false
     public var deviceInfo: DeviceInfo?
+    public var availableDevices: [DeviceInfo] = []
+    /// User-chosen device UDID. When nil, we auto-pick the preferred (iPad first).
+    public var selectedDeviceUDID: String?
     public var deviceFreeBytes: Int64?
     public var deviceTotalBytes: Int64?
     public var overallProgress: Double = 0
@@ -89,11 +92,33 @@ public class PipelineController {
 
         Task { @MainActor [weak self] in
             var lastDiskQuery: Date = .distantPast
+            var lastDiskUDID: String? = nil
             while let self {
-                if let device = DeviceMonitor.shared.currentDevice {
+                let all = DeviceMonitor.shared.allDevices
+                self.availableDevices = all
+
+                // Resolve the active device: user's pick if still connected,
+                // otherwise fall back to the preferred (iPad first).
+                let active: DeviceInfo? = {
+                    if let udid = self.selectedDeviceUDID,
+                       let d = all.first(where: { $0.udid == udid }) {
+                        return d
+                    }
+                    return all.first
+                }()
+
+                if let device = active {
                     self.deviceName = device.displayName
                     self.deviceInfo = device
                     self.isDeviceConnected = true
+
+                    // Reset cached disk numbers when the active device changes.
+                    if lastDiskUDID != device.udid {
+                        self.deviceFreeBytes = nil
+                        self.deviceTotalBytes = nil
+                        lastDiskQuery = .distantPast
+                        lastDiskUDID = device.udid
+                    }
 
                     // Poll disk space every 10 seconds — cheap lockdown query, but no
                     // reason to hammer it. Skip while running (session already in use).
@@ -114,10 +139,16 @@ public class PipelineController {
                     self.deviceFreeBytes = nil
                     self.deviceTotalBytes = nil
                     self.isDeviceConnected = false
+                    lastDiskUDID = nil
                 }
                 try? await Task.sleep(for: .seconds(2))
             }
         }
+    }
+
+    /// Change which connected device the pipeline targets. Nil = auto (iPad first).
+    public func selectDevice(udid: String?) {
+        selectedDeviceUDID = udid
     }
 
     // MARK: - Pipeline Stages

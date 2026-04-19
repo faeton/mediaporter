@@ -282,9 +282,51 @@ private func screenSpecsForProduct(_ productType: String, deviceClass: String) -
 public class DeviceMonitor {
     public static let shared = DeviceMonitor()
 
-    public var currentDevice: DeviceInfo?
+    private var devicesByUDID: [String: DeviceInfo] = [:]
+    private let devicesLock = NSLock()
     private var started = false
     private let lock = NSLock()
+
+    /// All devices currently attached, ordered iPad → iPhone → other for stable UX
+    /// (iPad is the intended target for TV-app sync).
+    public var allDevices: [DeviceInfo] {
+        devicesLock.lock(); defer { devicesLock.unlock() }
+        return devicesByUDID.values.sorted { a, b in
+            let ra = Self.priority(a), rb = Self.priority(b)
+            if ra != rb { return ra < rb }
+            return a.displayName.localizedCaseInsensitiveCompare(b.displayName) == .orderedAscending
+        }
+    }
+
+    /// Preferred single device: first iPad, else first iPhone, else anything.
+    /// Returned when no explicit UDID is requested.
+    public var currentDevice: DeviceInfo? { allDevices.first }
+
+    public func device(udid: String) -> DeviceInfo? {
+        devicesLock.lock(); defer { devicesLock.unlock() }
+        return devicesByUDID[udid]
+    }
+
+    fileprivate func add(_ info: DeviceInfo) {
+        devicesLock.lock()
+        devicesByUDID[info.udid] = info
+        devicesLock.unlock()
+    }
+
+    fileprivate func remove(udid: String) {
+        devicesLock.lock()
+        devicesByUDID.removeValue(forKey: udid)
+        devicesLock.unlock()
+    }
+
+    private static func priority(_ d: DeviceInfo) -> Int {
+        switch d.deviceClass.lowercased() {
+        case "ipad": return 0
+        case "iphone": return 1
+        case "ipod": return 2
+        default: return 3
+        }
+    }
 
     public func start() {
         lock.lock()
@@ -317,10 +359,14 @@ private let _monitorCallback: MD.NotificationCallback = { infoPtr, _ in
         if let cfUDID = MD.copyID(dev) {
             let udid = cfUDID as String
             let deviceInfo = queryDeviceInfo(device: dev, udid: udid)
-            DeviceMonitor.shared.currentDevice = deviceInfo
+            DeviceMonitor.shared.add(deviceInfo)
         }
     } else if msgType == 2 {
-        DeviceMonitor.shared.currentDevice = nil
+        // We still get a valid device pointer on disconnect — use its UDID to
+        // remove only that specific device, leaving other attached devices alone.
+        if let cfUDID = MD.copyID(dev) {
+            DeviceMonitor.shared.remove(udid: cfUDID as String)
+        }
     }
 }
 
@@ -362,6 +408,6 @@ public func discoverDevice(timeout: TimeInterval = 5.0) throws -> DeviceInfo {
     }
 
     let info = queryDeviceInfo(device: device, udid: udid)
-    DeviceMonitor.shared.currentDevice = info
+    DeviceMonitor.shared.add(info)
     return info
 }
