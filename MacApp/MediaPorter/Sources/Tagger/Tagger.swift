@@ -96,8 +96,15 @@ enum Tagger {
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
 
-        try proc.run()
-        proc.waitUntilExit()
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            proc.terminationHandler = { _ in cont.resume() }
+            do {
+                try proc.run()
+            } catch {
+                proc.terminationHandler = nil
+                cont.resume(throwing: error)
+            }
+        }
 
         // Clean up poster temp file
         if let p = posterTempURL { try? FileManager.default.removeItem(at: p) }
