@@ -4,34 +4,56 @@ import Foundation
 
 // MARK: - Data Models
 
-struct MovieMetadata {
-    var title: String
-    var year: Int?
-    var genre: String?
-    var overview: String?
-    var longOverview: String?
-    var director: String?
-    var posterURL: String?
-    var posterData: Data?
-    var tmdbID: Int?
+public struct MovieMetadata {
+    public var title: String
+    public var year: Int?
+    public var genre: String?
+    public var overview: String?
+    public var longOverview: String?
+    public var director: String?
+    public var posterURL: String?
+    public var posterData: Data?
+    public var tmdbID: Int?
+
+    public init(title: String, year: Int?, genre: String?, overview: String?,
+                longOverview: String?, director: String?, posterURL: String?,
+                posterData: Data?, tmdbID: Int?) {
+        self.title = title; self.year = year; self.genre = genre
+        self.overview = overview; self.longOverview = longOverview
+        self.director = director; self.posterURL = posterURL
+        self.posterData = posterData; self.tmdbID = tmdbID
+    }
 }
 
-struct EpisodeMetadata {
-    var showName: String
-    var season: Int
-    var episode: Int
-    var episodeTitle: String?
-    var episodeID: String       // "S01E02"
-    var year: Int?
-    var genre: String?
-    var overview: String?
-    var longOverview: String?
-    var network: String?
-    var posterURL: String?
-    var posterData: Data?
-    var showPosterURL: String?
-    var showPosterData: Data?
-    var tmdbShowID: Int?
+public struct EpisodeMetadata {
+    public var showName: String
+    public var season: Int
+    public var episode: Int
+    public var episodeTitle: String?
+    public var episodeID: String       // "S01E02"
+    public var year: Int?
+    public var genre: String?
+    public var overview: String?
+    public var longOverview: String?
+    public var network: String?
+    public var posterURL: String?
+    public var posterData: Data?
+    public var showPosterURL: String?
+    public var showPosterData: Data?
+    public var tmdbShowID: Int?
+
+    public init(showName: String, season: Int, episode: Int, episodeTitle: String?,
+                episodeID: String, year: Int?, genre: String?, overview: String?,
+                longOverview: String?, network: String?, posterURL: String?,
+                posterData: Data?, showPosterURL: String?, showPosterData: Data?,
+                tmdbShowID: Int?) {
+        self.showName = showName; self.season = season; self.episode = episode
+        self.episodeTitle = episodeTitle; self.episodeID = episodeID; self.year = year
+        self.genre = genre; self.overview = overview; self.longOverview = longOverview
+        self.network = network; self.posterURL = posterURL; self.posterData = posterData
+        self.showPosterURL = showPosterURL; self.showPosterData = showPosterData
+        self.tmdbShowID = tmdbShowID
+    }
 }
 
 enum TMDbError: LocalizedError {

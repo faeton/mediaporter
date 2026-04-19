@@ -1,46 +1,49 @@
 // Pipeline orchestrator — manages file jobs through analyze → transcode → tag → sync.
 
 import Foundation
-import SwiftUI
+import Observation
 
 @MainActor
 @Observable
-class PipelineController {
-    var jobs: [FileJob] = []
-    var selectedJobID: UUID?
-    var deviceName: String?
-    var isDeviceConnected = false
-    var overallProgress: Double = 0
-    var overallStatus: String = ""
-    var isRunning = false
+public class PipelineController {
+    public var jobs: [FileJob] = []
+    public var selectedJobID: UUID?
+    public var deviceName: String?
+    public var isDeviceConnected = false
+    public var deviceInfo: DeviceInfo?
+    public var overallProgress: Double = 0
+    public var overallStatus: String = ""
+    public var isRunning = false
 
     // Settings
-    var qualityPreset: QualityPreset = .balanced
-    var hwAccel = true
-    var tmdbAPIKey: String = ""
+    public var qualityPreset: QualityPreset = .balanced
+    public var hwAccel = true
+    public var tmdbAPIKey: String = ""
+
+    public init() {}
 
     private static let videoExtensions: Set<String> = [
         "mkv", "mp4", "avi", "m4v", "mov", "wmv", "flv", "webm", "ts",
         "mts", "m2ts", "mpg", "mpeg", "vob"
     ]
 
-    var selectedJob: FileJob? {
+    public var selectedJob: FileJob? {
         jobs.first { $0.id == selectedJobID }
     }
 
     /// Jobs that are actionable (not yet synced/failed).
-    var activeJobs: [FileJob] {
+    public var activeJobs: [FileJob] {
         jobs.filter { $0.status != .synced && $0.status != .failed }
     }
 
     /// Whether there are jobs ready to sync.
-    var hasJobsToSync: Bool {
+    public var hasJobsToSync: Bool {
         !activeJobs.isEmpty && !isRunning
     }
 
     // MARK: - File Management
 
-    func addFiles(urls: [URL]) {
+    public func addFiles(urls: [URL]) {
         let filtered = urls.filter { Self.videoExtensions.contains($0.pathExtension.lowercased()) }
         let existing = Set(jobs.map(\.inputURL))
         let newJobs = filtered
@@ -52,14 +55,14 @@ class PipelineController {
         }
     }
 
-    func removeJob(_ job: FileJob) {
+    public func removeJob(_ job: FileJob) {
         jobs.removeAll { $0.id == job.id }
         if selectedJobID == job.id {
             selectedJobID = jobs.first?.id
         }
     }
 
-    func clearCompleted() {
+    public func clearCompleted() {
         jobs.removeAll { $0.status == .synced }
         if let sel = selectedJobID, !jobs.contains(where: { $0.id == sel }) {
             selectedJobID = jobs.first?.id
@@ -68,16 +71,18 @@ class PipelineController {
 
     // MARK: - Device Monitoring
 
-    func startDeviceMonitoring() {
+    public func startDeviceMonitoring() {
         DeviceMonitor.shared.start()
 
         Task { @MainActor [weak self] in
             while let self {
                 if let device = DeviceMonitor.shared.currentDevice {
                     self.deviceName = device.displayName
+                    self.deviceInfo = device
                     self.isDeviceConnected = true
                 } else {
                     self.deviceName = nil
+                    self.deviceInfo = nil
                     self.isDeviceConnected = false
                 }
                 try? await Task.sleep(for: .seconds(2))
@@ -87,7 +92,7 @@ class PipelineController {
 
     // MARK: - Pipeline Stages
 
-    func analyzeAll() async {
+    public func analyzeAll() async {
         let pending = jobs.filter { $0.status == .pending }
         guard !pending.isEmpty else { return }
 
@@ -149,7 +154,7 @@ class PipelineController {
         isRunning = false
     }
 
-    func transcodeAll() async {
+    public func transcodeAll() async {
         let toProcess = jobs.filter { $0.status == .analyzed }
         guard !toProcess.isEmpty else { return }
 
@@ -228,7 +233,7 @@ class PipelineController {
         isRunning = false
     }
 
-    func syncToDevice() async {
+    public func syncToDevice() async {
         // Only sync jobs that are ready (not already synced)
         let readyJobs = jobs.filter { $0.status == .ready }
         guard !readyJobs.isEmpty else { return }
@@ -334,15 +339,80 @@ class PipelineController {
         isRunning = false
     }
 
+    /// Transcode a single already-analyzed job, tag it, and leave it at `.ready`.
+    /// Useful for "prepare the file locally without syncing."
+    public func transcodeOne(_ job: FileJob) async {
+        guard job.status == .analyzed else { return }
+        guard let info = job.mediaInfo, let decision = job.decision else { return }
+
+        isRunning = true
+        defer { isRunning = false }
+
+        if job.needsWork {
+            job.status = .transcoding
+            job.progress = 0
+
+            let outputURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("m4v")
+
+            let externalSubs = job.selectedExternalSubs.compactMap { idx -> ExternalSubtitle? in
+                guard idx < info.externalSubtitles.count else { return nil }
+                return info.externalSubtitles[idx]
+            }
+
+            do {
+                var lastTranscodeUpdate = Date.distantPast
+                _ = try await Transcoder.transcode(
+                    mediaInfo: info,
+                    decision: decision,
+                    outputPath: outputURL,
+                    quality: qualityPreset,
+                    hwAccel: hwAccel,
+                    maxResolution: job.maxResolution,
+                    selectedAudio: job.selectedAudio,
+                    selectedSubtitles: job.selectedSubtitles,
+                    externalSubs: externalSubs,
+                    progress: { pct in
+                        let now = Date()
+                        guard now.timeIntervalSince(lastTranscodeUpdate) >= 0.25 else { return }
+                        lastTranscodeUpdate = now
+                        DispatchQueue.main.async { job.progress = pct }
+                    }
+                )
+                job.outputURL = outputURL
+                job.status = .ready
+            } catch {
+                job.status = .failed
+                job.error = error.localizedDescription
+                return
+            }
+        } else {
+            job.outputURL = job.inputURL
+            job.status = .ready
+        }
+
+        // Tag
+        if let meta = job.metadata, let output = job.outputURL, output != job.inputURL {
+            job.status = .tagging
+            do {
+                try await Tagger.tag(file: output, metadata: meta, mediaInfo: info)
+            } catch {
+                // Non-fatal — file is still usable
+            }
+            job.status = .ready
+        }
+    }
+
     /// Run the full pipeline: analyze → transcode → sync.
-    func runFullPipeline() async {
+    public func runFullPipeline() async {
         await analyzeAll()
         await transcodeAll()
         await syncToDevice()
     }
 
     /// Save transcoded files locally instead of syncing.
-    func saveLocally(to directory: URL) async {
+    public func saveLocally(to directory: URL) async {
         await analyzeAll()
         await transcodeAll()
 

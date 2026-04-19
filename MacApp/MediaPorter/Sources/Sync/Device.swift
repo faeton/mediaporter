@@ -2,19 +2,19 @@
 
 import Foundation
 
-struct DeviceInfo {
-    let udid: String
-    let handle: UnsafeRawPointer
-    var deviceName: String = "iOS Device"
-    var productType: String = ""      // e.g. "iPad13,4", "iPhone15,2"
-    var deviceClass: String = ""      // "iPad", "iPhone", "iPod"
-    var screenPixelHeight: Int = 2048 // native pixel height (longest edge)
-    var screenScale: Int = 2          // retina scale factor (2x or 3x)
+public struct DeviceInfo {
+    public let udid: String
+    public let handle: UnsafeRawPointer
+    public var deviceName: String = "iOS Device"
+    public var productType: String = ""      // e.g. "iPad13,4", "iPhone15,2"
+    public var deviceClass: String = ""      // "iPad", "iPhone", "iPod"
+    public var screenPixelHeight: Int = 2048 // native pixel height (longest edge)
+    public var screenScale: Int = 2          // retina scale factor (2x or 3x)
 }
 
 extension DeviceInfo {
     /// Effective point height = pixels / scale. This is what matters for video.
-    var screenPointHeight: Int { screenPixelHeight / screenScale }
+    public var screenPointHeight: Int { screenPixelHeight / screenScale }
 
     /// Optimal video resolution for this device.
     /// Based on effective point resolution — no benefit encoding above this.
@@ -28,19 +28,19 @@ extension DeviceInfo {
     /// - iPhone Pro Max  : 2796px / 3x =  932pt → 1080p (landscape video fills ~932pt)
     /// - iPhone Pro/Reg  : 2556px / 3x =  852pt → 720p-1080p
     /// - iPhone SE/mini  : 2340px / 3x =  780pt → 720p
-    var suggestedResolution: ResolutionLimit {
+    public var suggestedResolution: ResolutionLimit {
         let pts = screenPointHeight
         if pts <= 750 { return .hd }     // iPhone SE/mini → 720p
         return .fhd                       // Everything else → 1080p
     }
 
     /// Short screen description for the status bar.
-    var screenDescription: String {
+    public var screenDescription: String {
         "\(screenPixelHeight / screenScale)p"
     }
 
     /// Human-readable device description.
-    var displayName: String {
+    public var displayName: String {
         if !deviceName.isEmpty && deviceName != "iOS Device" {
             return deviceName
         }
@@ -51,10 +51,10 @@ extension DeviceInfo {
     }
 }
 
-enum DeviceError: LocalizedError {
+public enum DeviceError: LocalizedError {
     case notFound
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .notFound: return "No iOS device found. Is your device connected and trusted?"
         }
@@ -146,14 +146,14 @@ private func screenSpecsForProduct(_ productType: String, deviceClass: String) -
 
 // MARK: - Persistent Device Monitor
 
-class DeviceMonitor {
-    static let shared = DeviceMonitor()
+public class DeviceMonitor {
+    public static let shared = DeviceMonitor()
 
-    var currentDevice: DeviceInfo?
+    public var currentDevice: DeviceInfo?
     private var started = false
     private let lock = NSLock()
 
-    func start() {
+    public func start() {
         lock.lock()
         defer { lock.unlock() }
         guard !started else { return }
@@ -207,7 +207,7 @@ private let _oneshotCallback: MD.NotificationCallback = { infoPtr, _ in
     }
 }
 
-func discoverDevice(timeout: TimeInterval = 5.0) throws -> DeviceInfo {
+public func discoverDevice(timeout: TimeInterval = 5.0) throws -> DeviceInfo {
     if let device = DeviceMonitor.shared.currentDevice {
         return device
     }

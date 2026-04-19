@@ -6,12 +6,12 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-enum PosterGenerator {
+public enum PosterGenerator {
     private static let width = 500
     private static let height = 750
 
     /// Generate a fallback poster JPEG with title and optional year.
-    static func generate(title: String, year: Int? = nil) -> Data? {
+    public static func generate(title: String, year: Int? = nil) -> Data? {
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(
             data: nil,

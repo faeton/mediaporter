@@ -4,50 +4,110 @@ import Foundation
 
 // MARK: - Data Models
 
-struct StreamInfo {
-    let index: Int
-    let codecType: String      // "video", "audio", "subtitle"
-    let codecName: String
+public struct StreamInfo {
+    public let index: Int
+    public let codecType: String      // "video", "audio", "subtitle"
+    public let codecName: String
     // Video
-    let width: Int?
-    let height: Int?
-    let pixFmt: String?
-    let profile: String?
+    public let width: Int?
+    public let height: Int?
+    public let pixFmt: String?
+    public let profile: String?
     // Audio
-    let channels: Int?
-    let channelLayout: String?
-    let sampleRate: Int?
-    let bitRate: Int?
+    public let channels: Int?
+    public let channelLayout: String?
+    public let sampleRate: Int?
+    public let bitRate: Int?
     // Common
-    let language: String?
-    let title: String?
-    let isDefault: Bool
-    let isForced: Bool
+    public let language: String?
+    public let title: String?
+    public let isDefault: Bool
+    public let isForced: Bool
+
+    public init(
+        index: Int,
+        codecType: String,
+        codecName: String,
+        width: Int? = nil,
+        height: Int? = nil,
+        pixFmt: String? = nil,
+        profile: String? = nil,
+        channels: Int? = nil,
+        channelLayout: String? = nil,
+        sampleRate: Int? = nil,
+        bitRate: Int? = nil,
+        language: String? = nil,
+        title: String? = nil,
+        isDefault: Bool = false,
+        isForced: Bool = false
+    ) {
+        self.index = index
+        self.codecType = codecType
+        self.codecName = codecName
+        self.width = width
+        self.height = height
+        self.pixFmt = pixFmt
+        self.profile = profile
+        self.channels = channels
+        self.channelLayout = channelLayout
+        self.sampleRate = sampleRate
+        self.bitRate = bitRate
+        self.language = language
+        self.title = title
+        self.isDefault = isDefault
+        self.isForced = isForced
+    }
 }
 
-struct ExternalSubtitle {
-    let path: URL
-    let language: String    // ISO 639-2
-    let format: String      // srt, ass, ssa
+public struct ExternalSubtitle {
+    public let path: URL
+    public let language: String    // ISO 639-2
+    public let format: String      // srt, ass, ssa
+
+    public init(path: URL, language: String, format: String) {
+        self.path = path
+        self.language = language
+        self.format = format
+    }
 }
 
-struct MediaInfo {
-    let path: URL
-    let formatName: String
-    let duration: Double       // seconds
-    let bitRate: Int?
-    let videoStreams: [StreamInfo]
-    let audioStreams: [StreamInfo]
-    let subtitleStreams: [StreamInfo]
-    var externalSubtitles: [ExternalSubtitle] = []
+public struct MediaInfo {
+    public let path: URL
+    public let formatName: String
+    public let duration: Double       // seconds
+    public let bitRate: Int?
+    public let videoStreams: [StreamInfo]
+    public let audioStreams: [StreamInfo]
+    public let subtitleStreams: [StreamInfo]
+    public var externalSubtitles: [ExternalSubtitle] = []
+
+    public init(
+        path: URL,
+        formatName: String,
+        duration: Double,
+        bitRate: Int? = nil,
+        videoStreams: [StreamInfo] = [],
+        audioStreams: [StreamInfo] = [],
+        subtitleStreams: [StreamInfo] = [],
+        externalSubtitles: [ExternalSubtitle] = []
+    ) {
+        self.path = path
+        self.formatName = formatName
+        self.duration = duration
+        self.bitRate = bitRate
+        self.videoStreams = videoStreams
+        self.audioStreams = audioStreams
+        self.subtitleStreams = subtitleStreams
+        self.externalSubtitles = externalSubtitles
+    }
 }
 
-enum ProbeError: LocalizedError {
+public enum ProbeError: LocalizedError {
     case ffprobeNotFound
     case failed(String)
     case parseError(String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .ffprobeNotFound: return "ffprobe not found. Install ffmpeg: brew install ffmpeg"
         case .failed(let msg): return "ffprobe failed: \(msg)"
@@ -59,7 +119,7 @@ enum ProbeError: LocalizedError {
 // MARK: - Probe
 
 /// Run ffprobe on a media file and parse the output into a MediaInfo struct.
-func probeFile(url: URL) async throws -> MediaInfo {
+public func probeFile(url: URL) async throws -> MediaInfo {
     guard let ffprobe = FFmpegLocator.ffprobe else { throw ProbeError.ffprobeNotFound }
 
     let proc = Process()

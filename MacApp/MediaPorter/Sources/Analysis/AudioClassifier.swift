@@ -2,16 +2,30 @@
 
 import Foundation
 
-struct AudioAction {
-    let stream: StreamInfo
-    let action: String          // "copy" or "transcode"
-    let targetCodec: String?    // nil if copy
-    let targetChannels: Int?
-    let targetBitrate: String?  // e.g. "256k", "384k"
+public struct AudioAction {
+    public let stream: StreamInfo
+    public let action: String          // "copy" or "transcode"
+    public let targetCodec: String?    // nil if copy
+    public let targetChannels: Int?
+    public let targetBitrate: String?  // e.g. "256k", "384k"
+
+    public init(
+        stream: StreamInfo,
+        action: String,
+        targetCodec: String? = nil,
+        targetChannels: Int? = nil,
+        targetBitrate: String? = nil
+    ) {
+        self.stream = stream
+        self.action = action
+        self.targetCodec = targetCodec
+        self.targetChannels = targetChannels
+        self.targetBitrate = targetBitrate
+    }
 }
 
 /// Classify a single audio stream for iPad compatibility.
-func classifyAudioStream(_ stream: StreamInfo) -> AudioAction {
+public func classifyAudioStream(_ stream: StreamInfo) -> AudioAction {
     if CodecSets.compatibleAudio.contains(stream.codecName) {
         return AudioAction(stream: stream, action: "copy",
                            targetCodec: nil, targetChannels: nil, targetBitrate: nil)
@@ -26,6 +40,6 @@ func classifyAudioStream(_ stream: StreamInfo) -> AudioAction {
 }
 
 /// Classify all audio streams.
-func classifyAllAudio(_ streams: [StreamInfo]) -> [AudioAction] {
+public func classifyAllAudio(_ streams: [StreamInfo]) -> [AudioAction] {
     streams.map { classifyAudioStream($0) }
 }

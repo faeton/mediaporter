@@ -4,27 +4,27 @@ import Foundation
 
 // MARK: - Compatible Codecs
 
-enum CodecSets {
-    static let compatibleVideo: Set<String> = ["h264", "hevc", "h265"]
-    static let compatibleAudio: Set<String> = ["aac", "ac3", "eac3", "alac", "mp3"]
-    static let textSubtitles: Set<String> = ["subrip", "srt", "ass", "ssa", "mov_text", "webvtt"]
-    static let bitmapSubtitles: Set<String> = ["hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "pgssub"]
-    static let compatibleContainers: Set<String> = ["mov", "mp4", "m4v", "mov,mp4,m4a,3gp,3g2,mj2"]
+public enum CodecSets {
+    public static let compatibleVideo: Set<String> = ["h264", "hevc", "h265"]
+    public static let compatibleAudio: Set<String> = ["aac", "ac3", "eac3", "alac", "mp3"]
+    public static let textSubtitles: Set<String> = ["subrip", "srt", "ass", "ssa", "mov_text", "webvtt"]
+    public static let bitmapSubtitles: Set<String> = ["hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "pgssub"]
+    public static let compatibleContainers: Set<String> = ["mov", "mp4", "m4v", "mov,mp4,m4a,3gp,3g2,mj2"]
 }
 
 // MARK: - Resolution Limit
 
-enum ResolutionLimit: String, CaseIterable, Identifiable, Comparable {
+public enum ResolutionLimit: String, CaseIterable, Identifiable, Comparable {
     case sd = "480p"
     case hd = "720p"
     case fhd = "1080p"
     case uhd4k = "4K (2160p)"
     case original = "Original"
 
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
     /// Max height for this limit, nil = no limit.
-    var maxHeight: Int? {
+    public var maxHeight: Int? {
         switch self {
         case .sd: return 480
         case .hd: return 720
@@ -44,18 +44,18 @@ enum ResolutionLimit: String, CaseIterable, Identifiable, Comparable {
         }
     }
 
-    static func < (lhs: ResolutionLimit, rhs: ResolutionLimit) -> Bool {
+    public static func < (lhs: ResolutionLimit, rhs: ResolutionLimit) -> Bool {
         lhs.sortOrder < rhs.sortOrder
     }
 
     /// Whether this limit would actually downscale from the given height.
-    func wouldDownscale(from sourceHeight: Int?) -> Bool {
+    public func wouldDownscale(from sourceHeight: Int?) -> Bool {
         guard let max = maxHeight, let src = sourceHeight else { return false }
         return src > max
     }
 
     /// Options that make sense for a given source height (no options above source res).
-    static func availableOptions(sourceHeight: Int?) -> [ResolutionLimit] {
+    public static func availableOptions(sourceHeight: Int?) -> [ResolutionLimit] {
         guard let src = sourceHeight, src > 0 else { return [.original] }
         var options: [ResolutionLimit] = []
         // Add downscale options that are smaller than source
@@ -70,7 +70,7 @@ enum ResolutionLimit: String, CaseIterable, Identifiable, Comparable {
     }
 
     /// Label showing the actual source resolution for "Original".
-    func label(sourceHeight: Int?) -> String {
+    public func label(sourceHeight: Int?) -> String {
         if self == .original, let h = sourceHeight {
             return "Original (\(h)p)"
         }
@@ -80,17 +80,19 @@ enum ResolutionLimit: String, CaseIterable, Identifiable, Comparable {
 
 // MARK: - Transcode Decision
 
-struct TranscodeDecision {
+public struct TranscodeDecision {
     /// Per stream index: "copy", "transcode", "convert_to_mov_text", "skip"
-    var streamActions: [Int: String] = [:]
-    var needsTranscode: Bool = false
-    var needsRemux: Bool = false
-    var resolutionLimit: ResolutionLimit = .original
-    var needsDownscale: Bool = false
+    public var streamActions: [Int: String] = [:]
+    public var needsTranscode: Bool = false
+    public var needsRemux: Bool = false
+    public var resolutionLimit: ResolutionLimit = .original
+    public var needsDownscale: Bool = false
+
+    public init() {}
 }
 
 /// Evaluate what needs to happen to make a file iPad-compatible.
-func evaluateCompatibility(mediaInfo: MediaInfo) -> TranscodeDecision {
+public func evaluateCompatibility(mediaInfo: MediaInfo) -> TranscodeDecision {
     var decision = TranscodeDecision()
 
     // Check container
@@ -133,7 +135,7 @@ func evaluateCompatibility(mediaInfo: MediaInfo) -> TranscodeDecision {
 }
 
 /// Get HD flag value for MP4 hdvd atom.
-func getHDFlag(width: Int?, height: Int?) -> Int {
+public func getHDFlag(width: Int?, height: Int?) -> Int {
     guard let h = height else { return 0 }
     if h >= 1080 { return 2 }
     if h >= 720 { return 1 }

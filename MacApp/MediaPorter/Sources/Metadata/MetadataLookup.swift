@@ -3,18 +3,18 @@
 import Foundation
 
 /// Resolved metadata for a file — either movie or TV episode.
-enum ResolvedMetadata {
+public enum ResolvedMetadata {
     case movie(MovieMetadata)
     case tvEpisode(EpisodeMetadata)
 
-    var title: String {
+    public var title: String {
         switch self {
         case .movie(let m): return m.title
         case .tvEpisode(let e): return e.showName
         }
     }
 
-    var posterData: Data? {
+    public var posterData: Data? {
         switch self {
         case .movie(let m): return m.posterData
         case .tvEpisode(let e): return e.showPosterData ?? e.posterData
@@ -22,9 +22,9 @@ enum ResolvedMetadata {
     }
 }
 
-enum MetadataLookup {
+public enum MetadataLookup {
     /// Full metadata pipeline: parse filename → TMDb → poster.
-    static func lookup(
+    public static func lookup(
         path: URL,
         showOverride: String? = nil,
         seasonOverride: Int? = nil,
