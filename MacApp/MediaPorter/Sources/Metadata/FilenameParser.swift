@@ -22,9 +22,10 @@ enum FilenameParser {
         pattern: #"^(.+?)[.\s_-]+[Ss](\d{1,2})[Ee](\d{1,2})"#
     )
 
-    // Movie: "Movie.Name.2024" or "Movie Name (2024)"
+    // Movie: "Movie.Name.2024", "Movie Name (2024)", or "Movie Name 1972" at end-of-string.
+    // Trailing separator is optional so the year can be the last token in the stem.
     private static let movieYearPattern = try! NSRegularExpression(
-        pattern: #"^(.+?)[.\s_-]+[\(]?(\d{4})[\)]?[.\s_-]"#
+        pattern: #"^(.+?)[.\s_-]+[\(]?(\d{4})[\)]?(?:[.\s_-]|$)"#
     )
 
     /// Parse a video filename into structured metadata.
@@ -83,9 +84,17 @@ enum FilenameParser {
     }
 
     private static func cleanTitle(_ raw: String) -> String {
-        // Replace dots/underscores with spaces, trim
-        raw.replacingOccurrences(of: ".", with: " ")
-           .replacingOccurrences(of: "_", with: " ")
-           .trimmingCharacters(in: .whitespaces)
+        // Replace dots/underscores with spaces, then drop parenthesized tails
+        // ("Крестный отец (The Godfather)" → "Крестный отец") so TMDb queries
+        // aren't polluted with alt-titles and noise like "(2022) [1080p]".
+        let spaced = raw.replacingOccurrences(of: ".", with: " ")
+                        .replacingOccurrences(of: "_", with: " ")
+        let parenStripped = spaced.replacingOccurrences(
+            of: #"\s*\([^)]*\)\s*"#, with: " ", options: .regularExpression
+        )
+        let bracketStripped = parenStripped.replacingOccurrences(
+            of: #"\s*\[[^\]]*\]\s*"#, with: " ", options: .regularExpression
+        )
+        return bracketStripped.trimmingCharacters(in: .whitespaces)
     }
 }

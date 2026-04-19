@@ -426,11 +426,12 @@ struct FileRowView: View {
                     apiKey: pipeline.tmdbAPIKey
                 )
             default:
-                // For movies / unknown: TMDb lookup parses filename, so override via a temp URL.
-                let alias = job.inputURL.deletingLastPathComponent()
-                    .appendingPathComponent(trimmed + (yearInt.map { " (\($0))" } ?? "") + "." + job.inputURL.pathExtension)
-                resolved = await MetadataLookup.lookup(
-                    path: alias,
+                // For movies / unknown: pass title + year directly so the filename
+                // parser's quirks (regex edge cases, noise in the original name)
+                // can't swallow the user's explicit hint.
+                resolved = await MetadataLookup.lookupMovieDirect(
+                    title: trimmed,
+                    year: yearInt,
                     apiKey: pipeline.tmdbAPIKey
                 )
             }

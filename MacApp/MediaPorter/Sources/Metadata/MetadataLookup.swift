@@ -47,6 +47,20 @@ public enum MetadataLookup {
         }
     }
 
+    /// Direct movie lookup that skips filename parsing. Use this when the user
+    /// has provided explicit title + year via the Edit-title sheet — otherwise
+    /// we round-trip through a synthesized alias URL and lose the year hint.
+    public static func lookupMovieDirect(
+        title: String,
+        year: Int?,
+        apiKey: String?
+    ) async -> ResolvedMetadata? {
+        let parsed = ParsedFilename(
+            title: title, year: year, season: nil, episode: nil, mediaType: .movie
+        )
+        return await lookupMovie(parsed: parsed, apiKey: apiKey)
+    }
+
     private static func lookupMovie(parsed: ParsedFilename, apiKey: String?) async -> ResolvedMetadata {
         guard let apiKey, !apiKey.isEmpty else {
             return .movie(fallbackMovie(parsed: parsed))
