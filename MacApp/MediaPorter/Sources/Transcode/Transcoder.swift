@@ -79,6 +79,25 @@ private final class StderrTail: @unchecked Sendable {
     }
 }
 
+/// Escape a filesystem path for use inside an ffmpeg filter argument value
+/// (e.g. `subtitles=filename=<path>`). The filter-graph parser treats these
+/// bytes specially inside a filter arg value: `\`, `'`, `:`, `[`, `]`, `,`,
+/// `;`, `=`. All of them must be backslash-escaped or the parser may split
+/// the arg in the middle of a path.
+private func escapeFilterPath(_ path: String) -> String {
+    var out = ""
+    for ch in path {
+        switch ch {
+        case "\\", "'", ":", "[", "]", ",", ";", "=":
+            out.append("\\")
+            out.append(ch)
+        default:
+            out.append(ch)
+        }
+    }
+    return out
+}
+
 public enum Transcoder {
     /// Terminate every ffmpeg process that's currently running.
     public static func cancelAll() {
@@ -94,6 +113,7 @@ public enum Transcoder {
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
+        proc.standardInput = FileHandle.nullDevice
         do {
             try proc.run()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
@@ -116,21 +136,49 @@ public enum Transcoder {
         maxResolution: ResolutionLimit = .original,
         selectedAudio: [Int]? = nil,
         selectedSubtitles: [Int]? = nil,
-        externalSubs: [ExternalSubtitle] = []
+        externalSubs: [ExternalSubtitle] = [],
+        burnIn: BurnInSubtitle? = nil
     ) -> [String] {
         guard let ffmpeg = FFmpegLocator.ffmpeg else { return [] }
         var cmd = [ffmpeg.path, "-hide_banner", "-y", "-progress", "pipe:1"]
 
+        // Split externals: the one being burned (if any) is consumed by the
+        // subtitles filter directly, not added as a mapped stream.
+        let burnExternalIdx: Int? = {
+            if case .external(let i) = burnIn, i < externalSubs.count { return i }
+            return nil
+        }()
+        let embedExternals: [ExternalSubtitle] = externalSubs.enumerated().compactMap { i, s in
+            i == burnExternalIdx ? nil : s
+        }
+
+        // Embedded burn-in target: figure out whether it's a bitmap sub (PGS/VOBSUB).
+        // Bitmap subs can't be rendered by libass — we have to route them through
+        // the `overlay` filter on a filter_complex graph. Text subs stay on `-vf
+        // subtitles=...` (libass). External subs are always text (srt/ass).
+        let burnEmbeddedIdx: Int? = {
+            if case .embedded(let i) = burnIn { return i }
+            return nil
+        }()
+        let isBitmapBurn: Bool = {
+            guard let i = burnEmbeddedIdx, i < mediaInfo.subtitleStreams.count else { return false }
+            return CodecSets.bitmapSubtitles.contains(mediaInfo.subtitleStreams[i].codecName)
+        }()
+
         // Input file
         cmd += ["-i", mediaInfo.path.path]
 
-        // External subtitle inputs
-        for sub in externalSubs {
+        // External subtitle inputs (only the ones we embed)
+        for sub in embedExternals {
             cmd += ["-i", sub.path.path]
         }
 
-        // Map video (first stream)
-        cmd += ["-map", "0:v:0"]
+        // Map video. For bitmap burn-in the labeled filter_complex output
+        // [vout] replaces the direct video map; added later after the filter
+        // chain is built.
+        if !isBitmapBurn {
+            cmd += ["-map", "0:v:0"]
+        }
 
         // Map selected audio streams
         let audioIndices = selectedAudio ?? Array(0..<mediaInfo.audioStreams.count)
@@ -139,8 +187,11 @@ public enum Transcoder {
             cmd += ["-map", "0:a:\(i)"]
         }
 
-        // Map selected subtitle streams
-        let subIndices = selectedSubtitles ?? []
+        // Skip the burn-in target from the mapped subtitle set so it doesn't
+        // show up twice (once burned, once as a selectable text track).
+        let rawSubIndices = selectedSubtitles ?? []
+        let subIndices = rawSubIndices.filter { $0 != burnEmbeddedIdx }
+
         for i in subIndices {
             guard i < mediaInfo.subtitleStreams.count else { continue }
             let action = decision.streamActions[mediaInfo.subtitleStreams[i].index]
@@ -150,16 +201,17 @@ public enum Transcoder {
         }
 
         // Map external subs
-        for (idx, _) in externalSubs.enumerated() {
+        for (idx, _) in embedExternals.enumerated() {
             cmd += ["-map", "\(idx + 1):0"]
         }
 
-        // Video codec + resolution scaling
+        // Video codec + resolution scaling + burn-in filter
         if let videoStream = mediaInfo.videoStreams.first {
             let baseAction = decision.streamActions[videoStream.index] ?? "copy"
             let needsDownscale = maxResolution.wouldDownscale(from: videoStream.height)
-            // If downscaling, must transcode (can't scale with copy)
-            let action = needsDownscale ? "transcode" : baseAction
+            // If downscaling, must transcode (can't scale with copy).
+            // If burning subs, must transcode (copy can't apply filters).
+            let action = (needsDownscale || burnIn != nil) ? "transcode" : baseAction
 
             if action == "copy" {
                 cmd += ["-c:v", "copy"]
@@ -167,9 +219,35 @@ public enum Transcoder {
                     cmd += ["-tag:v", "hvc1"]
                 }
             } else {
-                // Scale filter if downscaling (scale to maxHeight, keep aspect ratio, even dimensions)
-                if needsDownscale, let maxH = maxResolution.maxHeight {
-                    cmd += ["-vf", "scale=-2:\(maxH)"]
+                // Bitmap burn-in needs a filter_complex graph (overlay) because libass
+                // only handles text. Text burn-in (and plain scale) stays on -vf.
+                if isBitmapBurn, let burnIdx = burnEmbeddedIdx {
+                    var chain = "[0:v:0]"
+                    if needsDownscale, let maxH = maxResolution.maxHeight {
+                        chain += "scale=-2:\(maxH)[vs];[vs]"
+                    }
+                    chain += "[0:s:\(burnIdx)]overlay[vout]"
+                    cmd += ["-filter_complex", chain, "-map", "[vout]"]
+                } else {
+                    var filters: [String] = []
+                    if needsDownscale, let maxH = maxResolution.maxHeight {
+                        filters.append("scale=-2:\(maxH)")
+                    }
+                    if let burn = burnIn {
+                        switch burn {
+                        case .embedded(let i):
+                            // text sub — libass via subtitles filter
+                            let esc = escapeFilterPath(mediaInfo.path.path)
+                            filters.append("subtitles=filename=\(esc):si=\(i)")
+                        case .external(let i):
+                            guard i < externalSubs.count else { break }
+                            let esc = escapeFilterPath(externalSubs[i].path.path)
+                            filters.append("subtitles=filename=\(esc)")
+                        }
+                    }
+                    if !filters.isEmpty {
+                        cmd += ["-vf", filters.joined(separator: ",")]
+                    }
                 }
 
                 if hwAccel && detectVideoToolbox() {
@@ -208,7 +286,7 @@ public enum Transcoder {
         }
 
         // Subtitle codec
-        let hasAnySubs = !subIndices.isEmpty || !externalSubs.isEmpty
+        let hasAnySubs = !subIndices.isEmpty || !embedExternals.isEmpty
         if hasAnySubs {
             cmd += ["-c:s", "mov_text"]
             var subOutIdx = 0
@@ -219,7 +297,7 @@ public enum Transcoder {
                 cmd += ["-metadata:s:s:\(subOutIdx)", "language=\(lang)"]
                 subOutIdx += 1
             }
-            for ext in externalSubs {
+            for ext in embedExternals {
                 cmd += ["-metadata:s:s:\(subOutIdx)", "language=\(ext.language)"]
                 subOutIdx += 1
             }
@@ -243,6 +321,7 @@ public enum Transcoder {
         selectedAudio: [Int]? = nil,
         selectedSubtitles: [Int]? = nil,
         externalSubs: [ExternalSubtitle] = [],
+        burnIn: BurnInSubtitle? = nil,
         progress: ((Double) -> Void)? = nil
     ) async throws -> URL {
         guard let ffmpeg = FFmpegLocator.ffmpeg else { throw TranscodeError.ffmpegNotFound }
@@ -258,7 +337,8 @@ public enum Transcoder {
             maxResolution: maxResolution,
             selectedAudio: selectedAudio,
             selectedSubtitles: selectedSubtitles,
-            externalSubs: externalSubs
+            externalSubs: externalSubs,
+            burnIn: burnIn
         )
 
         guard !cmd.isEmpty else { throw TranscodeError.ffmpegNotFound }
@@ -270,6 +350,11 @@ public enum Transcoder {
         let errPipe = Pipe()
         proc.standardOutput = outPipe
         proc.standardError = errPipe
+        // Detach stdin — ffmpeg reads keyboard commands (q to quit, etc.) from
+        // the tty by default. When launched from a terminal, it inherits our
+        // stdin, gets SIGTTIN in its background process group, and freezes in
+        // state T with zero progress. /dev/null kills that dead.
+        proc.standardInput = FileHandle.nullDevice
 
         // Drain stderr on a background queue into a rolling tail. Without this, ffmpeg's
         // stderr pipe fills its 64 KB OS buffer and blocks on write(2) mid-transcode.
@@ -314,6 +399,16 @@ public enum Transcoder {
         }
 
         proc.waitUntilExit()
+
+        // The readabilityHandler runs asynchronously — by the time waitUntilExit
+        // returns there can still be bytes in the pipe that haven't hit `tail`
+        // yet. Detach the handler and do a final synchronous drain so we don't
+        // throw "exit code 1" with no context when ffmpeg actually logged the
+        // real cause (filter graph errors, missing libass, bad path, etc.).
+        errPipe.fileHandleForReading.readabilityHandler = nil
+        let remaining = errPipe.fileHandleForReading.readDataToEndOfFile()
+        if !remaining.isEmpty { tail.append(remaining) }
+
         guard proc.terminationStatus == 0 else {
             let errOutput = tail.joined()
             let lastLines = errOutput.split(separator: "\n").suffix(8).joined(separator: "\n")

@@ -3,6 +3,16 @@
 import Foundation
 import Observation
 
+/// Which subtitle (if any) should be burned into the video during transcode.
+/// Burn-in is only offered when the pipeline is already re-encoding the video —
+/// the filter is free then. Mutually exclusive: at most one per job.
+public enum BurnInSubtitle: Equatable, Hashable, Sendable {
+    /// Index into `mediaInfo.subtitleStreams`.
+    case embedded(Int)
+    /// Index into `mediaInfo.externalSubtitles`.
+    case external(Int)
+}
+
 public enum JobStatus: String {
     case pending
     case analyzing
@@ -36,6 +46,9 @@ public class FileJob: Identifiable {
     public var selectedSubtitles: [Int] = []      // indices into subtitleStreams
     public var selectedExternalSubs: [Int] = []   // indices into externalSubtitles
     public var maxResolution: ResolutionLimit = .original
+    /// At most one sub can be burned into the video. Only honored when
+    /// `videoBeingReencoded` is already true, otherwise the UI hides the toggle.
+    public var burnInSubtitle: BurnInSubtitle?
 
     // Output
     public var outputURL: URL?
@@ -82,6 +95,16 @@ public class FileJob: Identifiable {
     }
 
     public var needsWork: Bool { needsReencode || needsRemuxOnly }
+
+    /// True if the video stream itself is being re-encoded — i.e. the ffmpeg
+    /// command already has `-c:v hevc_videotoolbox/libx265` with a video filter
+    /// chain. Burn-in is "free" only in this case.
+    public var videoBeingReencoded: Bool {
+        guard let d = decision, let info = mediaInfo else { return false }
+        if maxResolution.wouldDownscale(from: info.videoStreams.first?.height) { return true }
+        for v in info.videoStreams where d.streamActions[v.index] == "transcode" { return true }
+        return false
+    }
 
     /// A single label describing what the pipeline will actually do with the
     /// current selection: "transcode" (re-encodes), "remux" (stream-copies),

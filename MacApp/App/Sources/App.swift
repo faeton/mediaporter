@@ -27,6 +27,11 @@ struct MediaPorterApp: App {
                     if let key = ConfigLoader.tmdbAPIKey() {
                         pipeline.tmdbAPIKey = key
                     }
+                    pipeline.openSubtitlesAPIKey = ConfigLoader.openSubtitlesAPIKey() ?? ""
+                    pipeline.openSubtitlesUsername = ConfigLoader.openSubtitlesUsername() ?? ""
+                    pipeline.openSubtitlesPassword = ConfigLoader.openSubtitlesPassword() ?? ""
+                    pipeline.openSubtitlesLanguages = ConfigLoader.openSubtitlesLanguages()
+                    pipeline.hwAccel = ConfigLoader.hwAccelEnabled()
                 }
         }
         .windowStyle(.hiddenTitleBar)

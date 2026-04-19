@@ -32,6 +32,14 @@ public class PipelineController {
     public var hwAccel = true
     public var tmdbAPIKey: String = ""
 
+    // OpenSubtitles credentials — when all four are set, analyze will fetch
+    // missing-language SRTs via moviehash/TMDb lookup into a per-user cache.
+    public var openSubtitlesAPIKey: String = ""
+    public var openSubtitlesUsername: String = ""
+    public var openSubtitlesPassword: String = ""
+    /// Comma-separated ISO 639-1 codes, e.g. "en,ru"
+    public var openSubtitlesLanguages: String = ""
+
     private static let kSelectedDeviceUDID = "pipeline.selectedDeviceUDID"
 
     public init() {
@@ -50,6 +58,22 @@ public class PipelineController {
         ) { [weak self] _ in
             Task { @MainActor in self?.cleanupTempOutputs() }
         }
+    }
+
+    /// True when every OpenSubtitles credential + at least one preferred language is set.
+    public var openSubtitlesReady: Bool {
+        !openSubtitlesAPIKey.isEmpty
+            && !openSubtitlesUsername.isEmpty
+            && !openSubtitlesPassword.isEmpty
+            && !openSubtitlesLanguages.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// ~/Library/Caches/MediaPorter/opensubtitles — persists downloaded SRTs so
+    /// re-analyzing the same file doesn't re-hit the API.
+    public var openSubtitlesCacheDir: URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return base.appendingPathComponent("MediaPorter/opensubtitles", isDirectory: true)
     }
 
     private static let videoExtensions: Set<String> = [
@@ -222,6 +246,45 @@ public class PipelineController {
                     ))
                 }
 
+                // OpenSubtitles: fetch missing-language SRTs into the per-user cache
+                // and splice them into mediaInfo.externalSubtitles so they flow into
+                // the existing embed path.
+                if openSubtitlesReady {
+                    let tmdbID: Int? = {
+                        if case .movie(let m) = job.metadata { return m.tmdbID }
+                        if case .tvEpisode(let e) = job.metadata { return e.tmdbShowID }
+                        return nil
+                    }()
+                    let existingLangs: Set<String> = Set(
+                        info.subtitleStreams.compactMap { $0.language?.lowercased() }
+                        + info.externalSubtitles.map { $0.language.lowercased() }
+                    )
+                    let langs = openSubtitlesLanguages
+                        .split(separator: ",")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
+                    let client = OpenSubtitlesClient(
+                        apiKey: openSubtitlesAPIKey,
+                        username: openSubtitlesUsername,
+                        password: openSubtitlesPassword
+                    )
+                    let fetched = await fetchOpenSubtitles(
+                        for: job.inputURL,
+                        tmdbID: tmdbID,
+                        languages: langs,
+                        existingLanguages: existingLangs,
+                        cacheDir: openSubtitlesCacheDir,
+                        client: client
+                    )
+                    if !fetched.isEmpty {
+                        info.externalSubtitles.append(contentsOf: fetched)
+                        job.mediaInfo = info
+                    }
+                }
+
+                // Re-derive selected-subs now that (possibly) new externals exist.
+                job.selectedExternalSubs = Array(0..<info.externalSubtitles.count)
+
                 job.status = .analyzed
             } catch {
                 job.status = .failed
@@ -273,6 +336,7 @@ public class PipelineController {
                         selectedAudio: job.selectedAudio,
                         selectedSubtitles: job.selectedSubtitles,
                         externalSubs: externalSubs,
+                        burnIn: job.burnInSubtitle,
                         progress: { pct in
                             let now = Date()
                             guard now.timeIntervalSince(lastTranscodeUpdate) >= 0.25 else { return }
@@ -421,7 +485,9 @@ public class PipelineController {
 
     /// Transcode a single already-analyzed job, tag it, and leave it at `.ready`.
     /// Useful for "prepare the file locally without syncing."
-    public func transcodeOne(_ job: FileJob) async {
+    /// - Parameter destinationURL: Where to write the transcoded file. If nil,
+    ///   writes to the macOS tempdir (subject to cleanup).
+    public func transcodeOne(_ job: FileJob, destinationURL: URL? = nil) async {
         guard job.status == .analyzed else { return }
         guard let info = job.mediaInfo, let decision = job.decision else { return }
 
@@ -432,9 +498,16 @@ public class PipelineController {
             job.status = .transcoding
             job.progress = 0
 
-            let outputURL = FileManager.default.temporaryDirectory
+            let outputURL: URL = destinationURL ?? FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)
                 .appendingPathExtension("m4v")
+            // If the caller picked a real path and it already exists, remove it so
+            // ffmpeg's -y overwrite works on a clean slate (ffmpeg's -y is fine too
+            // but removing first makes half-written leftovers from a crashed prior
+            // run go away predictably).
+            if destinationURL != nil {
+                try? FileManager.default.removeItem(at: outputURL)
+            }
 
             let externalSubs = job.selectedExternalSubs.compactMap { idx -> ExternalSubtitle? in
                 guard idx < info.externalSubtitles.count else { return nil }
@@ -453,6 +526,7 @@ public class PipelineController {
                     selectedAudio: job.selectedAudio,
                     selectedSubtitles: job.selectedSubtitles,
                     externalSubs: externalSubs,
+                    burnIn: job.burnInSubtitle,
                     progress: { pct in
                         let now = Date()
                         guard now.timeIntervalSince(lastTranscodeUpdate) >= 0.25 else { return }
@@ -709,7 +783,8 @@ public class PipelineController {
                     maxResolution: job.maxResolution,
                     selectedAudio: job.selectedAudio,
                     selectedSubtitles: job.selectedSubtitles,
-                    externalSubs: externalSubs
+                    externalSubs: externalSubs,
+                    burnIn: job.burnInSubtitle
                 ) { pct in
                     let now = Date()
                     guard now.timeIntervalSince(lastUpdate) >= 0.25 else { return }

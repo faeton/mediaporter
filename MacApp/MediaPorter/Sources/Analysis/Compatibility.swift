@@ -18,6 +18,7 @@ public enum CodecSets {
 // MARK: - Resolution Limit
 
 public enum ResolutionLimit: String, CaseIterable, Identifiable, Comparable {
+    case tiny = "360p"
     case sd = "480p"
     case hd = "720p"
     case fhd = "1080p"
@@ -29,6 +30,7 @@ public enum ResolutionLimit: String, CaseIterable, Identifiable, Comparable {
     /// Max height for this limit, nil = no limit.
     public var maxHeight: Int? {
         switch self {
+        case .tiny: return 360
         case .sd: return 480
         case .hd: return 720
         case .fhd: return 1080
@@ -39,11 +41,12 @@ public enum ResolutionLimit: String, CaseIterable, Identifiable, Comparable {
 
     private var sortOrder: Int {
         switch self {
-        case .sd: return 0
-        case .hd: return 1
-        case .fhd: return 2
-        case .uhd4k: return 3
-        case .original: return 4
+        case .tiny: return 0
+        case .sd: return 1
+        case .hd: return 2
+        case .fhd: return 3
+        case .uhd4k: return 4
+        case .original: return 5
         }
     }
 
@@ -62,7 +65,7 @@ public enum ResolutionLimit: String, CaseIterable, Identifiable, Comparable {
         guard let src = sourceHeight, src > 0 else { return [.original] }
         var options: [ResolutionLimit] = []
         // Add downscale options that are smaller than source
-        for limit in [ResolutionLimit.sd, .hd, .fhd, .uhd4k] {
+        for limit in [ResolutionLimit.tiny, .sd, .hd, .fhd, .uhd4k] {
             if let max = limit.maxHeight, max < src {
                 options.append(limit)
             }

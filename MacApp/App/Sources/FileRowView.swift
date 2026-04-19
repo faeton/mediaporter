@@ -64,6 +64,16 @@ struct FileRowView: View {
                     }
                     .padding(.top, 4)
                 }
+
+                if job.status == .failed, let err = job.error, !err.isEmpty {
+                    Text(err)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.chipSkipText)
+                        .lineLimit(6)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -205,10 +215,15 @@ struct FileRowView: View {
                 if job.maxResolution != .original, let srcH = job.mediaInfo?.videoStreams.first?.height {
                     let target = job.maxResolution.maxHeight ?? srcH
                     if target < srcH {
+                        let recommended = pipeline.deviceInfo?.suggestedResolution ?? .fhd
+                        let recH = recommended.maxHeight ?? target
+                        let tail: String = target >= recH
+                            ? "Saves space, no visible quality loss on device."
+                            : "Saves more space, but will look noticeably softer than the device can display."
                         HStack(spacing: 5) {
                             Image(systemName: "info.circle")
                                 .font(.system(size: 10))
-                            Text("Will downscale \(srcH)p → \(target)p. Saves space, no visible quality loss on device.")
+                            Text("Will downscale \(srcH)p → \(target)p. \(tail)")
                                 .font(.system(size: 11))
                         }
                         .foregroundStyle(theme.textDim)
@@ -223,16 +238,29 @@ struct FileRowView: View {
             titleVisibility: .visible
         ) {
             Button("Transcode") {
-                Task { await pipeline.transcodeOne(job) }
+                let dest = alongsideSourceDestination(for: job)
+                Task { await pipeline.transcodeOne(job, destinationURL: dest) }
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("The output will go to macOS's temp directory:\n\(tempDirDisplay)\n\nFiles there may be cleared on reboot or when macOS reclaims space. Move what you want to keep.")
+            Text("Saving next to the source as:\n\(alongsideSourceDestination(for: job).lastPathComponent)\n\nThe file stays in \(job.inputURL.deletingLastPathComponent().path).")
         }
     }
 
-    private var tempDirDisplay: String {
-        FileManager.default.temporaryDirectory.path
+    /// Transcoded output path next to the source file. Uses a `.mediaporter.m4v`
+    /// suffix so it's obvious which file is the transcode and avoids clobbering
+    /// the original or any prior run. Appends " 2", " 3"… if a collision exists.
+    private func alongsideSourceDestination(for job: FileJob) -> URL {
+        let dir = job.inputURL.deletingLastPathComponent()
+        let stem = job.inputURL.deletingPathExtension().lastPathComponent
+        let fm = FileManager.default
+        var candidate = dir.appendingPathComponent("\(stem).mediaporter.m4v")
+        var n = 2
+        while fm.fileExists(atPath: candidate.path) {
+            candidate = dir.appendingPathComponent("\(stem).mediaporter \(n).m4v")
+            n += 1
+        }
+        return candidate
     }
 
     private var videoAction: String {
@@ -323,6 +351,14 @@ struct FileRowView: View {
                         .lineLimit(1).truncationMode(.tail)
                 }
                 Spacer(minLength: 8)
+                if job.videoBeingReencoded {
+                    BurnInButton(
+                        isOn: job.burnInSubtitle == .embedded(i),
+                        theme: theme,
+                        accent: accent,
+                        onTap: { toggleBurnIn(.embedded(i)) }
+                    )
+                }
                 ActionChip(action: act, theme: theme)
             }
         }
@@ -430,6 +466,14 @@ struct FileRowView: View {
                                     .background(theme.pill, in: RoundedRectangle(cornerRadius: 3))
                                     .foregroundStyle(theme.textFaint)
                                 Spacer(minLength: 8)
+                                if job.videoBeingReencoded {
+                                    BurnInButton(
+                                        isOn: job.burnInSubtitle == .external(i),
+                                        theme: theme,
+                                        accent: accent,
+                                        onTap: { toggleBurnIn(.external(i)) }
+                                    )
+                                }
                                 ActionChip(action: "embed", theme: theme)
                             }
                         }
@@ -587,6 +631,16 @@ struct FileRowView: View {
         }
     }
 
+    /// Mutually-exclusive burn-in selector. Tapping the currently-burned track
+    /// clears the burn-in; tapping another track moves it.
+    private func toggleBurnIn(_ target: BurnInSubtitle) {
+        if job.burnInSubtitle == target {
+            job.burnInSubtitle = nil
+        } else {
+            job.burnInSubtitle = target
+        }
+    }
+
     private func channelsLabel(_ ch: Int) -> String {
         if ch >= 6 { return "\(ch - 1).1" }
         return "\(ch).0"
@@ -594,6 +648,45 @@ struct FileRowView: View {
 }
 
 // MARK: - Subcomponents
+
+/// Tiny toggle button for "burn this subtitle into the video". Shown only when
+/// the video is already being re-encoded so burn-in is zero extra cost. A job
+/// can have at most one burn-in selection.
+private struct BurnInButton: View {
+    let isOn: Bool
+    let theme: Theme
+    let accent: AccentKey
+    let onTap: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 4) {
+                Image(systemName: "flame.fill")
+                    .font(.system(size: 9, weight: .semibold))
+                Text("Burn in")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundStyle(isOn ? .white : theme.textDim)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(
+                isOn
+                    ? AnyShapeStyle(accent.solid)
+                    : AnyShapeStyle(hovering ? theme.pill.opacity(1.4) : theme.pill),
+                in: RoundedRectangle(cornerRadius: 4)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(isOn ? accent.ring : Color.clear, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(isOn ? "Burned into video during transcode"
+                   : "Burn this subtitle into the video (no extra cost — already transcoding)")
+    }
+}
 
 private struct MetaDot: View {
     let theme: Theme
@@ -945,6 +1038,8 @@ private struct ResolutionPicker: View {
         if sourceH > 2160 { opts.append((.uhd4k, "4K · 2160p")) }
         if sourceH > 1080 { opts.append((.fhd, "1080p")) }
         if sourceH > 720  { opts.append((.hd, "720p")) }
+        if sourceH > 480  { opts.append((.sd, "480p")) }
+        if sourceH > 360  { opts.append((.tiny, "360p")) }
 
         return HStack(spacing: 4) {
             ForEach(opts, id: \.0.rawValue) { opt in

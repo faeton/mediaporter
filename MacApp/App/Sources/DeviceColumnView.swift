@@ -187,6 +187,7 @@ struct DeviceColumnView: View {
 
     private func recommendedLabel(_ r: ResolutionLimit) -> String {
         switch r {
+        case .tiny: return "360p"
         case .sd: return "480p"
         case .hd: return "720p"
         case .fhd: return "1080p"

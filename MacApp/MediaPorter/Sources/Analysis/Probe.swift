@@ -139,6 +139,7 @@ public func probeFile(url: URL) async throws -> MediaInfo {
     let pipe = Pipe()
     proc.standardOutput = pipe
     proc.standardError = FileHandle.nullDevice
+    proc.standardInput = FileHandle.nullDevice
 
     try proc.run()
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
