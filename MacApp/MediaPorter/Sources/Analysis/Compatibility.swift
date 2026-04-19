@@ -140,6 +140,75 @@ public func evaluateCompatibility(mediaInfo: MediaInfo) -> TranscodeDecision {
     return decision
 }
 
+// MARK: - Output size estimate
+
+/// Rough HEVC bitrate (bits/sec) for a given target height — hand-tuned for
+/// VideoToolbox balanced quality on film/live-action content. Accuracy is
+/// ±30%; good enough for a "≈" hint on the resolution picker.
+private func estimatedHEVCVideoBitrate(forHeight h: Int) -> Double {
+    switch h {
+    case ...360:  return 600_000
+    case ...480:  return 1_100_000
+    case ...720:  return 2_200_000
+    case ...1080: return 4_500_000
+    case ...1440: return 9_000_000
+    case ...2160: return 14_000_000
+    default:      return 20_000_000
+    }
+}
+
+/// Estimate the transcoded output size (bytes) for a given resolution limit.
+/// - For `.original` when video won't actually be re-encoded, this matches
+///   the source file size (the common "copy" case).
+/// - For downscales, estimates video bitrate from the target height.
+public func estimateOutputBytes(
+    for limit: ResolutionLimit,
+    mediaInfo: MediaInfo,
+    selectedAudioCount: Int,
+    videoWillReencode: Bool
+) -> Int64 {
+    let duration = mediaInfo.duration
+    guard duration > 0 else { return 0 }
+
+    let srcH = mediaInfo.videoStreams.first?.height ?? 0
+    let targetH: Int = {
+        if let maxH = limit.maxHeight { return min(maxH, max(srcH, 1)) }
+        return max(srcH, 1)
+    }()
+
+    // Audio: sum 256 kbps (stereo AAC) per selected track. Close enough —
+    // we don't know whether each track copies or transcodes yet.
+    let audioBps = Double(max(1, selectedAudioCount)) * 256_000
+
+    // Fast path: Original resolution AND video is copy → just use the source
+    // file size. Nothing is being re-encoded, output ≈ input.
+    let downscaling = (limit.maxHeight ?? srcH) < srcH
+    if !downscaling && !videoWillReencode {
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: mediaInfo.path.path),
+           let size = attrs[.size] as? Int64, size > 0 {
+            return size
+        }
+    }
+
+    let videoBps: Double
+    if !downscaling {
+        // Re-encoding at source height — prefer the measured video bitrate
+        // over our table, since source content can be much lower bitrate than
+        // our "good quality" target (and we won't *add* information).
+        if let total = mediaInfo.bitRate {
+            let measured = max(Double(total) - audioBps, 500_000)
+            videoBps = min(measured, estimatedHEVCVideoBitrate(forHeight: targetH))
+        } else {
+            videoBps = estimatedHEVCVideoBitrate(forHeight: targetH)
+        }
+    } else {
+        videoBps = estimatedHEVCVideoBitrate(forHeight: targetH)
+    }
+
+    let bytes = (videoBps + audioBps) * duration / 8.0
+    return Int64(bytes)
+}
+
 /// Get HD flag value for MP4 hdvd atom.
 public func getHDFlag(width: Int?, height: Int?) -> Int {
     guard let h = height else { return 0 }

@@ -22,6 +22,11 @@ public class PipelineController {
     public var isRunning = false
     public var lastRunStats: PipelineStats?
 
+    /// Reentrancy guard for `analyzeAll`. Lets us safely call analyze from
+    /// both the view (pickFiles/drag-drop) and `addFiles` without two loops
+    /// stomping on the same jobs.
+    private var isAnalyzing = false
+
     /// True while a cancel has been requested. Observed from runPipelined's loop
     /// (MainActor) and from the AFC uploader's 1 MB chunk check (Task.detached).
     /// Thread-safe wrapper so the detached upload Task can poll it cheaply.
@@ -106,6 +111,15 @@ public class PipelineController {
         jobs.append(contentsOf: newJobs)
         if selectedJobID == nil, let first = jobs.first {
             selectedJobID = first.id
+        }
+
+        // Kick off analyze for any pending job without relying on the view's
+        // kickOff path — that path is gated on !isRunning, so removing a file
+        // during a transcode then re-adding it would leave the new job stuck
+        // in .queued forever. analyzeAll is a no-op when nothing is pending
+        // and guards its own isRunning, so calling it here is always safe.
+        if !newJobs.isEmpty, jobs.contains(where: { $0.status == .pending }) {
+            Task { await self.analyzeAll() }
         }
     }
 
@@ -197,13 +211,34 @@ public class PipelineController {
     // MARK: - Pipeline Stages
 
     public func analyzeAll() async {
-        let pending = jobs.filter { $0.status == .pending }
-        guard !pending.isEmpty else { return }
+        guard !isAnalyzing else { return }
+        isAnalyzing = true
+        defer { isAnalyzing = false }
+
+        guard jobs.contains(where: { $0.status == .pending }) else { return }
 
         isRunning = true
         overallStatus = "Analyzing..."
 
-        for (i, job) in pending.enumerated() {
+        // Log OpenSubtitles readiness once so the user can tell whether
+        // auto-fetch will even be attempted for this run.
+        if openSubtitlesReady {
+            let langs = openSubtitlesLanguages
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            NSLog("OpenSubtitles: enabled for languages %@", langs.joined(separator: ","))
+        } else if !openSubtitlesAPIKey.isEmpty {
+            NSLog("OpenSubtitles: API key set but username/password/languages missing — skipping auto-fetch. Fill them in Settings → Subtitles.")
+        }
+
+        // Re-query on each iteration so jobs added *during* analyze (e.g. a
+        // second drag-drop while the first batch is still analyzing) get
+        // picked up too.
+        var processed = 0
+        while let job = jobs.first(where: { $0.status == .pending }) {
+            processed += 1
+            let totalSoFar = processed + jobs.filter { $0.status == .pending }.count
             job.status = .analyzing
             do {
                 var info = try await probeFile(url: job.inputURL)
@@ -263,22 +298,37 @@ public class PipelineController {
                         .split(separator: ",")
                         .map { $0.trimmingCharacters(in: .whitespaces) }
                         .filter { !$0.isEmpty }
-                    let client = OpenSubtitlesClient(
-                        apiKey: openSubtitlesAPIKey,
-                        username: openSubtitlesUsername,
-                        password: openSubtitlesPassword
-                    )
-                    let fetched = await fetchOpenSubtitles(
-                        for: job.inputURL,
-                        tmdbID: tmdbID,
-                        languages: langs,
-                        existingLanguages: existingLangs,
-                        cacheDir: openSubtitlesCacheDir,
-                        client: client
-                    )
-                    if !fetched.isEmpty {
-                        info.externalSubtitles.append(contentsOf: fetched)
-                        job.mediaInfo = info
+                    let missing = langs.filter { l in
+                        let iso3 = iso3FromIso2(openSubtitlesLangCode(l))
+                        let iso2 = openSubtitlesLangCode(l)
+                        return !existingLangs.contains(iso3) && !existingLangs.contains(iso2)
+                    }
+                    if missing.isEmpty {
+                        NSLog("OpenSubtitles: \(job.fileName) — all requested languages already present, skipping")
+                    } else {
+                        overallStatus = "Looking up subtitles: \(job.fileName)"
+                        NSLog("OpenSubtitles: querying %@ for %@", missing.joined(separator: ","), job.fileName)
+                        let client = OpenSubtitlesClient(
+                            apiKey: openSubtitlesAPIKey,
+                            username: openSubtitlesUsername,
+                            password: openSubtitlesPassword
+                        )
+                        let fetched = await fetchOpenSubtitles(
+                            for: job.inputURL,
+                            tmdbID: tmdbID,
+                            languages: missing,
+                            existingLanguages: existingLangs,
+                            cacheDir: openSubtitlesCacheDir,
+                            client: client
+                        )
+                        if fetched.isEmpty {
+                            NSLog("OpenSubtitles: no matches for \(job.fileName)")
+                        } else {
+                            let picked = fetched.map(\.language).joined(separator: ",")
+                            NSLog("OpenSubtitles: \(job.fileName) — added \(fetched.count) track(s): \(picked)")
+                            info.externalSubtitles.append(contentsOf: fetched)
+                            job.mediaInfo = info
+                        }
                     }
                 }
 
@@ -290,7 +340,7 @@ public class PipelineController {
                 job.status = .failed
                 job.error = error.localizedDescription
             }
-            overallProgress = Double(i + 1) / Double(pending.count)
+            overallProgress = totalSoFar > 0 ? Double(processed) / Double(totalSoFar) : 0
         }
 
         overallStatus = "Analysis complete"
@@ -339,11 +389,12 @@ public class PipelineController {
                         burnIn: job.burnInSubtitle,
                         progress: { pct in
                             let now = Date()
-                            guard now.timeIntervalSince(lastTranscodeUpdate) >= 0.25 else { return }
+                            if pct < 1.0, now.timeIntervalSince(lastTranscodeUpdate) < 0.25 { return }
                             lastTranscodeUpdate = now
                             DispatchQueue.main.async { job.progress = pct }
                         }
                     )
+                    job.progress = 1.0
                     job.outputURL = outputURL
                     job.status = .ready
                 } catch {
@@ -488,8 +539,14 @@ public class PipelineController {
     /// - Parameter destinationURL: Where to write the transcoded file. If nil,
     ///   writes to the macOS tempdir (subject to cleanup).
     public func transcodeOne(_ job: FileJob, destinationURL: URL? = nil) async {
-        guard job.status == .analyzed else { return }
+        // Accept .ready too so users can re-run with different settings
+        // (resolution, burn-in selection) without removing and re-adding.
+        guard job.status == .analyzed || job.status == .ready else { return }
         guard let info = job.mediaInfo, let decision = job.decision else { return }
+
+        // Clean up the prior transcode output (only if it was ours in the
+        // tempdir — never touches inputs or a user-picked save location).
+        deleteTempOutput(for: job)
 
         isRunning = true
         defer { isRunning = false }
@@ -529,11 +586,12 @@ public class PipelineController {
                     burnIn: job.burnInSubtitle,
                     progress: { pct in
                         let now = Date()
-                        guard now.timeIntervalSince(lastTranscodeUpdate) >= 0.25 else { return }
+                        if pct < 1.0, now.timeIntervalSince(lastTranscodeUpdate) < 0.25 { return }
                         lastTranscodeUpdate = now
                         DispatchQueue.main.async { job.progress = pct }
                     }
                 )
+                job.progress = 1.0
                 job.outputURL = outputURL
                 job.status = .ready
             } catch {
@@ -787,10 +845,13 @@ public class PipelineController {
                     burnIn: job.burnInSubtitle
                 ) { pct in
                     let now = Date()
-                    guard now.timeIntervalSince(lastUpdate) >= 0.25 else { return }
+                    // Always let the final 1.0 through — the throttle would
+                    // otherwise strand the bar at whatever the last tick was.
+                    if pct < 1.0, now.timeIntervalSince(lastUpdate) < 0.25 { return }
                     lastUpdate = now
                     DispatchQueue.main.async { job.progress = pct }
                 }
+                job.progress = 1.0
                 job.outputURL = outputURL
                 job.status = .ready
             } catch {

@@ -165,6 +165,26 @@ public enum Transcoder {
             return CodecSets.bitmapSubtitles.contains(mediaInfo.subtitleStreams[i].codecName)
         }()
 
+        // Bitmap subtitle streams (PGS/VOBSUB) usually arrive with codec
+        // parameters carrying no width/height ("Could not find codec
+        // parameters ... unspecified size"). Without a canvas-size hint,
+        // ffmpeg refuses to rasterize them and the overlay filter passes
+        // through the video untouched — i.e. burn-in silently does nothing.
+        //
+        // PGS on Blu-ray is always authored against a 1920×1080 canvas;
+        // VOBSUB/DVB come from DVD sources at 720×576 (PAL, most common)
+        // or 720×480 (NTSC). Pick a safe default per codec.
+        if isBitmapBurn, let i = burnEmbeddedIdx {
+            let codec = mediaInfo.subtitleStreams[i].codecName
+            let canvas: String = {
+                switch codec {
+                case "dvd_subtitle", "dvb_subtitle": return "720x576"
+                default: return "1920x1080"
+                }
+            }()
+            cmd += ["-canvas_size", canvas]
+        }
+
         // Input file
         cmd += ["-i", mediaInfo.path.path]
 
@@ -222,11 +242,22 @@ public enum Transcoder {
                 // Bitmap burn-in needs a filter_complex graph (overlay) because libass
                 // only handles text. Text burn-in (and plain scale) stays on -vf.
                 if isBitmapBurn, let burnIdx = burnEmbeddedIdx {
-                    var chain = "[0:v:0]"
+                    // Scale the PGS/VOBSUB bitmap to the source video's exact
+                    // dimensions before compositing. Otherwise the sub stays at
+                    // its intrinsic canvas (e.g. 1920×1080) while the video is
+                    // at 3840×2076, overlay lands at (0,0), and the subs end up
+                    // in the top-left quadrant — usually off-picture.
+                    // Then apply any downscale AFTER the overlay so sub text
+                    // gets scaled together with the video.
+                    let srcW = videoStream.width ?? 1920
+                    let srcH = videoStream.height ?? 1080
+                    var chain = "[0:s:\(burnIdx)]scale=\(srcW):\(srcH)[subscaled];"
+                    chain += "[0:v:0][subscaled]overlay"
                     if needsDownscale, let maxH = maxResolution.maxHeight {
-                        chain += "scale=-2:\(maxH)[vs];[vs]"
+                        chain += "[composited];[composited]scale=-2:\(maxH)[vout]"
+                    } else {
+                        chain += "[vout]"
                     }
-                    chain += "[0:s:\(burnIdx)]overlay[vout]"
                     cmd += ["-filter_complex", chain, "-map", "[vout]"]
                 } else {
                     var filters: [String] = []
@@ -419,6 +450,11 @@ public enum Transcoder {
         guard FileManager.default.fileExists(atPath: outputPath.path) else {
             throw TranscodeError.outputMissing
         }
+
+        // ffmpeg's last out_time_ms update almost never lands exactly at the
+        // duration, and our 0.25s progress throttle often swallows the final
+        // tick. Without this snap the row sits at "98%" through tagging.
+        progress?(1.0)
 
         return outputPath
     }

@@ -220,7 +220,22 @@ struct SettingsView: View {
     }
 
     private var osSourceDescription: String {
-        if !osReady { return "Fill all four fields to enable." }
+        if !osReady {
+            // Be specific about what's missing — users put the API key in .env
+            // and expect it to "just work," but downloads need login + languages.
+            var missing: [String] = []
+            if osApiKey.trimmingCharacters(in: .whitespaces).isEmpty { missing.append("API key") }
+            if osUsername.trimmingCharacters(in: .whitespaces).isEmpty { missing.append("username") }
+            if osPassword.isEmpty { missing.append("password") }
+            if osLanguages.trimmingCharacters(in: .whitespaces).isEmpty { missing.append("languages") }
+            let prefix: String = {
+                if osKeySource != .none && !osApiKey.isEmpty {
+                    return "API key \(osKeySource.label). "
+                }
+                return ""
+            }()
+            return prefix + "Still need: \(missing.joined(separator: ", "))."
+        }
         switch osKeySource {
         case .none, .userDefaults:
             return "Analyze will fetch missing-language SRTs automatically."

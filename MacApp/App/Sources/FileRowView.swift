@@ -195,9 +195,12 @@ struct FileRowView: View {
                     }
                     ActionChip(action: videoAction, theme: theme)
                     Spacer(minLength: 8)
-                    if job.status == .analyzed && !pipeline.isRunning {
+                    // Also show for .ready so users can re-transcode with
+                    // different settings (e.g. flip resolution or burn-in)
+                    // without having to remove-and-readd the file.
+                    if (job.status == .analyzed || job.status == .ready) && !pipeline.isRunning {
                         Button { confirmTranscode = true } label: {
-                            Text("Transcode only…")
+                            Text(job.status == .ready ? "Re-transcode…" : "Transcode only…")
                                 .font(.system(size: 11, weight: .medium))
                                 .padding(.horizontal, 8).padding(.vertical, 3)
                                 .overlay(
@@ -1048,12 +1051,19 @@ private struct ResolutionPicker: View {
                 Button {
                     job.maxResolution = opt.0
                 } label: {
-                    HStack(spacing: 6) {
-                        Text(opt.1).font(.system(size: 12, weight: .medium))
-                        if isRec && opt.0 != .original {
-                            Text("Recommended")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(accent.solid)
+                    VStack(spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(opt.1).font(.system(size: 12, weight: .medium))
+                            if isRec && opt.0 != .original {
+                                Text("Recommended")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(accent.solid)
+                            }
+                        }
+                        if let est = estimatedSize(for: opt.0) {
+                            Text("≈ \(est)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(on ? accent.solid.opacity(0.85) : theme.textFaint)
                         }
                     }
                     .foregroundStyle(on ? accent.solid : theme.text)
@@ -1072,6 +1082,31 @@ private struct ResolutionPicker: View {
                 .help(on ? "Selected" : "Click to use \(opt.1)")
             }
         }
+    }
+
+    /// Approximate output size for this option, formatted ("1.2 GB" / "420 MB").
+    /// Returns nil when we don't have enough info to estimate (no mediaInfo yet).
+    private func estimatedSize(for limit: ResolutionLimit) -> String? {
+        guard let info = job.mediaInfo else { return nil }
+        // "videoWillReencode" when another selection (e.g. non-compat codec)
+        // already forces a video re-encode — in which case .original still
+        // produces a new file, not a copy of the source.
+        let videoWillReencode: Bool = {
+            guard let d = job.decision else { return false }
+            for v in info.videoStreams where d.streamActions[v.index] == "transcode" {
+                return true
+            }
+            return false
+        }()
+        let bytes = estimateOutputBytes(
+            for: limit,
+            mediaInfo: info,
+            selectedAudioCount: max(job.selectedAudio.count, 1),
+            videoWillReencode: videoWillReencode
+        )
+        guard bytes > 0 else { return nil }
+        let mb = Int(bytes / 1_048_576)
+        return fmtSizeMB(mb)
     }
 }
 
