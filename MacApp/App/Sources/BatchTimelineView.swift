@@ -7,6 +7,7 @@ struct BatchTimelineView: View {
     let jobs: [FileJob]
     let theme: Theme
     let accent: AccentKey
+    @Environment(PipelineController.self) private var pipeline
 
     var body: some View {
         if jobs.isEmpty {
@@ -76,6 +77,9 @@ struct BatchTimelineView: View {
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(theme.textDim)
                 }
+                CancelButton(theme: theme, isCancelling: pipeline.isCancelling) {
+                    pipeline.cancel()
+                }
             }
         }
         .padding(.horizontal, 18)
@@ -104,6 +108,40 @@ struct BatchTimelineView: View {
 
     private func count(_ statuses: [JobStatus]) -> Int {
         jobs.filter { statuses.contains($0.status) }.count
+    }
+}
+
+/// Stop button shown while the pipeline is active. Disables itself after first
+/// click so repeated presses can't race — cancellation is latch-on-true.
+private struct CancelButton: View {
+    let theme: Theme
+    let isCancelling: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: isCancelling ? "hourglass" : "stop.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(isCancelling ? "Stopping…" : "Stop")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(theme.chipSkipText)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(
+                (hovering && !isCancelling) ? theme.chipSkip.opacity(1.4) : theme.chipSkip,
+                in: Capsule()
+            )
+            .overlay(Capsule().strokeBorder(theme.chipSkipText.opacity(0.35), lineWidth: 0.5))
+            .contentShape(Rectangle())
+            .opacity(isCancelling ? 0.6 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .disabled(isCancelling)
+        .onHover { hovering = $0 }
+        .help("Stop the current run (⌘.)")
+        .keyboardShortcut(".", modifiers: .command)
     }
 }
 

@@ -6,12 +6,14 @@ enum AFCError: LocalizedError {
     case connectionFailed(Int32)
     case openFailed(String, Int32)
     case writeFailed(Int, Int32)
+    case cancelled
 
     var errorDescription: String? {
         switch self {
         case .connectionFailed(let rc): return "AFC connection failed (error \(rc))"
         case .openFailed(let path, let rc): return "AFC open '\(path)' failed (error \(rc))"
         case .writeFailed(let offset, let rc): return "AFC write failed at offset \(offset) (error \(rc))"
+        case .cancelled: return "Cancelled"
         }
     }
 }
@@ -66,10 +68,13 @@ class AFCClient {
     }
 
     /// Stream a local file to device in chunks. Calls progress(bytesSent, totalBytes).
+    /// The `isCancelled` closure is polled between 1 MB chunks; when it returns
+    /// true we throw AFCError.cancelled so the caller can abort gracefully.
     func writeFileStreaming(
         remotePath: String,
         localURL: URL,
-        progress: ((Int, Int) -> Void)? = nil
+        progress: ((Int, Int) -> Void)? = nil,
+        isCancelled: (() -> Bool)? = nil
     ) throws {
         guard let c = conn else { return }
         let fileSize = try FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as! Int
@@ -92,6 +97,8 @@ class AFCClient {
         var buffer = [UInt8](repeating: 0, count: chunkSize)
 
         while sent < fileSize {
+            if isCancelled?() == true { throw AFCError.cancelled }
+
             let read = stream.read(&buffer, maxLength: chunkSize)
             guard read > 0 else { break }
 

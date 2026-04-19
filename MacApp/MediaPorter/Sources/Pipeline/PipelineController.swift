@@ -22,12 +22,26 @@ public class PipelineController {
     public var isRunning = false
     public var lastRunStats: PipelineStats?
 
+    /// True while a cancel has been requested. Observed from runPipelined's loop
+    /// (MainActor) and from the AFC uploader's 1 MB chunk check (Task.detached).
+    /// Thread-safe wrapper so the detached upload Task can poll it cheaply.
+    private let cancelFlag = AtomicBool()
+
     // Settings
     public var qualityPreset: QualityPreset = .balanced
     public var hwAccel = true
     public var tmdbAPIKey: String = ""
 
+    private static let kSelectedDeviceUDID = "pipeline.selectedDeviceUDID"
+
     public init() {
+        // Restore the user's preferred device so a returning user doesn't fall
+        // back to iPad-first auto-pick every session.
+        if let saved = UserDefaults.standard.string(forKey: Self.kSelectedDeviceUDID),
+           !saved.isEmpty {
+            self.selectedDeviceUDID = saved
+        }
+
         // Reclaim /tmp on quit — transcoded outputs would otherwise linger for days.
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
@@ -149,6 +163,11 @@ public class PipelineController {
     /// Change which connected device the pipeline targets. Nil = auto (iPad first).
     public func selectDevice(udid: String?) {
         selectedDeviceUDID = udid
+        if let udid {
+            UserDefaults.standard.set(udid, forKey: Self.kSelectedDeviceUDID)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.kSelectedDeviceUDID)
+        }
     }
 
     // MARK: - Pipeline Stages
@@ -476,6 +495,7 @@ public class PipelineController {
     ///   - fail-fast disk preflight (Mac temp + device)
     ///   - collect PipelineStats into `lastRunStats`
     public func runPipelined() async {
+        cancelFlag.set(false) // Fresh run — clear any stale cancel state.
         let analyzed = jobs.filter { $0.status == .analyzed }
         guard !analyzed.isEmpty else { return }
         guard let device = deviceInfo else {
@@ -520,8 +540,16 @@ public class PipelineController {
         var uploadFailed: String? = nil
 
         for job in analyzed {
+            if cancelFlag.get() { break }
             let transcodeStart = Date()
             await runTranscodeStep(for: job)
+
+            if cancelFlag.get() {
+                // ffmpeg terminated via Transcoder.cancelAll(); job is already .failed
+                // with an "exit code 15" error. Overwrite with a cleaner message.
+                if job.status == .failed { job.error = "Cancelled" }
+                break
+            }
 
             guard job.status == .ready, let fileURL = job.outputURL else { continue }
 
@@ -548,10 +576,11 @@ public class PipelineController {
 
             let capJob = job
             let capPrepared = prepared
+            let capCancel = cancelFlag
             let uploadStart = Date()
             prevUpload = Task.detached { [weak self] in
                 var lastReport = Date.distantPast
-                try uploader.upload(capPrepared) { sent, total in
+                try uploader.upload(capPrepared, progress: { sent, total in
                     let now = Date()
                     guard now.timeIntervalSince(lastReport) >= 0.25 else { return }
                     lastReport = now
@@ -559,7 +588,7 @@ public class PipelineController {
                     Task { @MainActor in
                         capJob.progress = pct
                     }
-                }
+                }, isCancelled: { capCancel.get() })
                 let elapsed = Date().timeIntervalSince(uploadStart)
                 await MainActor.run { [weak self] in
                     guard let self else { return }
@@ -581,13 +610,29 @@ public class PipelineController {
         uploader.close()
 
         if let err = uploadFailed {
-            overallStatus = "Upload failed: \(err)"
+            let wasCancel = cancelFlag.get()
+            overallStatus = wasCancel ? "Cancelled" : "Upload failed: \(err)"
             for (job, _) in preparedPairs where job.status == .syncing {
                 job.status = .failed
-                job.error = err
+                job.error = wasCancel ? "Cancelled" : err
             }
             isRunning = false
             lastRunStats = stats
+            cancelFlag.set(false)
+            return
+        }
+
+        if cancelFlag.get() {
+            // Loop exited via the cancel-check before the last transcode finished.
+            // Nothing to register. Mark any mid-flight job.
+            overallStatus = "Cancelled"
+            for (job, _) in preparedPairs where job.status == .syncing || job.status == .transcoding {
+                job.status = .failed
+                job.error = "Cancelled"
+            }
+            isRunning = false
+            lastRunStats = stats
+            cancelFlag.set(false)
             return
         }
 
@@ -722,9 +767,32 @@ public class PipelineController {
         return item
     }
 
-    /// Cancel any running ffmpeg processes. Safe to call from UI.
+    /// Cancel the active run. Kills any ffmpeg process, flags the upload loop
+    /// to stop at its next 1 MB chunk boundary, and lets runPipelined() exit
+    /// without launching further work. Safe to call from UI.
     public func cancel() {
+        cancelFlag.set(true)
         Transcoder.cancelAll()
+        overallStatus = "Cancelling..."
+    }
+
+    public var isCancelling: Bool { cancelFlag.get() }
+
+    /// Reset a failed job to the latest state it successfully completed so the
+    /// user can retry without re-adding the file. Delete any partial transcode
+    /// output from the tempdir first so the next run starts clean.
+    public func retry(_ job: FileJob) {
+        guard job.status == .failed else { return }
+        deleteTempOutput(for: job)
+        job.error = nil
+        job.progress = 0
+        if job.mediaInfo != nil && job.decision != nil {
+            // Analysis succeeded — a later stage failed. Resume from there.
+            job.status = .analyzed
+        } else {
+            // Analysis itself failed (probe, TMDb, whatever). Start over.
+            job.status = .pending
+        }
     }
 
     /// Delete a job's transcoded output if it's a file we created in the tempdir.
@@ -766,4 +834,13 @@ public class PipelineController {
             }
         }
     }
+}
+
+/// Tiny atomic-bool wrapper so a detached upload Task can poll the cancel flag
+/// without hopping back to the MainActor between 1 MB chunks.
+final class AtomicBool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set(_ v: Bool) { lock.lock(); value = v; lock.unlock() }
+    func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
 }

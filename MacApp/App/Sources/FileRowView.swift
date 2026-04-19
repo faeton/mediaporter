@@ -67,6 +67,9 @@ struct FileRowView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            if job.status == .failed {
+                RetryButton(theme: theme, accent: accent) { pipeline.retry(job) }
+            }
             RemoveButton(theme: theme, action: onRemove)
         }
         .padding(.horizontal, 12)
@@ -658,6 +661,30 @@ private struct PosterPreview: View {
             }
         }
         .padding(14)
+    }
+}
+
+private struct RetryButton: View {
+    let theme: Theme
+    let accent: AccentKey
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(hovering ? accent.solid : theme.textDim)
+                .frame(width: 26, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(hovering ? accent.soft : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Retry")
     }
 }
 

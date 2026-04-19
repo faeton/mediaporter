@@ -45,15 +45,18 @@ final class AFCUploader {
     }
 
     /// Upload a single prepared file, reporting byte-level progress.
+    /// The `isCancelled` closure is polled between 1 MB chunks.
     func upload(
         _ file: PreparedSyncFile,
-        progress: ((Int, Int) -> Void)? = nil
+        progress: ((Int, Int) -> Void)? = nil,
+        isCancelled: (() -> Bool)? = nil
     ) throws {
         afc.makedirs("/iTunes_Control/Music/\(file.slot)")
         try afc.writeFileStreaming(
             remotePath: file.devicePath,
             localURL: file.item.fileURL,
-            progress: progress
+            progress: progress,
+            isCancelled: isCancelled
         )
     }
 
