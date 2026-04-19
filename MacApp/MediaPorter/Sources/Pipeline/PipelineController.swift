@@ -1,5 +1,6 @@
 // Pipeline orchestrator — manages file jobs through analyze → transcode → tag → sync.
 
+import AppKit
 import Foundation
 import Observation
 
@@ -23,7 +24,16 @@ public class PipelineController {
     public var hwAccel = true
     public var tmdbAPIKey: String = ""
 
-    public init() {}
+    public init() {
+        // Reclaim /tmp on quit — transcoded outputs would otherwise linger for days.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.cleanupTempOutputs() }
+        }
+    }
 
     private static let videoExtensions: Set<String> = [
         "mkv", "mp4", "avi", "m4v", "mov", "wmv", "flv", "webm", "ts",
@@ -565,6 +575,13 @@ public class PipelineController {
                 job.progress = 1.0
             }
             overallStatus = "\(preparedPairs.count)/\(preparedPairs.count) synced"
+
+            // Reclaim temp space — delete transcoded outputs that live in our tempdir.
+            // Skip inputs and locally-saved files. Called after register succeeded so
+            // we know the device copy is in place.
+            for (job, _) in preparedPairs {
+                deleteTempOutput(for: job)
+            }
         } catch {
             for (job, _) in preparedPairs {
                 job.status = .failed
@@ -674,6 +691,23 @@ public class PipelineController {
     /// Cancel any running ffmpeg processes. Safe to call from UI.
     public func cancel() {
         Transcoder.cancelAll()
+    }
+
+    /// Delete a job's transcoded output if it's a file we created in the tempdir.
+    /// Never touches the user's original input or a locally-saved destination.
+    private func deleteTempOutput(for job: FileJob) {
+        guard let output = job.outputURL, output != job.inputURL else { return }
+        let tempDir = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path
+        let outputDir = output.deletingLastPathComponent().resolvingSymlinksInPath().path
+        guard outputDir == tempDir else { return }
+        try? FileManager.default.removeItem(at: output)
+        job.outputURL = nil
+    }
+
+    /// Remove any leftover transcoded outputs for all jobs — for use on app quit or
+    /// explicit "clear temp" actions.
+    public func cleanupTempOutputs() {
+        for job in jobs { deleteTempOutput(for: job) }
     }
 
     /// Save transcoded files locally instead of syncing.
