@@ -127,6 +127,15 @@ struct Theme {
     var chipSkipText: Color {
         dark ? Color(hex: 0xFF6A5F) : Color(hex: 0xB4261C)
     }
+    // Remux = stream-copy via ffmpeg. Cheap, but not zero-cost. Blue to separate
+    // from orange "transcode" (expensive) and green "copy" (nothing happens).
+    var chipRemux: Color {
+        dark ? Color(red: 0.38, green: 0.70, blue: 1.0).opacity(0.20)
+             : Color(red: 0.00, green: 0.48, blue: 1.00).opacity(0.14)
+    }
+    var chipRemuxText: Color {
+        dark ? Color(hex: 0x6FB4FF) : Color(hex: 0x0A5BCC)
+    }
 
     var posterBg: LinearGradient {
         dark

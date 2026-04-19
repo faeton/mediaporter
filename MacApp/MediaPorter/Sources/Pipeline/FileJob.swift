@@ -49,10 +49,46 @@ public class FileJob: Identifiable {
 
     public var fileSizeMB: Int { fileSize / 1_048_576 }
 
-    public var needsWork: Bool {
-        guard let d = decision else { return false }
-        let downscale = maxResolution.wouldDownscale(from: mediaInfo?.videoStreams.first?.height)
-        return d.needsTranscode || d.needsRemux || downscale
+    /// True if any *selected* stream requires re-encoding (or the video is being
+    /// downscaled). Selection matters: deselecting an incompatible track flips
+    /// this off, because that track won't be mapped into the output.
+    public var needsReencode: Bool {
+        guard let d = decision, let info = mediaInfo else { return false }
+        if maxResolution.wouldDownscale(from: info.videoStreams.first?.height) { return true }
+        for v in info.videoStreams where d.streamActions[v.index] == "transcode" { return true }
+        for idx in selectedAudio where idx < info.audioStreams.count {
+            let s = info.audioStreams[idx]
+            if d.streamActions[s.index] == "transcode" { return true }
+        }
+        return false
     }
 
+    /// True if we must run ffmpeg (as a stream-copy remux) even when nothing is
+    /// being re-encoded: container change, dropped tracks, subtitle conversion,
+    /// external subs to embed.
+    public var needsRemuxOnly: Bool {
+        guard let d = decision, let info = mediaInfo else { return false }
+        if d.needsRemux { return true }
+        if selectedAudio.count != info.audioStreams.count { return true }
+        if !selectedExternalSubs.isEmpty { return true }
+        for s in info.subtitleStreams where d.streamActions[s.index] == "convert_to_mov_text" {
+            // Counts only if the user kept the sub selected for the output.
+            if let srcIdx = info.subtitleStreams.firstIndex(where: { $0.index == s.index }),
+               selectedSubtitles.contains(srcIdx) {
+                return true
+            }
+        }
+        return false
+    }
+
+    public var needsWork: Bool { needsReencode || needsRemuxOnly }
+
+    /// A single label describing what the pipeline will actually do with the
+    /// current selection: "transcode" (re-encodes), "remux" (stream-copies),
+    /// or "copy" (no ffmpeg pass — upload source as-is).
+    public var effectiveAction: String {
+        if needsReencode { return "transcode" }
+        if needsRemuxOnly { return "remux" }
+        return "copy"
+    }
 }

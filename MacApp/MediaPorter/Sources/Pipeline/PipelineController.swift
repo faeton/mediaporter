@@ -613,7 +613,8 @@ public class PipelineController {
         if job.needsWork {
             job.status = .transcoding
             job.progress = 0
-            overallStatus = "Transcoding \(job.fileName)..."
+            let verb = job.needsReencode ? "Transcoding" : "Remuxing"
+            overallStatus = "\(verb) \(job.fileName)..."
 
             let outputURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)
@@ -647,6 +648,8 @@ public class PipelineController {
                 return
             }
         } else {
+            // No container change, no dropped tracks, all codecs compatible:
+            // upload the source file as-is. No ffmpeg pass, no temp file.
             job.outputURL = job.inputURL
             job.status = .ready
         }

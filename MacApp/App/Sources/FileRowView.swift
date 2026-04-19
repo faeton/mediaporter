@@ -107,6 +107,9 @@ struct FileRowView: View {
     private var metaRow: some View {
         HStack(spacing: 6) {
             StatusDot(status: job.status, theme: theme, accent: accent)
+            if job.decision != nil {
+                ActionChip(action: job.effectiveAction, theme: theme)
+            }
             MetaDot(theme: theme)
             if let v = job.mediaInfo?.videoStreams.first {
                 Text("\(v.width)×\(v.height) · \(v.codecName.uppercased())")
@@ -689,7 +692,7 @@ struct ActionChip: View {
         case "transcode":   return (theme.chipTranscode, theme.chipTranscodeText, "transcode")
         case "embed":       return (theme.chipCopy, theme.chipCopyText, "embed")
         case "skip-bitmap": return (theme.chipSkip, theme.chipSkipText, "bitmap · skip")
-        case "remux":       return (theme.chipTranscode, theme.chipTranscodeText, "remux")
+        case "remux":       return (theme.chipRemux, theme.chipRemuxText, "remux")
         default:            return (theme.pill, theme.pillText, action)
         }
     }
