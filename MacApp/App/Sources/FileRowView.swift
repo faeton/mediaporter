@@ -561,6 +561,12 @@ private struct PosterThumb: View {
     let job: FileJob
     let theme: Theme
     let density: Density
+    @State private var previewing = false
+
+    private var hasPoster: Bool {
+        guard let data = job.metadata?.posterData, NSImage(data: data) != nil else { return false }
+        return true
+    }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -599,6 +605,59 @@ private struct PosterThumb: View {
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.2), radius: 3, y: 2)
+        // Hold 0.15s to peek at the full-size poster. A quick click doesn't
+        // trigger (perform: only fires after the threshold), so the row-select
+        // behavior on the rest of the row is unaffected. Release to dismiss.
+        .onLongPressGesture(
+            minimumDuration: 0.15,
+            maximumDistance: 12,
+            perform: { if hasPoster { previewing = true } },
+            onPressingChanged: { inProgress in
+                if !inProgress { previewing = false }
+            }
+        )
+        .popover(isPresented: $previewing, arrowEdge: .trailing) {
+            PosterPreview(job: job, theme: theme)
+        }
+        .help(hasPoster ? "Hold to preview" : "")
+    }
+}
+
+/// Large-size poster preview shown in a popover while the user is holding
+/// down on the thumbnail.
+private struct PosterPreview: View {
+    let job: FileJob
+    let theme: Theme
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Group {
+                if let data = job.metadata?.posterData, let image = NSImage(data: data) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    theme.posterBg
+                        .overlay(
+                            Image(systemName: "film")
+                                .font(.system(size: 48))
+                                .foregroundStyle(theme.textFaint)
+                        )
+                }
+            }
+            .frame(width: 360, height: 540)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            if let title = job.metadata?.title {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
+        }
+        .padding(14)
     }
 }
 
