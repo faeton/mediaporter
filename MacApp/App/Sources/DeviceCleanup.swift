@@ -25,9 +25,11 @@ func promptAndCleanupStagedMedia(pipeline: PipelineController) async {
     }
 
     let paths = found.map(\.path)
+    let totalBytes = found.reduce(Int64(0)) { $0 + $1.size }
+    let sizeSuffix = totalBytes > 0 ? " (\(ByteFormat.short(totalBytes)))" : ""
     let confirm = NSAlert()
     confirm.alertStyle = .warning
-    confirm.messageText = "Delete \(found.count) staged media file\(found.count == 1 ? "" : "s")?"
+    confirm.messageText = "Delete \(found.count) staged media file\(found.count == 1 ? "" : "s")\(sizeSuffix)?"
     confirm.informativeText = """
         This removes every file under /iTunes_Control/Music/F00…F49 on \
         \(device.displayName). Titles the TV app has already cached will keep \

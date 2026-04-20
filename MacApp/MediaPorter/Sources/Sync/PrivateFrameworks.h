@@ -38,6 +38,10 @@ int AFCRemovePath(void *afcConn, const char *path);
 int AFCDirectoryOpen(void *afcConn, const char *path, void **dirHandle);
 int AFCDirectoryRead(void *afcConn, void *dirHandle, char **entry);
 int AFCDirectoryClose(void *afcConn, void *dirHandle);
+// Returns an alternating NULL-terminated key/value array of strings (st_size, st_blocks, etc.).
+int AFCFileInfoOpen(void *afcConn, const char *path, void **dictHandle);
+int AFCKeyValueRead(void *dictHandle, char **key, char **value);
+int AFCKeyValueClose(void *dictHandle);
 
 // ---------------------------------------------------------------------------
 // AirTrafficHost.framework

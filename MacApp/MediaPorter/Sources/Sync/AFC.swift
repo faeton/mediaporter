@@ -141,6 +141,31 @@ class AFCClient {
         return MD.afcRemove(c, path)
     }
 
+    /// Query st_size for a remote path. Returns nil if the path doesn't exist or
+    /// doesn't report a size field. Uses AFCFileInfoOpen which returns a key/value
+    /// dict with st_size, st_blocks, st_ifmt, st_nlink, st_mtime, st_birthtime.
+    func fileSize(_ path: String) -> Int64? {
+        guard let c = conn else { return nil }
+        var dictHandle: UnsafeMutableRawPointer?
+        let rc = MD.afcFileInfoOpen(c, path, &dictHandle)
+        guard rc == 0, let dh = dictHandle else { return nil }
+        defer { _ = MD.afcKeyValueClose(dh) }
+
+        var size: Int64?
+        while true {
+            var keyPtr: UnsafePointer<CChar>?
+            var valPtr: UnsafePointer<CChar>?
+            let kv = MD.afcKeyValueRead(dh, &keyPtr, &valPtr)
+            guard kv == 0, let kp = keyPtr, let vp = valPtr else { break }
+            let key = String(cString: kp)
+            if key.isEmpty { break }
+            if key == "st_size" {
+                size = Int64(String(cString: vp))
+            }
+        }
+        return size
+    }
+
     func close() {
         if let c = conn {
             _ = MD.afcClose(c)

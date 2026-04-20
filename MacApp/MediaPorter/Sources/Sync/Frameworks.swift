@@ -106,6 +106,15 @@ enum MD {
         UnsafeRawPointer, UnsafeRawPointer, UnsafeMutablePointer<UnsafePointer<CChar>?>
     ) -> Int32
     typealias AFCDirectoryCloseFn = @convention(c) (UnsafeRawPointer, UnsafeRawPointer) -> Int32
+    typealias AFCFileInfoOpenFn = @convention(c) (
+        UnsafeRawPointer, UnsafePointer<CChar>, UnsafeMutablePointer<UnsafeMutableRawPointer?>
+    ) -> Int32
+    typealias AFCKeyValueReadFn = @convention(c) (
+        UnsafeRawPointer,
+        UnsafeMutablePointer<UnsafePointer<CChar>?>,
+        UnsafeMutablePointer<UnsafePointer<CChar>?>
+    ) -> Int32
+    typealias AFCKeyValueCloseFn = @convention(c) (UnsafeRawPointer) -> Int32
 
     static var subscribe: AMDeviceNotificationSubscribeFn { lookup(loadMobileDevice(), "AMDeviceNotificationSubscribe") }
     static var copyID: AMDeviceCopyDeviceIdentifierFn { lookup(loadMobileDevice(), "AMDeviceCopyDeviceIdentifier") }
@@ -124,6 +133,9 @@ enum MD {
     static var afcDirOpen: AFCDirectoryOpenFn { lookup(loadMobileDevice(), "AFCDirectoryOpen") }
     static var afcDirRead: AFCDirectoryReadFn { lookup(loadMobileDevice(), "AFCDirectoryRead") }
     static var afcDirClose: AFCDirectoryCloseFn { lookup(loadMobileDevice(), "AFCDirectoryClose") }
+    static var afcFileInfoOpen: AFCFileInfoOpenFn { lookup(loadMobileDevice(), "AFCFileInfoOpen") }
+    static var afcKeyValueRead: AFCKeyValueReadFn { lookup(loadMobileDevice(), "AFCKeyValueRead") }
+    static var afcKeyValueClose: AFCKeyValueCloseFn { lookup(loadMobileDevice(), "AFCKeyValueClose") }
 }
 
 // MARK: - AirTrafficHost Function Types & Accessors

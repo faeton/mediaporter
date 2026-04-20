@@ -12,6 +12,7 @@ public struct DeviceMediaFile: Sendable, Identifiable {
     public let path: String
     public let slot: String     // e.g. "F23"
     public let name: String     // e.g. "ACER.mp4"
+    public let size: Int64      // bytes, 0 if size couldn't be queried
     public var id: String { path }
 }
 
@@ -27,11 +28,9 @@ public enum DeviceMaintenance {
             let slot = String(format: "F%02d", i)
             let dir = "/iTunes_Control/Music/\(slot)"
             for name in afc.listDirectory(dir) {
-                found.append(DeviceMediaFile(
-                    path: "\(dir)/\(name)",
-                    slot: slot,
-                    name: name
-                ))
+                let path = "\(dir)/\(name)"
+                let size = afc.fileSize(path) ?? 0
+                found.append(DeviceMediaFile(path: path, slot: slot, name: name, size: size))
             }
         }
         return found
