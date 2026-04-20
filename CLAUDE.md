@@ -349,26 +349,25 @@ Real-world two-file run (Send.Help 4.7 GB + Avatar 15 GB) exposed a batch of iss
 
 USB-C iPad Pro 12.9" (3rd gen / iPad8,7): Rich's `TransferSpeedColumn` reported ~176 MB/s (1.41 Gbps) sustained during AFC upload over usbmuxd. USB 3.1 Gen 1 practical limit is ~450–500 MB/s, so there's still headroom if the bottleneck ever moves upstream. Lightning iPads cap around 30–40 MB/s by comparison.
 
-### MacApp (Swift) parity gap
+### MacApp (Swift) — at parity as of 2026-04-20
 
-The SwiftUI MacApp (v0.3.0, `MacApp/MediaPorter`) shipped the full pipeline but was written BEFORE these Python improvements landed. The following need to be ported to Swift for parity:
+The SwiftUI MacApp (`MacApp/MediaPorter`) has caught up with the Python reference. Landed:
 
-- **Pipelined transcode+upload** — `PipelineController.swift` currently runs transcode → upload sequentially per-file. Needs an async task group where transcode tasks feed an upload actor.
-- **ffmpeg stderr drain** — `Transcoder.swift` must drain ffmpeg's stderr pipe (or redirect to `/dev/null`) to avoid the same 64 KB pipe deadlock on long files. Swift `Process` + `Pipe` has the same issue if you only read one stream.
-- **AC3 → AAC transcode rule** — `Transcode/Transcoder.swift` + `Analysis/AudioClassifier.swift` should transcode AC3 tracks to AAC (stereo 256k / 5.1 384k) and copy AAC + EAC3 through. Must emit `-disposition:a:0 default` + `-disposition:a:N 0` for N>0 to avoid the "all default" switcher bug. See `research/docs/AUDIO_SWITCHER_RULE.md` for the experimental matrix behind the rule.
-- **AC3 as incompatible in compat table** — `Analysis/Compatibility.swift` must exclude AC3 from its compatible-audio set so AC3 streams naturally partition into the transcode path. Mixed-codec detection is NOT needed (it was a dead end; see research/docs/AUDIO_SWITCHER_RULE.md).
-- **Disk-space preflight** — needs `query_device_disk_space` equivalent (lockdown `com.apple.disk_usage` domain via `AMDeviceCopyValue`) plus `URL.resourceValues(forKeys: [.volumeAvailableCapacityKey])` for the Mac side. Wire into `PipelineController` before starting any ffmpeg.
-- **Run summary** — collect per-file transcode/upload timings and bytes; show in the `BottomBarView` or a post-run sheet.
-- **Richer device info in UI** — port the `_DEVICE_MODELS` table and `describe_model()` / `optimal_transcode_resolution()` helpers. `Sync/Device.swift` currently only exposes UDID + basic name.
+- Pipelined transcode+upload with cancellable detached upload task
+- ffmpeg stderr drain + `standardInput = nullDevice` to dodge SIGTTIN freezes
+- AC3 → AAC rule + track disposition (one default, rest cleared) + AC3 excluded from compatible-audio set
+- Disk-space preflight (Mac tempdir + device via `com.apple.disk_usage`)
+- Run summary card rendering `PipelineStats` deltas
+- Device model table (iPad7→iPad16, iPhone11→iPhone17) + `optimalTranscodeResolution`
+- Device → Clean Up Staged Media Files menu command (⇧⌘K) walks `/iTunes_Control/Music/F00..F49` via AFC
+- Cross-language audio drop prompt — inline banner offers to skip AAC re-encode when a mix of copy-able + transcode-only tracks is detected
 
 Keep the Python module as the reference implementation — land fixes in Python first, port to Swift once validated.
 
 ## Next Steps
 
 1. **Multi-episode batch sync** — Test syncing multiple episodes in a single ATC session (pipelined uploader should handle this naturally now).
-2. **Clean up orphan files on device** — Dozens of test files accumulated in `/iTunes_Control/Music/F*/`.
-3. **Cross-language audio prompt** — When codecs are mixed across languages (e.g., Russian AC3 + English EAC3), offer to drop the lower-quality track instead of normalizing, so no re-encode is needed.
-4. **Port 2026-04-10 improvements to the Swift MacApp** — see parity gap list above.
+2. **Orphan detection via AssetManifest** — current cleanup purges everything under `/iTunes_Control/Music/F*/`. Cross-referencing with `AssetManifest` paths would let us keep legitimately-registered content and only remove true orphans.
 
 ## Resolved Questions (Updated 2026-04-06)
 
