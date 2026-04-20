@@ -948,6 +948,34 @@ public class PipelineController {
         for job in jobs { deleteTempOutput(for: job) }
     }
 
+    /// Enumerate leftover media files in /iTunes_Control/Music/F00..F49 on the
+    /// connected device. These accumulate from interrupted syncs — the TV app
+    /// can still play content whose files are gone (it reads the MediaLibrary
+    /// cache), so the disk space is otherwise unreclaimable.
+    public func scanStagedMedia() async -> [DeviceMediaFile] {
+        guard let device = deviceInfo else { return [] }
+        let handle = device
+        return (try? await Task.detached {
+            try DeviceMaintenance.scanStagingMedia(device: handle)
+        }.value) ?? []
+    }
+
+    /// Delete the given absolute device paths. Returns the number successfully removed.
+    /// Refreshes device free-space after.
+    @discardableResult
+    public func purgeStagedMedia(paths: [String]) async -> Int {
+        guard let device = deviceInfo, !paths.isEmpty else { return 0 }
+        let handle = device
+        let deleted = (try? await Task.detached {
+            try DeviceMaintenance.removeFiles(device: handle, paths: paths)
+        }.value) ?? 0
+        if let result = queryDeviceDiskSpace(device: device.handle) {
+            deviceFreeBytes = result.free
+            deviceTotalBytes = result.total
+        }
+        return deleted
+    }
+
     /// Save transcoded files locally instead of syncing.
     public func saveLocally(to directory: URL) async {
         await analyzeAll()

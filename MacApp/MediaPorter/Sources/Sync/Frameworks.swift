@@ -99,6 +99,13 @@ enum MD {
     typealias AFCFileRefWriteFn = @convention(c) (UnsafeRawPointer, Int, UnsafeRawPointer, Int) -> Int32
     typealias AFCFileRefCloseFn = @convention(c) (UnsafeRawPointer, Int) -> Int32
     typealias AFCRemovePathFn = @convention(c) (UnsafeRawPointer, UnsafePointer<CChar>) -> Int32
+    typealias AFCDirectoryOpenFn = @convention(c) (
+        UnsafeRawPointer, UnsafePointer<CChar>, UnsafeMutablePointer<UnsafeMutableRawPointer?>
+    ) -> Int32
+    typealias AFCDirectoryReadFn = @convention(c) (
+        UnsafeRawPointer, UnsafeRawPointer, UnsafeMutablePointer<UnsafePointer<CChar>?>
+    ) -> Int32
+    typealias AFCDirectoryCloseFn = @convention(c) (UnsafeRawPointer, UnsafeRawPointer) -> Int32
 
     static var subscribe: AMDeviceNotificationSubscribeFn { lookup(loadMobileDevice(), "AMDeviceNotificationSubscribe") }
     static var copyID: AMDeviceCopyDeviceIdentifierFn { lookup(loadMobileDevice(), "AMDeviceCopyDeviceIdentifier") }
@@ -114,6 +121,9 @@ enum MD {
     static var afcFileWrite: AFCFileRefWriteFn { lookup(loadMobileDevice(), "AFCFileRefWrite") }
     static var afcFileClose: AFCFileRefCloseFn { lookup(loadMobileDevice(), "AFCFileRefClose") }
     static var afcRemove: AFCRemovePathFn { lookup(loadMobileDevice(), "AFCRemovePath") }
+    static var afcDirOpen: AFCDirectoryOpenFn { lookup(loadMobileDevice(), "AFCDirectoryOpen") }
+    static var afcDirRead: AFCDirectoryReadFn { lookup(loadMobileDevice(), "AFCDirectoryRead") }
+    static var afcDirClose: AFCDirectoryCloseFn { lookup(loadMobileDevice(), "AFCDirectoryClose") }
 }
 
 // MARK: - AirTrafficHost Function Types & Accessors

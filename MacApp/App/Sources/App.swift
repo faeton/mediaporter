@@ -37,6 +37,15 @@ struct MediaPorterApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1200, height: 780)
+        .commands {
+            CommandMenu("Device") {
+                Button("Clean Up Staged Media Files…") {
+                    Task { await promptAndCleanupStagedMedia(pipeline: pipeline) }
+                }
+                .disabled(!pipeline.isDeviceConnected || pipeline.isRunning)
+                .keyboardShortcut("K", modifiers: [.command, .shift])
+            }
+        }
 
         Settings {
             SettingsView()

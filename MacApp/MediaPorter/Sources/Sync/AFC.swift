@@ -112,6 +112,35 @@ class AFCClient {
         }
     }
 
+    /// List entries in a device directory. Returns entry names only (no path prefix).
+    /// "." and ".." are filtered out. Returns empty array if path doesn't exist.
+    func listDirectory(_ path: String) -> [String] {
+        guard let c = conn else { return [] }
+        var dirHandle: UnsafeMutableRawPointer?
+        let rc = MD.afcDirOpen(c, path, &dirHandle)
+        guard rc == 0, let dh = dirHandle else { return [] }
+        defer { _ = MD.afcDirClose(c, dh) }
+
+        var entries: [String] = []
+        while true {
+            var namePtr: UnsafePointer<CChar>?
+            let readRc = MD.afcDirRead(c, dh, &namePtr)
+            guard readRc == 0, let ptr = namePtr else { break }
+            let name = String(cString: ptr)
+            if name.isEmpty { break }
+            if name == "." || name == ".." { continue }
+            entries.append(name)
+        }
+        return entries
+    }
+
+    /// Remove a file or empty directory.
+    @discardableResult
+    func removePath(_ path: String) -> Int32 {
+        guard let c = conn else { return -1 }
+        return MD.afcRemove(c, path)
+    }
+
     func close() {
         if let c = conn {
             _ = MD.afcClose(c)
