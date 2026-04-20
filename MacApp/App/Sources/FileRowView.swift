@@ -405,6 +405,9 @@ struct FileRowView: View {
     private func audioSection(audios: [StreamInfo]) -> some View {
         OptionsRow(label: "Audio", systemImage: "waveform", theme: theme) {
             VStack(alignment: .leading, spacing: 2) {
+                if job.canDropAudioToAvoidReencode {
+                    dropAudioBanner(audios: audios)
+                }
                 ForEach(audios.indices, id: \.self) { i in
                     let a = audios[i]
                     let on = job.selectedAudio.contains(i)
@@ -432,6 +435,42 @@ struct FileRowView: View {
                 }
             }
         }
+    }
+
+    /// Inline nudge shown when the job has both copy-able and transcode-only
+    /// audio tracks (e.g. EN EAC3 + RU AC3). One click drops the transcode ones
+    /// and skips the audio re-encode entirely.
+    private func dropAudioBanner(audios: [StreamInfo]) -> some View {
+        let droppable = job.selectedAudioNeedingTranscode
+        let langs: [String] = droppable.compactMap { idx in
+            guard idx < audios.count else { return nil }
+            return audios[idx].language?.isEmpty == false ? audios[idx].language : nil
+        }
+        let langLabel = langs.isEmpty ? "incompatible tracks" :
+            "\(langs.joined(separator: ", ").uppercased()) (\(droppable.count == 1 ? "1 track" : "\(droppable.count) tracks"))"
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 11))
+                .foregroundStyle(accent.solid)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Drop \(langLabel) to skip the audio re-encode.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.text)
+                Text("These tracks need AAC conversion. The others copy through unchanged.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(theme.textDim)
+            }
+            Spacer(minLength: 6)
+            Button("Drop") {
+                job.selectedAudio = job.selectedAudio.filter { !droppable.contains($0) }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .padding(EdgeInsets(top: 7, leading: 9, bottom: 7, trailing: 7))
+        .background(accent.soft, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(accent.ring, lineWidth: 0.5))
+        .padding(.bottom, 4)
     }
 
     private var subtitlesPresent: Bool {
