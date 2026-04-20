@@ -1,7 +1,3 @@
-// Device → Clean Up Staged Media Files flow.
-// Destructive action: confirms via NSAlert with the scanned count + total size
-// before deleting anything. Refreshes device free-space when done.
-
 import AppKit
 import Foundation
 import MediaPorterCore

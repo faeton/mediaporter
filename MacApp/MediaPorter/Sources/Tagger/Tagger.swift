@@ -95,9 +95,7 @@ enum Tagger {
         proc.arguments = cmd
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
-        // Without this, ffmpeg inherits the tty, gets SIGTTIN when put in the
-        // background, and freezes in state T — terminationHandler never fires.
-        // Same fix as Transcoder.
+        // Detach stdin — ffmpeg SIGTTINs in the background and freezes otherwise.
         proc.standardInput = FileHandle.nullDevice
 
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in

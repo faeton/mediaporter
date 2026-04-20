@@ -1144,8 +1144,7 @@ private struct ResolutionPicker: View {
             videoWillReencode: videoWillReencode
         )
         guard bytes > 0 else { return nil }
-        let mb = Int(bytes / 1_048_576)
-        return fmtSizeMB(mb)
+        return ByteFormat.short(bytes)
     }
 }
 

@@ -26,7 +26,7 @@ Videos appear in the TV app immediately — movies in the Movies tab, TV episode
 - **Smart transcoding** — only re-encodes incompatible streams; copies the rest as-is
 - **Hardware acceleration** — Apple VideoToolbox for fast HEVC encoding on Mac
 - **Pipelined transcode + upload** — each file streams to the device as soon as its transcode finishes, overlapping with ongoing transcodes of other files. No waiting for the whole batch
-- **Smart audio normalization** — mixed-codec files normalize to the best codec already present (EAC3 > AC3 > AAC), so your EAC3 surround track copies through bit-perfect while only the mismatched track gets re-encoded
+- **Surgical audio re-encoding** — AAC and EAC3 tracks copy through bit-perfect; only AC3 tracks are transcoded to AAC (the iPad TV app silently drops AC3 from the audio-language switcher). Mixed `aac + eac3` files pass through untouched
 - **Parallel transcoding** — process multiple files simultaneously with `-j N`, saturating all cores
 - **Disk space preflight** — checks Mac temp and device free space before any ffmpeg runs. Fail fast, not mid-transcode
 - **Run summary** — wall-clock totals, peak and average transfer speed, Mac + device free-space deltas at the end of every run
@@ -141,9 +141,9 @@ The result is a native media library entry — videos appear in the TV app with 
 
 ## Roadmap
 
-- **macOS native app** — Swift/SwiftUI GUI with drag-and-drop, built on the same protocol engine
+- **macOS native app** — shipped under `MacApp/` (SwiftUI). Drag-and-drop, inline per-row transcode settings, OpenSubtitles auto-fetch, device cleanup menu
 - **Batch TV series sync** — drag a season folder, auto-detect episodes
-- **Device cleanup** — remove orphan files from previous failed syncs
+- **AssetManifest-based orphan detection** — the current MacApp cleanup purges everything under `/iTunes_Control/Music/F*/`; cross-referencing with the device's registered asset list would let it keep legitimately-synced content
 
 ## Interactive workflow
 

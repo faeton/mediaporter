@@ -96,11 +96,6 @@ public class FileJob: Identifiable {
 
     public var needsWork: Bool { needsReencode || needsRemuxOnly }
 
-    /// Indices into `mediaInfo.audioStreams` for currently-selected tracks
-    /// that would be re-encoded (i.e. AC3 or anything outside the compatible set).
-    /// Useful for offering a "drop these to avoid the re-encode" shortcut when
-    /// the file has a mix of copy-able and transcode-only tracks in different
-    /// languages.
     public var selectedAudioNeedingTranscode: [Int] {
         guard let d = decision, let info = mediaInfo else { return [] }
         return selectedAudio.filter { idx in
@@ -109,20 +104,12 @@ public class FileJob: Identifiable {
         }
     }
 
-    /// True when at least one selected audio track copies and at least one would
-    /// transcode — i.e. dropping the transcode-only tracks would save a re-encode
-    /// AND still leave usable audio. A likely win for cross-language rips
-    /// (e.g. EN EAC3 + RU AC3).
+    /// Some tracks copy, some transcode — dropping the transcode ones avoids
+    /// the audio re-encode and still leaves usable audio.
     public var canDropAudioToAvoidReencode: Bool {
-        guard let d = decision, let info = mediaInfo else { return false }
-        var copyable = 0
-        var transcode = 0
-        for idx in selectedAudio where idx < info.audioStreams.count {
-            let act = d.streamActions[info.audioStreams[idx].index]
-            if act == "copy" { copyable += 1 }
-            if act == "transcode" { transcode += 1 }
-        }
-        return copyable >= 1 && transcode >= 1
+        let transcode = selectedAudioNeedingTranscode.count
+        let valid = selectedAudio.filter { $0 < (mediaInfo?.audioStreams.count ?? 0) }.count
+        return transcode >= 1 && transcode < valid
     }
 
     /// True if the video stream itself is being re-encoded — i.e. the ffmpeg

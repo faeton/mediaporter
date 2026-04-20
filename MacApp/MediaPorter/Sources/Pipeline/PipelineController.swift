@@ -801,10 +801,8 @@ public class PipelineController {
         // Finalize stats
         stats.runEnd = Date()
         stats.macFreeAfter = DiskQuery.macTempFree
-        if let result = queryDeviceDiskSpace(device: device.handle) {
+        if let result = refreshDeviceFreeSpace(device: device) {
             stats.deviceFreeAfter = result.free
-            deviceFreeBytes = result.free
-            deviceTotalBytes = result.total
         }
         lastRunStats = stats
         isRunning = false
@@ -969,11 +967,16 @@ public class PipelineController {
         let deleted = (try? await Task.detached {
             try DeviceMaintenance.removeFiles(device: handle, paths: paths)
         }.value) ?? 0
-        if let result = queryDeviceDiskSpace(device: device.handle) {
-            deviceFreeBytes = result.free
-            deviceTotalBytes = result.total
-        }
+        _ = refreshDeviceFreeSpace(device: device)
         return deleted
+    }
+
+    @discardableResult
+    private func refreshDeviceFreeSpace(device: DeviceInfo) -> (free: Int64, total: Int64)? {
+        guard let result = queryDeviceDiskSpace(device: device.handle) else { return nil }
+        deviceFreeBytes = result.free
+        deviceTotalBytes = result.total
+        return result
     }
 
     /// Save transcoded files locally instead of syncing.
