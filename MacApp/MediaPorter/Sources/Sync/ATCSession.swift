@@ -76,7 +76,7 @@ class ATCSession {
             "SyncedDataclasses": [] as [String],
             "Version": "12.8",
         ]
-        ATH.sendHostInfo(conn!, hostInfo as CFDictionary)
+        check("SendHostInfo", ATH.sendHostInfo(conn!, hostInfo as CFDictionary))
         log("  >> SendHostInfo")
 
         _ = readUntil("SyncAllowed")
@@ -97,7 +97,7 @@ class ATCSession {
             "HostInfo": hostInfoForSync,
         ]
         let msg = ATH.messageCreate(0, "RequestingSync" as CFString, params as CFDictionary)!
-        ATH.sendMessage(conn!, msg)
+        check("RequestingSync", ATH.sendMessage(conn!, msg))
         log("  >> RequestingSync (with Grappa)")
 
         guard let readyMsg = readUntil("ReadyForSync") else {
@@ -248,13 +248,13 @@ class ATCSession {
 
         // Step 2: SendPowerAssertion + MetadataSyncFinished
         log("  >> SendPowerAssertion")
-        ATH.sendPowerAssertion(conn!, kCFBooleanTrue)
+        check("SendPowerAssertion", ATH.sendPowerAssertion(conn!, kCFBooleanTrue))
         log("  >> MetadataSyncFinished (anchor=\"\(anchor)\")")
-        ATH.sendMetadataSyncFinished(
+        check("MetadataSyncFinished", ATH.sendMetadataSyncFinished(
             conn!,
             ["Keybag": 1, "Media": 1] as NSDictionary as CFDictionary,
             ["Media": anchor] as NSDictionary as CFDictionary
-        )
+        ))
 
         // Step 3: Read AssetManifest
         var gotManifest = false
@@ -271,6 +271,12 @@ class ATCSession {
             if name == "AssetManifest" {
                 gotManifest = true
                 if verbose, let m = msg { CFShow(m as CFTypeRef) }
+                if let m = msg {
+                    staleIDs = extractStaleAssets(manifestMsg: m, ourIDs: ourIDs)
+                    if !staleIDs.isEmpty {
+                        log("  Manifest contains \(staleIDs.count) stale pending asset(s)")
+                    }
+                }
                 break
             }
             if name == "SyncFinished" { break }
@@ -286,12 +292,12 @@ class ATCSession {
             let aid = String(f.assetID)
 
             log("  >> FileBegin (asset=\(aid))")
-            ATH.sendMessage(conn!, ATH.messageCreate(0, "FileBegin" as CFString, [
+            check("FileBegin", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileBegin" as CFString, [
                 "AssetID": aid,
                 "FileSize": f.item.fileSize,
                 "TotalSize": f.item.fileSize,
                 "Dataclass": "Media",
-            ] as NSDictionary as CFDictionary)!)
+            ] as NSDictionary as CFDictionary)!))
 
             // Upload artwork if available
             if let poster = f.item.posterData {
@@ -300,19 +306,34 @@ class ATCSession {
                 try afc.writeFile(artPath, data: poster)
             }
 
-            ATH.sendMessage(conn!, ATH.messageCreate(0, "FileProgress" as CFString, [
+            check("FileProgress", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileProgress" as CFString, [
                 "AssetID": aid,
                 "AssetProgress": 1.0,
                 "OverallProgress": 1.0,
                 "Dataclass": "Media",
-            ] as NSDictionary as CFDictionary)!)
+            ] as NSDictionary as CFDictionary)!))
 
             log("  >> FileComplete (path=\(f.devicePath))")
-            ATH.sendMessage(conn!, ATH.messageCreate(0, "FileComplete" as CFString, [
+            check("FileComplete", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileComplete" as CFString, [
                 "AssetID": aid,
                 "AssetPath": f.devicePath,
                 "Dataclass": "Media",
-            ] as NSDictionary as CFDictionary)!)
+            ] as NSDictionary as CFDictionary)!))
+        }
+
+        // Send FileError for stale pending assets from previous failed syncs.
+        // Without this, the device waits indefinitely for them and never
+        // sends SyncFinished (CLAUDE.md finding #14).
+        if !staleIDs.isEmpty {
+            log("  Clearing \(staleIDs.count) stale pending asset(s)...")
+            for sid in staleIDs {
+                log("  >> FileError (stale asset=\(sid))")
+                check("FileError", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileError" as CFString, [
+                    "AssetID": sid,
+                    "Dataclass": "Media",
+                    "ErrorCode": 0,
+                ] as NSDictionary as CFDictionary)!))
+            }
         }
 
         // Step 5: Wait for SyncFinished
@@ -348,7 +369,7 @@ class ATCSession {
 
     func close() {
         if let c = conn {
-            ATH.invalidate(c)
+            _ = ATH.invalidate(c)  // status code; nothing actionable on teardown
             ATH.release(c)
             conn = nil
         }
@@ -375,9 +396,53 @@ class ATCSession {
         if verbose { print(msg) }
     }
 
+    private func extractStaleAssets(manifestMsg: UnsafeMutableRawPointer, ourIDs: Set<String>) -> [String] {
+        var stale: [String] = []
+        guard let manifestRaw = ATH.messageParam(manifestMsg, "AssetManifest" as CFString) else {
+            return stale
+        }
+        let manifest = Unmanaged<CFDictionary>.fromOpaque(manifestRaw).takeUnretainedValue()
+
+        let mediaKey = Unmanaged.passUnretained("Media" as CFString).toOpaque()
+        guard let mediaRaw = CFDictionaryGetValue(manifest, mediaKey) else { return stale }
+        let mediaArray = Unmanaged<CFArray>.fromOpaque(mediaRaw).takeUnretainedValue()
+
+        let count = CFArrayGetCount(mediaArray)
+        for i in 0..<count {
+            guard let itemRaw = CFArrayGetValueAtIndex(mediaArray, i) else { continue }
+            let itemDict = Unmanaged<CFDictionary>.fromOpaque(itemRaw).takeUnretainedValue()
+            let aidKey = Unmanaged.passUnretained("AssetID" as CFString).toOpaque()
+            guard let aidRaw = CFDictionaryGetValue(itemDict, aidKey) else { continue }
+
+            let typeID = CFGetTypeID(unsafeBitCast(aidRaw, to: CFTypeRef.self))
+            let aidStr: String
+            if typeID == CFStringGetTypeID() {
+                aidStr = Unmanaged<CFString>.fromOpaque(aidRaw).takeUnretainedValue() as String
+            } else if typeID == CFNumberGetTypeID() {
+                let num = Unmanaged<CFNumber>.fromOpaque(aidRaw).takeUnretainedValue()
+                var v: Int64 = 0
+                guard CFNumberGetValue(num, .sInt64Type, &v) else { continue }
+                aidStr = String(v)
+            } else {
+                continue
+            }
+
+            if !ourIDs.contains(aidStr) {
+                stale.append(aidStr)
+            }
+        }
+        return stale
+    }
+
     private func sendPong() {
         log("  >> Pong")
-        ATH.sendMessage(conn!, ATH.messageCreate(0, "Pong" as CFString, [:] as NSDictionary as CFDictionary)!)
+        check("Pong", ATH.sendMessage(conn!, ATH.messageCreate(0, "Pong" as CFString, [:] as NSDictionary as CFDictionary)!))
+    }
+
+    @discardableResult
+    private func check(_ tag: String, _ rc: Int32) -> Int32 {
+        if rc != 0 { log("  !! \(tag) returned status \(rc)") }
+        return rc
     }
 
     private func readMsg(timeout: TimeInterval = 15) -> (UnsafeMutableRawPointer?, String?) {

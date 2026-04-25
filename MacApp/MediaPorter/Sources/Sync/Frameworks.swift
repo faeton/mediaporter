@@ -142,13 +142,13 @@ enum MD {
 
 enum ATH {
     typealias CreateFn = @convention(c) (CFString, CFString, UInt32) -> UnsafeMutableRawPointer?
-    typealias SendHostInfoFn = @convention(c) (UnsafeRawPointer, CFDictionary) -> UnsafeRawPointer?
+    typealias SendHostInfoFn = @convention(c) (UnsafeRawPointer, CFDictionary) -> Int32
     typealias ReadMessageFn = @convention(c) (UnsafeRawPointer) -> UnsafeMutableRawPointer?
     typealias SendMessageFn = @convention(c) (UnsafeRawPointer, UnsafeRawPointer) -> Int32
     typealias SendMetadataSyncFinishedFn = @convention(c) (
         UnsafeRawPointer, CFDictionary, CFDictionary
-    ) -> UnsafeRawPointer?
-    typealias SendPowerAssertionFn = @convention(c) (UnsafeRawPointer, CFBoolean) -> UnsafeRawPointer?
+    ) -> Int32
+    typealias SendPowerAssertionFn = @convention(c) (UnsafeRawPointer, CFBoolean) -> Int32
     typealias InvalidateFn = @convention(c) (UnsafeRawPointer) -> Int32
     typealias ReleaseFn = @convention(c) (UnsafeRawPointer) -> Void
     typealias MessageGetNameFn = @convention(c) (UnsafeRawPointer) -> CFString?
