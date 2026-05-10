@@ -1198,93 +1198,170 @@ public class PipelineController {
             return
         }
 
-        // Per-file bookkeeping, shared between transcode and upload coroutines.
+        // ------------------------------------------------------------------
+        // Pre-allocate sync identity for every analyzed job (assetID,
+        // devicePath, slot). Build skeleton SyncItems using source file
+        // values for fileURL/fileSize — those fields are unused by plist
+        // building (only FileBegin reads fileSize, sent later per-file
+        // with the real transcoded size). This is the #8 streaming-register
+        // requirement: medialibraryd needs the full plist before it accepts
+        // any FileBegin, so all files must be enumerated upfront.
+        // ------------------------------------------------------------------
         var preparedPairs: [(job: FileJob, prepared: PreparedSyncFile)] = []
-        var prevUpload: Task<Void, Error>? = nil
-        var uploadFailed: String? = nil
-
         for job in analyzed {
+            let skeletonItem = buildSyncItem(for: job, fileURL: job.inputURL)
+            let prepared = prepareSyncFiles([skeletonItem])[0]
+            preparedPairs.append((job, prepared))
+        }
+
+        // Open the streaming register session BEFORE the upload loop. This
+        // pays the handshake + AssetManifest wait once, up front, instead of
+        // after every byte has shipped. Per-file FileBegin/FileComplete now
+        // fires immediately after each AFC upload finishes — medialibraryd
+        // commits the row within ~1 s (plan #8 gate-test).
+        overallStatus = "Opening sync session..."
+        let registerSession = RegisterSession(device: device, verbose: false)
+        do {
+            let infos = preparedPairs.map { $0.prepared.asSyncFileInfo }
+            try await Task.detached {
+                try registerSession.open(files: infos)
+            }.value
+        } catch {
+            uploader.close()
+            overallStatus = "Sync session failed: \(error.localizedDescription)"
+            for (job, _) in preparedPairs { job.status = .analyzed }
+            isRunning = false
+            lastRunStats = stats
+            cancelFlag.set(false)
+            return
+        }
+
+        var prevWork: Task<Void, Error>? = nil
+        var workFailed: String? = nil
+        var registeredCount = 0
+
+        for (idx, pair) in preparedPairs.enumerated() {
+            let job = pair.job
             if cancelFlag.get() { break }
+
             let transcodeStart = Date()
             await runTranscodeStep(for: job)
 
             if cancelFlag.get() {
-                // ffmpeg terminated via Transcoder.cancelAll(); job is already .failed
-                // with an "exit code 15" error. Overwrite with a cleaner message.
                 if job.status == .failed { job.error = "Cancelled" }
+                registerSession.abandonAsset(assetID: pair.prepared.assetID)
                 break
             }
 
-            guard job.status == .ready, let fileURL = job.outputURL else { continue }
+            guard job.status == .ready, let fileURL = job.outputURL else {
+                // Transcode failed or produced no output — drop the asset
+                // from the sync so SyncFinished isn't blocked waiting for it.
+                registerSession.abandonAsset(assetID: pair.prepared.assetID)
+                continue
+            }
 
-            let item = buildSyncItem(for: job, fileURL: fileURL)
-            let prepared = prepareSyncFiles([item])[0]
-            preparedPairs.append((job, prepared))
+            // Rebuild SyncItem with the real output URL/size so FileBegin
+            // sends the right TotalSize and AFCUploader streams the right
+            // bytes. Same assetID/devicePath/slot — those were committed in
+            // the upfront plist.
+            let realItem = buildSyncItem(for: job, fileURL: fileURL)
+            let realPrepared = PreparedSyncFile(
+                item: realItem,
+                assetID: pair.prepared.assetID,
+                devicePath: pair.prepared.devicePath,
+                slot: pair.prepared.slot
+            )
+            preparedPairs[idx] = (job, realPrepared)
 
             var timing = stats.timingsByFile[job.fileName] ?? PipelineStats.FileTiming()
             timing.transcodeSeconds = Date().timeIntervalSince(transcodeStart)
-            timing.uploadBytes = Int64(prepared.item.fileSize)
+            timing.uploadBytes = Int64(realPrepared.item.fileSize)
             stats.timingsByFile[job.fileName] = timing
 
-            // Wait for the previous file's upload before starting this one — one AFC conn.
-            if let prev = prevUpload {
+            // Serialize against the previous file's upload+register chain —
+            // one AFC connection for video bytes, one ATC session for
+            // FileBegin/FileComplete, both must be used in order.
+            if let prev = prevWork {
                 do { try await prev.value }
-                catch { uploadFailed = error.localizedDescription }
+                catch { workFailed = error.localizedDescription }
             }
-
-            if uploadFailed != nil { break }
+            if workFailed != nil {
+                registerSession.abandonAsset(assetID: pair.prepared.assetID)
+                break
+            }
 
             job.status = .syncing
             job.progress = 0
-            overallStatus = "Uploading \(item.title)"
+            overallStatus = "Uploading \(realItem.title) (\(idx + 1)/\(preparedPairs.count))"
 
             let capJob = job
-            let capPrepared = prepared
+            let capPrepared = realPrepared
             let capCancel = cancelFlag
             let uploadStart = Date()
-            prevUpload = Task.detached { [weak self] in
+            prevWork = Task.detached { [weak self] in
                 var lastReport = Date.distantPast
                 try uploader.upload(capPrepared, progress: { sent, total in
                     let now = Date()
                     guard now.timeIntervalSince(lastReport) >= 0.25 else { return }
                     lastReport = now
                     let pct = total > 0 ? Double(sent) / Double(total) : 0
-                    Task { @MainActor in
-                        capJob.progress = pct
-                    }
+                    Task { @MainActor in capJob.progress = pct }
                 }, isCancelled: { capCancel.get() })
-                let elapsed = Date().timeIntervalSince(uploadStart)
+                let uploadElapsed = Date().timeIntervalSince(uploadStart)
+
+                // Bytes landed — flip the row to .uploaded for the brief
+                // moment between AFC EOF and the FileComplete ack.
+                await MainActor.run {
+                    capJob.progress = 1.0
+                    capJob.status = .uploaded
+                }
+
+                // Send FileBegin / artwork / FileProgress / FileComplete on
+                // the live ATC session. Fast (~ms range; no waiting for
+                // SyncFinished here). Failure here means medialibraryd will
+                // be stuck — caller's finishSync() will log the timeout.
+                try registerSession.registerFile(capPrepared.asSyncFileInfo)
+
                 await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    var t = self.lastRunStats?.timingsByFile[capJob.fileName]
+                    capJob.status = .synced
+                    var t = self?.lastRunStats?.timingsByFile[capJob.fileName]
                         ?? stats.timingsByFile[capJob.fileName]
                         ?? PipelineStats.FileTiming()
-                    t.uploadSeconds = elapsed
+                    t.uploadSeconds = uploadElapsed
                     t.uploadBytes = Int64(capPrepared.item.fileSize)
                     stats.timingsByFile[capJob.fileName] = t
-                    capJob.progress = 1.0
-                    // Upload bytes are on the device but ATC register runs as
-                    // a single batch at the end. Move out of `.syncing` so the
-                    // active-upload counter only counts the file currently
-                    // streaming.
-                    capJob.status = .uploaded
+                }
+            }
+            registeredCount = idx + 1
+        }
+
+        if let prev = prevWork {
+            do { try await prev.value }
+            catch { workFailed = error.localizedDescription }
+        }
+        uploader.close()
+
+        // Any analyzed job we didn't reach (cancel, prior failure) needs a
+        // FileError so the device's SyncFinished isn't blocked on it.
+        if registeredCount < preparedPairs.count {
+            for i in registeredCount..<preparedPairs.count {
+                let (job, prepared) = preparedPairs[i]
+                if job.status != .synced && job.status != .syncing && job.status != .uploaded {
+                    registerSession.abandonAsset(assetID: prepared.assetID)
                 }
             }
         }
 
-        if let prev = prevUpload {
-            do { try await prev.value }
-            catch { uploadFailed = error.localizedDescription }
-        }
-        uploader.close()
-
-        if let err = uploadFailed {
+        if let err = workFailed {
             let wasCancel = cancelFlag.get()
             overallStatus = wasCancel ? "Cancelled" : "Upload failed: \(err)"
-            for (job, _) in preparedPairs where job.status == .syncing {
+            for (job, _) in preparedPairs
+                where job.status == .syncing || job.status == .uploaded
+            {
                 job.status = .failed
                 job.error = wasCancel ? "Cancelled" : err
             }
+            registerSession.close()
             isRunning = false
             lastRunStats = stats
             cancelFlag.set(false)
@@ -1292,8 +1369,6 @@ public class PipelineController {
         }
 
         if cancelFlag.get() {
-            // Loop exited via the cancel-check before the last transcode finished.
-            // Nothing to register. Mark any mid-flight job.
             overallStatus = "Cancelled"
             for (job, _) in preparedPairs
                 where job.status == .syncing || job.status == .uploaded || job.status == .transcoding
@@ -1301,70 +1376,39 @@ public class PipelineController {
                 job.status = .failed
                 job.error = "Cancelled"
             }
+            registerSession.close()
             isRunning = false
             lastRunStats = stats
             cancelFlag.set(false)
             return
         }
 
-        // ------------------------------------------------------------------
-        // Register: single short ATC session for every uploaded file.
-        // ------------------------------------------------------------------
-        // Mark all uploaded rows green-uploaded up front; they stay that way
-        // for the whole register call (medialibraryd commits the batch in
-        // one shot — there's no per-file ack mid-flight). Replaces the
-        // misleading per-row "On device, finalizing".
-        for (job, _) in preparedPairs {
-            job.status = .uploaded
-            job.progress = 1.0
-        }
-        let registerStart = Date()
-        let registerCount = preparedPairs.count
+        // Close the streaming session — waits for SyncFinished. Most rows
+        // are already in MediaLibrary.sqlitedb at this point; the wait is
+        // for medialibraryd's bookkeeping (anchor commit) rather than per-
+        // file ingestion.
+        let finishStart = Date()
+        let synced = preparedPairs.filter { $0.job.status == .synced }.count
+        overallStatus = "\(synced)/\(preparedPairs.count) synced — finalizing…"
         let elapsedTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                let elapsed = Int(Date().timeIntervalSince(registerStart))
+                let elapsed = Int(Date().timeIntervalSince(finishStart))
                 let mm = elapsed / 60, ss = elapsed % 60
-                let elapsedStr = String(format: "%d:%02d", mm, ss)
-                self.overallStatus = "Registering \(registerCount) file\(registerCount == 1 ? "" : "s") on device… \(elapsedStr)"
+                self.overallStatus = String(
+                    format: "%d/%d synced — finalizing… %d:%02d",
+                    synced, preparedPairs.count, mm, ss
+                )
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
-        do {
-            let preparedOnly = preparedPairs.map { $0.prepared }
-            let devCopy = device
-            try await Task.detached {
-                try registerUploadedFiles(device: devCopy, files: preparedOnly, verbose: false)
-            }.value
-            elapsedTask.cancel()
-            for (job, _) in preparedPairs {
-                job.status = .synced
-                job.progress = 1.0
-            }
-            overallStatus = "\(preparedPairs.count)/\(preparedPairs.count) synced"
+        await Task.detached { registerSession.finish() }.value
+        elapsedTask.cancel()
+        overallStatus = "\(synced)/\(preparedPairs.count) synced"
 
-            // Reclaim temp space — delete transcoded outputs that live in our tempdir.
-            // Skip inputs and locally-saved files. Called after register succeeded so
-            // we know the device copy is in place.
-            for (job, _) in preparedPairs {
-                deleteTempOutput(for: job)
-            }
-        } catch {
-            elapsedTask.cancel()
-            // Bytes are on the device; only the ATC register call failed.
-            // Keep the jobs in `.uploaded` so the user can hit "Retry
-            // Registration" without re-uploading. If they never retry, the
-            // existing "Clean Up Staged Media Files" menu item walks the AFC
-            // dirs and frees the orphaned bytes.
-            for (job, _) in preparedPairs {
-                job.status = .uploaded
-                job.error = error.localizedDescription
-            }
-            pendingRegistration = PendingRegistration(
-                deviceUDID: device.udid,
-                pairs: preparedPairs
-            )
-            overallStatus = "Registration failed — Retry Registration in the Device menu (\(error.localizedDescription))"
+        // Reclaim temp space for every successfully synced job.
+        for (job, _) in preparedPairs where job.status == .synced {
+            deleteTempOutput(for: job)
         }
 
         // Finalize stats

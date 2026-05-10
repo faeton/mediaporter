@@ -68,6 +68,16 @@ class ATCSession {
     private let verbose: Bool
     private var deviceGrappa: Data?
 
+    // Streaming-register state. nil outside a prepareSync/finishSync window.
+    private var streamingAFC: AFCClient?
+    private var drainerThread: Thread?
+    private var drainerStop = false
+    private let inboxLock = NSLock()
+    /// Names of non-Ping ATC messages the drainer has read but the foreground
+    /// flow hasn't consumed yet. finishSync polls for SyncFinished here.
+    private var inbox: [String] = []
+    private var ourAssetIDs: Set<String> = []
+
     init(device: DeviceInfo, verbose: Bool = false) {
         self.device = device
         self.verbose = verbose
@@ -266,7 +276,8 @@ class ATCSession {
         files: [SyncFileInfo],
         plistData: Data,
         cigData: Data,
-        anchor: String
+        anchor: String,
+        afterFileComplete: ((Int, SyncFileInfo) -> Void)? = nil
     ) throws {
         // Step 1: Write plist + CIG
         afc.makedirs("/iTunes_Control/Sync/Media")
@@ -317,7 +328,7 @@ class ATCSession {
         afc.makedirs("/Airlock/Media")
         afc.makedirs("/Airlock/Media/Artwork")
 
-        for f in files {
+        for (idx, f) in files.enumerated() {
             let aid = String(f.assetID)
 
             log("  >> FileBegin (asset=\(aid))")
@@ -354,6 +365,10 @@ class ATCSession {
                 "AssetPath": f.devicePath,
                 "Dataclass": "Media",
             ] as NSDictionary as CFDictionary)!))
+
+            // Hook for the gating experiment (#8): caller can probe device
+            // state between FileCompletes. Production callers leave this nil.
+            afterFileComplete?(idx, f)
         }
 
         // Send FileError for stale pending assets from previous failed syncs.
@@ -402,7 +417,252 @@ class ATCSession {
         }
     }
 
+    // MARK: - Streaming register API (plan #8)
+    //
+    // Lifecycle: handshake() → prepareSync() → [registerFile()...|abandonAsset()...] → finishSync()
+    //
+    // Lets PipelineController interleave per-file FileBegin/FileComplete with
+    // the AFC upload loop so medialibraryd commits rows progressively instead
+    // of in a 30 s/file burst at terminal SyncFinished. See plan #8 and the
+    // gate-test confirmation in plan.md.
+    //
+    // The same AFC connection is reused for the plist write + per-file artwork
+    // uploads. A background thread drains incoming ATC messages: it answers
+    // every Ping with a Pong (else the session drops mid-batch — CLAUDE.md #9)
+    // and stashes anything else (SyncFinished, SyncFailed, Ping-Pong noise) in
+    // an inbox that finishSync() polls.
+
+    /// Phase 1 of streaming register. Writes the upfront plist+CIG, sends
+    /// MetadataSyncFinished, waits for AssetManifest, clears stale pending
+    /// assets, and starts the Ping drainer. After this returns, the caller
+    /// can interleave registerFile() calls with AFC uploads.
+    func prepareSync(
+        afc: AFCClient,
+        files: [SyncFileInfo],
+        plistData: Data,
+        cigData: Data,
+        anchor: String
+    ) throws {
+        // Step 1: Write plist + CIG
+        afc.makedirs("/iTunes_Control/Sync/Media")
+        let plistPath = String(format: "/iTunes_Control/Sync/Media/Sync_%08d.plist", Int(anchor)!)
+        try afc.writeFile(plistPath, data: plistData)
+        try afc.writeFile(plistPath + ".cig", data: cigData)
+        log("  AFC: plist+CIG -> \(plistPath)")
+
+        // Step 2: SendPowerAssertion + MetadataSyncFinished
+        log("  >> SendPowerAssertion")
+        check("SendPowerAssertion", ATH.sendPowerAssertion(conn!, kCFBooleanTrue))
+        log("  >> MetadataSyncFinished (anchor=\"\(anchor)\")")
+        check("MetadataSyncFinished", ATH.sendMetadataSyncFinished(
+            conn!,
+            ["Keybag": 1, "Media": 1] as NSDictionary as CFDictionary,
+            ["Media": anchor] as NSDictionary as CFDictionary
+        ))
+
+        // Step 3: Wait AssetManifest, capture stale IDs.
+        var gotManifest = false
+        let ourIDs = Set(files.map { String($0.assetID) })
+        var staleIDs: [String] = []
+        log("  Waiting for AssetManifest...")
+        for _ in 0..<30 {
+            let (msg, name) = readMsg(timeout: 15)
+            guard let name else { break }
+            log("  << \(name)")
+            if name == "Ping" { sendPong(); continue }
+            if name == "SyncFailed" { throw SyncError.rejected }
+            if name == "AssetManifest" {
+                gotManifest = true
+                if let m = msg {
+                    staleIDs = extractStaleAssets(manifestMsg: m, ourIDs: ourIDs)
+                }
+                break
+            }
+            if name == "SyncFinished" { break }
+        }
+        guard gotManifest else { throw SyncError.noManifest }
+
+        // Clear stale pending assets up front. Doing this before any of our
+        // own FileBegins is safer than the old end-of-batch sweep (no race
+        // with medialibraryd accepting our IDs first).
+        if !staleIDs.isEmpty {
+            log("  Clearing \(staleIDs.count) stale pending asset(s)...")
+            for sid in staleIDs {
+                check("FileError", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileError" as CFString, [
+                    "AssetID": sid,
+                    "Dataclass": "Media",
+                    "ErrorCode": 0,
+                ] as NSDictionary as CFDictionary)!))
+            }
+        }
+
+        // Make sure Airlock dirs exist before per-file artwork uploads.
+        afc.makedirs("/Airlock/Media")
+        afc.makedirs("/Airlock/Media/Artwork")
+
+        self.streamingAFC = afc
+        self.ourAssetIDs = ourIDs
+        startDrainer()
+    }
+
+    /// Phase 2 (per-file). Sends FileBegin → artwork upload → FileProgress →
+    /// FileComplete. Bytes for `f.devicePath` must already be on the device
+    /// via AFC at this point (caller's responsibility — typically right
+    /// after `AFCUploader.upload` returns for this file). Each call commits
+    /// the row in MediaLibrary.sqlitedb within ~1 s on the device.
+    func registerFile(_ f: SyncFileInfo) throws {
+        guard let afc = streamingAFC else {
+            throw SyncError.handshakeFailed("registerFile called before prepareSync")
+        }
+        let aid = String(f.assetID)
+        log("  >> FileBegin (asset=\(aid))")
+        check("FileBegin", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileBegin" as CFString, [
+            "AssetID": aid,
+            "FileSize": f.item.fileSize,
+            "TotalSize": f.item.fileSize,
+            "Dataclass": "Media",
+        ] as NSDictionary as CFDictionary)!))
+
+        if let poster = f.item.posterData {
+            let artPath = "/Airlock/Media/Artwork/\(f.assetID)"
+            log("  AFC: artwork -> \(artPath) (\(poster.count / 1024) KB)")
+            try afc.writeFile(artPath, data: poster)
+        }
+        if let showPoster = f.item.showPosterData {
+            let artPath = "/Airlock/Media/Artwork/\(f.assetID)_show"
+            log("  AFC: show artwork -> \(artPath) (\(showPoster.count / 1024) KB)")
+            try afc.writeFile(artPath, data: showPoster)
+        }
+
+        check("FileProgress", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileProgress" as CFString, [
+            "AssetID": aid,
+            "AssetProgress": 1.0,
+            "OverallProgress": 1.0,
+            "Dataclass": "Media",
+        ] as NSDictionary as CFDictionary)!))
+
+        log("  >> FileComplete (path=\(f.devicePath))")
+        check("FileComplete", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileComplete" as CFString, [
+            "AssetID": aid,
+            "AssetPath": f.devicePath,
+            "Dataclass": "Media",
+        ] as NSDictionary as CFDictionary)!))
+    }
+
+    /// Send FileError(0) for an asset we will NOT be FileCompleting (transcode
+    /// failure, user cancel mid-batch, etc.). Without this, medialibraryd
+    /// blocks SyncFinished waiting for the missing asset (CLAUDE.md #8).
+    func abandonAsset(assetID: Int) {
+        log("  >> FileError (abandon asset=\(assetID))")
+        check("FileError", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileError" as CFString, [
+            "AssetID": String(assetID),
+            "Dataclass": "Media",
+            "ErrorCode": 0,
+        ] as NSDictionary as CFDictionary)!))
+    }
+
+    /// Phase 3. Waits for SyncFinished by polling the drainer's inbox (no
+    /// direct readMsg — that would race the drainer for the single ATC
+    /// connection and silently swallow SyncFinished). SyncAllowed is also
+    /// terminal: the device only emits it once it has flushed our anchor
+    /// and is ready to accept a fresh sync, which is what we need before
+    /// returning. Subsequent Progress / Ping noise during medialibraryd's
+    /// background indexing is irrelevant to us.
+    func finishSync() {
+        log("  Waiting for SyncFinished/SyncAllowed...")
+        let hardDeadline = Date().addingTimeInterval(120)
+        while Date() < hardDeadline {
+            for name in drainInbox() {
+                log("  << \(name)")
+                if name == "SyncFinished" || name == "SyncAllowed" {
+                    log("  *** SYNC COMPLETE (\(name)) ***")
+                    stopDrainer()
+                    return
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        log("  SyncFinished not received (120 s timeout)")
+        stopDrainer()
+    }
+
+    /// Atomically pull and clear all pending message names from the drainer's
+    /// inbox. Used by finishSync; never call from inside the drainer thread.
+    private func drainInbox() -> [String] {
+        inboxLock.lock(); defer { inboxLock.unlock() }
+        let snapshot = inbox
+        inbox.removeAll(keepingCapacity: true)
+        return snapshot
+    }
+
+    // MARK: - Drainer
+
+    private func startDrainer() {
+        drainerStop = false
+        let t = Thread { [weak self] in
+            guard let self else { return }
+            while !self.drainerStop {
+                guard let c = self.conn else { return }
+                // BLOCKING read — no inner timeout. ATH.readMessage parks
+                // until either a real message arrives or the connection is
+                // invalidated by close(). The previous timeout-based path
+                // leaked an inflight ATH.readMessage on every TIMEOUT, and
+                // when SyncFinished finally arrived it landed in a leaked
+                // reader whose result was already discarded — so finishSync
+                // never saw it and hung until the 120 s hard deadline.
+                guard let msg = ATH.readMessage(c) else {
+                    // nil = conn invalidated (close called) or transport
+                    // error. Either way, drainer is done.
+                    return
+                }
+                guard let nameCF = ATH.messageName(msg) else { continue }
+                let name = nameCF as String
+                if self.verbose { NSLog("ATC drainer: << %@", name) }
+                if name == "Ping" {
+                    self.sendPong()
+                    continue
+                }
+                self.inboxLock.lock()
+                self.inbox.append(name)
+                self.inboxLock.unlock()
+            }
+        }
+        t.name = "atc-ping-drainer"
+        t.start()
+        self.drainerThread = t
+    }
+
+    private func stopDrainer() {
+        // Just flips the flag. The drainer's blocking ATH.readMessage will
+        // be unblocked when close() invalidates the connection — that's the
+        // intended teardown path. We don't join the thread (it's a Thread,
+        // not a Task) but the flag prevents any further inbox writes.
+        drainerStop = true
+        drainerThread = nil
+    }
+
+    /// Wait `seconds` while keeping the ATC session alive: any Ping the
+    /// device sends gets a Pong, otherwise the session drops (CLAUDE.md #9).
+    /// Used by the #8 gating experiment to stall between FileCompletes.
+    /// SyncFinished or other terminal messages arriving during the sleep
+    /// are ignored — the experiment expects to see device-side state change
+    /// without forcing the sync to terminate.
+    func pingAwareSleep(seconds: TimeInterval) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            let (_, name) = readMsg(timeout: min(remaining, 5))
+            guard let name else { break }
+            if name == "TIMEOUT" { continue }
+            if name == "Ping" { sendPong(); continue }
+            log("  (during sleep) << \(name)")
+        }
+    }
+
     func close() {
+        stopDrainer()
+        streamingAFC = nil
         if let c = conn {
             _ = ATH.invalidate(c)  // status code; nothing actionable on teardown
             ATH.release(c)
@@ -481,11 +741,14 @@ class ATCSession {
     }
 
     private func readMsg(timeout: TimeInterval = 15) -> (UnsafeMutableRawPointer?, String?) {
+        // Guard against close() racing the drainer: if conn is nil here, the
+        // session is gone and there's no point starting a read.
+        guard let c = self.conn else { return (nil, nil) }
         var result: UnsafeMutableRawPointer?
         let done = DispatchSemaphore(value: 0)
 
         DispatchQueue.global().async {
-            result = ATH.readMessage(self.conn!)
+            result = ATH.readMessage(c)
             done.signal()
         }
 

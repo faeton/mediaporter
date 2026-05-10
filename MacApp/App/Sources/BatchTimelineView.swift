@@ -49,7 +49,11 @@ struct BatchTimelineView: View {
         // the final step is one batch call at the very end of the run, so
         // showing the cheaper count keeps the headline moving in real time.
         let fullySynced = count([.synced])
-        let allDone = fullySynced == total && total > 0
+        // In the streaming-register flow (plan #8) jobs flip to .synced as
+        // each FileComplete is sent — well before finishSync returns. Gate
+        // "all done" on isRunning too so the Clear button doesn't appear
+        // while finalizing is still in progress on the device side.
+        let allDone = fullySynced == total && total > 0 && !pipeline.isRunning
         return HStack(spacing: 18) {
             VStack(alignment: .leading, spacing: 0) {
                 Text(overallActive ? "WORKING" : allDone ? "COMPLETE" : "IDLE")

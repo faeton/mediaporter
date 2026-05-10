@@ -117,6 +117,105 @@ func registerUploadedFiles(
     throw lastError ?? SyncError.handshakeFailed("ATC handshake failed after retry")
 }
 
+/// Streaming-register lifecycle for the pipelined runner (plan #8).
+///
+/// Shape: open → registerFile per uploaded file → finish.
+/// Wraps ATCSession: handshake retry on the open call (matches the legacy
+/// `registerUploadedFiles` behaviour), keeps a single ATC + AFC connection
+/// alive across the whole batch.
+///
+/// Caller responsibilities:
+/// - Build the full plist+CIG up front (all asset IDs / device paths must
+///   be known before `open` — medialibraryd doesn't accept new operations
+///   after MetadataSyncFinished).
+/// - Upload bytes via a separate AFCUploader (different AFC connection);
+///   call `registerFile(...)` immediately after each upload finishes.
+/// - On any failure that leaves an asset un-uploaded, call
+///   `abandonAsset(assetID:)` so SyncFinished isn't blocked.
+final class RegisterSession {
+    private let device: DeviceInfo
+    private let verbose: Bool
+    private var session: ATCSession?
+    private var afc: AFCClient?
+
+    init(device: DeviceInfo, verbose: Bool = false) {
+        self.device = device
+        self.verbose = verbose
+    }
+
+    /// Opens the ATC session, writes plist+CIG, sends MetadataSyncFinished,
+    /// waits for AssetManifest, clears stale pending assets, starts the
+    /// Ping drainer. Retries the handshake once with a longer settle —
+    /// after a multi-GB upload session medialibraryd can take seconds to
+    /// be ready.
+    ///
+    /// `files` carries the SyncFileInfos used for the plist build. fileSize
+    /// inside the items is unused at this stage (plist doesn't reference
+    /// it); callers can pass placeholder sizes if real values aren't known
+    /// yet.
+    func open(files: [SyncFileInfo]) throws {
+        var lastError: Error?
+        for attempt in 0..<2 {
+            // Fresh session per attempt — handshake leaves stale state if
+            // it half-completes. Brief settle even on first attempt so
+            // medialibraryd has a moment to commit any in-flight state from
+            // the previous run; longer on retry.
+            let settle: UInt32 = attempt == 0 ? 2 : 6
+            sleep(settle)
+
+            let s = ATCSession(device: device, verbose: verbose)
+            do {
+                let (grappa, anchorStr) = try s.handshake()
+                let newAnchor = String(Int(anchorStr)! + 1)
+                let plistData = s.buildSyncPlist(files: files, anchor: Int(newAnchor)!)
+                let cigData = try s.computeCIG(deviceGrappa: grappa, plistData: plistData)
+                let registerAFC = try AFCClient(device: device)
+                try s.prepareSync(
+                    afc: registerAFC, files: files,
+                    plistData: plistData, cigData: cigData, anchor: newAnchor
+                )
+                self.session = s
+                self.afc = registerAFC
+                return
+            } catch let err as SyncError {
+                s.close()
+                if case .handshakeFailed = err {
+                    lastError = err
+                    continue
+                }
+                throw err
+            } catch {
+                s.close()
+                throw error
+            }
+        }
+        throw lastError ?? SyncError.handshakeFailed("ATC handshake failed after retry")
+    }
+
+    func registerFile(_ f: SyncFileInfo) throws {
+        guard let session else { throw SyncError.handshakeFailed("registerFile before open") }
+        try session.registerFile(f)
+    }
+
+    func abandonAsset(assetID: Int) {
+        session?.abandonAsset(assetID: assetID)
+    }
+
+    func finish() {
+        session?.finishSync()
+        afc?.close(); afc = nil
+        session?.close(); session = nil
+    }
+
+    /// Tear down without waiting for SyncFinished. Used on hard failures
+    /// where the caller has already abandoned the remaining assets and
+    /// just wants to release the connections.
+    func close() {
+        afc?.close(); afc = nil
+        session?.close(); session = nil
+    }
+}
+
 /// One-shot sync: upload all files, then register. Kept for non-pipelined callers.
 func syncFiles(
     items: [SyncItem],

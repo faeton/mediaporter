@@ -27,6 +27,13 @@ func usage() -> Never {
                               local path is the basename of the remote.
                               Useful for inspecting MediaLibrary.sqlitedb,
                               ArtworkDB, etc. without third-party tools.
+      gate-test <f1> <f2> [--sleep SECS]
+                              plan #8 gating: upload two files, send
+                              FileComplete #1, pull MediaLibrary.sqlitedb
+                              and check whether the row appeared at T+0
+                              and T+SECS (default 60). Prints verdict on
+                              whether interleaving register with upload
+                              would buy anything.
     """
     FileHandle.standardError.write(Data((out + "\n").utf8))
     exit(2)
@@ -49,6 +56,16 @@ case "pull":
     guard argv.count >= 3 else { usage() }
     let local = argv.count >= 4 ? argv[3] : (argv[2] as NSString).lastPathComponent
     runPull(remote: argv[2], local: local)
+case "gate-test":
+    guard argv.count >= 4 else { usage() }
+    var sleepSec: Double = 60
+    if let i = argv.firstIndex(of: "--sleep"), i + 1 < argv.count, let v = Double(argv[i + 1]) {
+        sleepSec = v
+    }
+    runGateTest(f1: argv[2], f2: argv[3], sleepSec: sleepSec)
+case "streaming-test":
+    guard argv.count >= 4 else { usage() }
+    runStreamingTest(f1: argv[2], f2: argv[3])
 case "-h", "--help", "help":
     usage()
 default:
@@ -163,6 +180,94 @@ func runPull(remote: String, local: String) {
     }
     let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
     print("\(remote) -> \(url.path) (\(size) bytes)")
+}
+
+// MARK: - streaming-test (plan #8 validation)
+
+func runStreamingTest(f1: String, f2: String) {
+    let u1 = URL(fileURLWithPath: f1)
+    let u2 = URL(fileURLWithPath: f2)
+    for u in [u1, u2] {
+        guard FileManager.default.fileExists(atPath: u.path) else {
+            FileHandle.standardError.write(Data("not found: \(u.path)\n".utf8))
+            exit(1)
+        }
+    }
+    let sema = DispatchSemaphore(value: 0)
+    var thrown: Error?
+    Task {
+        do {
+            try await streamingRegisterSmokeTest(file1: u1, file2: u2)
+        } catch {
+            thrown = error
+        }
+        sema.signal()
+    }
+    sema.wait()
+    if let e = thrown {
+        FileHandle.standardError.write(Data("streaming-test failed: \(e.localizedDescription)\n".utf8))
+        exit(1)
+    }
+}
+
+// MARK: - gate-test (plan #8)
+
+func runGateTest(f1: String, f2: String, sleepSec: Double) {
+    let u1 = URL(fileURLWithPath: f1)
+    let u2 = URL(fileURLWithPath: f2)
+    for u in [u1, u2] {
+        guard FileManager.default.fileExists(atPath: u.path) else {
+            FileHandle.standardError.write(Data("not found: \(u.path)\n".utf8))
+            exit(1)
+        }
+    }
+
+    let sema = DispatchSemaphore(value: 0)
+    var result: Result<GateTestReport, Error>!
+    Task {
+        do {
+            let r = try await gateTestInterleave(
+                file1: u1, file2: u2, sleepSeconds: sleepSec
+            )
+            result = .success(r)
+        } catch {
+            result = .failure(error)
+        }
+        sema.signal()
+    }
+    sema.wait()
+
+    let report: GateTestReport
+    switch result! {
+    case .success(let r): report = r
+    case .failure(let e):
+        FileHandle.standardError.write(Data("gate-test failed: \(e.localizedDescription)\n".utf8))
+        exit(1)
+    }
+
+    print("")
+    print("=== Gate Test Verdict ===")
+    print("File 1: \(report.file1Name)")
+    print("File 2: \(report.file2Name)")
+    print("register() wall time: \(String(format: "%.2f", report.registerSeconds)) s")
+    print("")
+    print("After FileComplete #1, T+0s    : \(format(report.rowsAtT0, [report.file1Name, report.file2Name]))")
+    print("After FileComplete #1, T+\(Int(report.sleepSeconds))s   : \(format(report.rowsAtT60, [report.file1Name, report.file2Name]))")
+    print("After register() returns        : \(format(report.rowsAfterRegister, [report.file1Name, report.file2Name]))")
+    print("")
+    if report.rowsAtT0.contains(report.file1Name) || report.rowsAtT60.contains(report.file1Name) {
+        print(">>> #8 VIABLE: file 1 row landed before FileComplete #2 / SyncFinished.")
+        print("    medialibraryd commits per FileComplete — interleaving will pay off.")
+    } else if report.rowsAfterRegister.contains(report.file1Name) {
+        print(">>> #8 NOT VIABLE: rows only land after terminal SyncFinished.")
+        print("    medialibraryd batches the whole sync — interleaving buys nothing.")
+    } else {
+        print(">>> INCONCLUSIVE: file 1 row never appeared. Sync may have failed.")
+    }
+}
+
+private func format(_ found: Set<String>, _ all: [String]) -> String {
+    all.map { "\($0)=\(found.contains($0) ? "YES" : "no")" }.joined(separator: "  ")
 }
 
 // MARK: - recover
