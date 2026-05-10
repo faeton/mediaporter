@@ -187,8 +187,7 @@ struct DeviceColumnView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .tracking(0.3)
                 .foregroundStyle(accent.solid)
-            Text("This \(info.deviceClass.isEmpty ? "device" : info.deviceClass)'s display is \(info.screenDescription). " +
-                 "\(recommendedLabel(info.suggestedResolution)) is the sweet spot — bigger wastes space with no visible gain.")
+            Text("\(recommendedLabel(info.suggestedResolution)) is the sweet spot for this \(info.deviceClass.isEmpty ? "device" : info.deviceClass)'s display. Anything bigger wastes space with no visible gain.")
                 .font(.system(size: 12))
                 .foregroundStyle(theme.text)
                 .lineSpacing(1)
