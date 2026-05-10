@@ -81,3 +81,23 @@ final class FilenameParserTests: XCTestCase {
         XCTAssertNil(p.year)
     }
 }
+
+extension FilenameParserTests {
+    func testTVAnimeReleaseSpaceDashSeparator() {
+        let p = FilenameParser.parse(
+            "[SOFCJ-Raws] Shingeki no Kyojin - S1 - E01 [WEB-DL KP 1080p].mkv"
+        )
+        XCTAssertEqual(p.mediaType, .tvShow)
+        XCTAssertEqual(p.title, "Shingeki no Kyojin")
+        XCTAssertEqual(p.season, 1)
+        XCTAssertEqual(p.episode, 1)
+    }
+
+    func testTVDottedSeasonEpisodeSeparator() {
+        let p = FilenameParser.parse("Show.Name.S01.E02.mkv")
+        XCTAssertEqual(p.mediaType, .tvShow)
+        XCTAssertEqual(p.title, "Show Name")
+        XCTAssertEqual(p.season, 1)
+        XCTAssertEqual(p.episode, 2)
+    }
+}

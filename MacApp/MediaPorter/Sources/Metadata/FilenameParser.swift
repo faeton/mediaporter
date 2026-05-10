@@ -17,9 +17,11 @@ struct ParsedFilename {
 }
 
 enum FilenameParser {
-    // TV: "Show.Name.S01E02" or "Show Name - S01E02"
+    // TV: "Show.Name.S01E02", "Show Name - S01E02", "Show - S1 - E01", "Show S01.E02".
+    // The separators between S## and E## are optional + greedy because real-world
+    // anime/scene rips use forms like "S1 - E01" with space-dash-space in between.
     private static let tvPattern = try! NSRegularExpression(
-        pattern: #"^(.+?)[.\s_-]+[Ss](\d{1,2})[Ee](\d{1,2})"#
+        pattern: #"^(.+?)[.\s_-]+[Ss](\d{1,2})[\s._-]*[Ee](\d{1,2})"#
     )
 
     // Movie: "Movie.Name.2024", "Movie Name (2024)", or "Movie Name 1972" at end-of-string.
