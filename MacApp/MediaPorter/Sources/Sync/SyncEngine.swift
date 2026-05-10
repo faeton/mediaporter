@@ -64,6 +64,12 @@ final class AFCUploader {
 }
 
 /// Run a single short ATC session to register every already-uploaded file with the device.
+///
+/// After a multi-GB pipelined upload run, the device's medialibraryd /
+/// atc-mediasvc daemons can take several seconds to settle before they're
+/// ready for a new ATC session. We do a brief settle sleep, and if the
+/// handshake fails (typically "No ReadyForSync received" on a still-busy
+/// daemon) retry it once with a longer pause.
 func registerUploadedFiles(
     device: DeviceInfo,
     files: [PreparedSyncFile],
@@ -71,23 +77,44 @@ func registerUploadedFiles(
 ) throws {
     let syncFiles = files.map { $0.asSyncFileInfo }
 
-    let session = ATCSession(device: device, verbose: verbose)
-    let (grappa, anchorStr) = try session.handshake()
-    let newAnchor = String(Int(anchorStr)! + 1)
+    var lastError: Error?
+    for attempt in 0..<2 {
+        // Settle delay before each attempt — short before the first, longer
+        // before the retry. Lets the device's media indexer catch up.
+        let settle: UInt32 = attempt == 0 ? 3 : 8
+        sleep(settle)
 
-    let plistData = session.buildSyncPlist(files: syncFiles, anchor: Int(newAnchor)!)
-    let cigData = try session.computeCIG(deviceGrappa: grappa, plistData: plistData)
+        do {
+            let session = ATCSession(device: device, verbose: verbose)
+            let (grappa, anchorStr) = try session.handshake()
+            let newAnchor = String(Int(anchorStr)! + 1)
 
-    let registerAFC = try AFCClient(device: device)
-    try session.register(
-        afc: registerAFC,
-        files: syncFiles,
-        plistData: plistData,
-        cigData: cigData,
-        anchor: newAnchor
-    )
-    registerAFC.close()
-    session.close()
+            let plistData = session.buildSyncPlist(files: syncFiles, anchor: Int(newAnchor)!)
+            let cigData = try session.computeCIG(deviceGrappa: grappa, plistData: plistData)
+
+            let registerAFC = try AFCClient(device: device)
+            try session.register(
+                afc: registerAFC,
+                files: syncFiles,
+                plistData: plistData,
+                cigData: cigData,
+                anchor: newAnchor
+            )
+            registerAFC.close()
+            session.close()
+            return
+        } catch let err as SyncError {
+            // Only retry handshake failures — anything past the handshake
+            // (CIG, plist write, file complete) is likely a real protocol
+            // problem and a second attempt won't help.
+            if case .handshakeFailed = err {
+                lastError = err
+                continue
+            }
+            throw err
+        }
+    }
+    throw lastError ?? SyncError.handshakeFailed("ATC handshake failed after retry")
 }
 
 /// One-shot sync: upload all files, then register. Kept for non-pipelined callers.

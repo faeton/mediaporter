@@ -464,9 +464,16 @@ class ATCSession {
         return (msg, nameCF as String)
     }
 
-    private func readUntil(_ target: String, maxMsgs: Int = 10) -> UnsafeMutableRawPointer? {
+    /// Read messages until we see `target` or run out of attempts. The default
+    /// per-message timeout is generous (30s) because the iPad's medialibraryd
+    /// can be busy ingesting after a multi-GB AFC upload session, and the ATC
+    /// service often needs a beat to respond on a fresh connection. 8s was
+    /// short enough to fail under that load.
+    private func readUntil(
+        _ target: String, maxMsgs: Int = 10, timeout: TimeInterval = 30
+    ) -> UnsafeMutableRawPointer? {
         for _ in 0..<maxMsgs {
-            let (msg, name) = readMsg(timeout: 8)
+            let (msg, name) = readMsg(timeout: timeout)
             guard let name, name != "TIMEOUT" else { return nil }
             if name == target { return msg }
         }

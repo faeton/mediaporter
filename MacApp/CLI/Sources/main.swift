@@ -21,6 +21,8 @@ func usage() -> Never {
       devices                 list connected iOS devices
       analyze <file>          probe a file and print the transcode plan
       sync <file> [file...]   (not implemented yet)
+      recover                 register orphaned uploads on the device using
+                              tagged .m4v files left in the system tempdir
     """
     FileHandle.standardError.write(Data((out + "\n").utf8))
     exit(2)
@@ -37,6 +39,8 @@ case "analyze":
 case "sync":
     FileHandle.standardError.write(Data("sync: not implemented yet\n".utf8))
     exit(2)
+case "recover":
+    runRecover()
 case "-h", "--help", "help":
     usage()
 default:
@@ -128,6 +132,40 @@ func runAnalyze(path: String) {
             if let br = a.targetBitrate { line += " @\(br)" }
             if a.targetCodec != nil { line += ")" }
             print(line)
+        }
+    }
+}
+
+// MARK: - recover
+
+func runRecover() {
+    let device: DeviceInfo
+    do {
+        device = try discoverDevice()
+    } catch {
+        FileHandle.standardError.write(Data("no device: \(error)\n".utf8))
+        exit(1)
+    }
+    print("Device: \(device.displayName) (\(device.udid.prefix(16))...)")
+
+    let report: OrphanRecoveryReport
+    do {
+        report = try recoverOrphansEndToEnd(device: device)
+    } catch {
+        FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+
+    print("Local /tmp m4v files found:    \(report.localFound)")
+    print("Device orphan files found:     \(report.deviceFound)")
+    print("Registered (matched by size):  \(report.registered)")
+    print("Device files without a match:  \(report.deviceUnmatched)")
+    print("Local files without a match:   \(report.candidatesUnmatched)")
+    if !report.registeredTitles.isEmpty {
+        print("")
+        print("Registered:")
+        for t in report.registeredTitles {
+            print("  - \(t)")
         }
     }
 }

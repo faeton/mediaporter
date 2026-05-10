@@ -37,6 +37,32 @@ public class PipelineController {
     public var hwAccel = true
     public var tmdbAPIKey: String = ""
 
+    /// Resolved show identity per cluster (`FileJob.clusterID`). Each entry is
+    /// shared by every episode in the cluster — show name, year, network,
+    /// poster, tmdb id. Per-episode fields (episode title, still) stay on the
+    /// individual `EpisodeMetadata`.
+    public var tvShowResolutions: [String: ResolvedShow] = [:]
+
+    /// Clusters where TMDb couldn't auto-pick a show — surfaced to the UI so
+    /// the user can pick once for the whole cluster instead of N times.
+    public var pendingShowPicks: [PendingShowPick] = []
+
+    /// Files that finished AFC upload in the last run but lost their ATC
+    /// registration step. Set when the final batch register call throws; the
+    /// AFC bytes are still on the device, only the MediaLibrary insert failed.
+    /// Populated so the user can hit "Retry Registration" instead of
+    /// re-uploading 19+ GB.
+    var pendingRegistration: PendingRegistration?
+
+    /// Convenience for the UI — the menu item enables when this is true.
+    public var hasPendingRegistration: Bool { pendingRegistration != nil }
+    public var pendingRegistrationCount: Int { pendingRegistration?.pairs.count ?? 0 }
+
+    struct PendingRegistration {
+        let deviceUDID: String
+        var pairs: [(job: FileJob, prepared: PreparedSyncFile)]
+    }
+
     // OpenSubtitles credentials — when all four are set, analyze will fetch
     // missing-language SRTs via moviehash/TMDb lookup into a per-user cache.
     public var openSubtitlesAPIKey: String = ""
@@ -208,6 +234,413 @@ public class PipelineController {
         }
     }
 
+    // MARK: - TV-show clustering
+    //
+    // The Python reference does one TMDb call per file. That's 25 calls for
+    // a season drop, and 25 separate "Edit title" sheets when TMDb gets it
+    // wrong. We instead group episodes by parsed show name + year (the
+    // "cluster"), run the show search ONCE per cluster, cache the resolved
+    // identity, and reuse it for every episode. Editing one episode's show
+    // re-applies across the cluster — see `resolveCluster(...)`.
+
+    /// Look up metadata for one job. TV files go through the cluster cache;
+    /// movies use the existing per-file path.
+    private func resolveJobMetadata(_ job: FileJob) async {
+        let parsed = FilenameParser.parse(job.fileName)
+
+        if parsed.mediaType == .tvShow {
+            let clusterID = TVShowCluster.key(showName: parsed.title, year: parsed.year)
+            job.clusterID = clusterID
+            job.metadata = .tvEpisode(await resolveTVEpisode(parsed: parsed, clusterID: clusterID))
+            return
+        }
+
+        // Movie path — unchanged from pre-clustering behavior.
+        if !tmdbAPIKey.isEmpty {
+            if let resolved = await MetadataLookup.lookup(path: job.inputURL, apiKey: tmdbAPIKey) {
+                job.metadata = resolved
+                return
+            }
+        }
+        let fallbackPoster = PosterGenerator.generate(title: parsed.title, year: parsed.year)
+        job.metadata = .movie(MovieMetadata(
+            title: parsed.title, year: parsed.year,
+            genre: nil, overview: nil, longOverview: nil, director: nil,
+            posterURL: nil, posterData: fallbackPoster, tmdbID: nil
+        ))
+    }
+
+    /// Build an `EpisodeMetadata` for a TV file. Resolves the cluster's show
+    /// (cached after the first file) then fetches per-episode info.
+    private func resolveTVEpisode(parsed: ParsedFilename, clusterID: String) async -> EpisodeMetadata {
+        let season = parsed.season ?? 1
+        let episode = parsed.episode ?? 1
+        let episodeID = String(format: "S%02dE%02d", season, episode)
+
+        let show = await resolveCluster(clusterID: clusterID, query: parsed.title, parsedYear: parsed.year)
+
+        // Per-episode fetch — cheap, but only useful when we have a real TMDb
+        // show id to query against.
+        var epTitle: String? = nil
+        var stillURL: String? = nil
+        var overview: String? = nil
+        if let id = show.tmdbShowID, !tmdbAPIKey.isEmpty {
+            if let info = try? await TMDbClient.fetchEpisodeOnly(
+                showID: id, season: season, episode: episode, apiKey: tmdbAPIKey
+            ) {
+                epTitle = info.title
+                stillURL = info.stillURL
+                overview = info.overview
+            }
+        }
+
+        var posterData: Data? = nil
+        if let url = stillURL {
+            posterData = await TMDbClient.downloadPoster(urlString: url)
+        }
+
+        return EpisodeMetadata(
+            showName: show.showName,
+            season: season,
+            episode: episode,
+            episodeTitle: epTitle,
+            episodeID: episodeID,
+            year: show.year ?? parsed.year,
+            genre: show.genre,
+            overview: overview,
+            longOverview: overview,
+            network: show.network,
+            posterURL: stillURL,
+            posterData: posterData,
+            showPosterURL: show.showPosterURL,
+            showPosterData: show.showPosterData,
+            tmdbShowID: show.tmdbShowID
+        )
+    }
+
+    /// Get-or-create the show resolution for a cluster. Auto-picks the top
+    /// candidate when it dominates; otherwise queues a `PendingShowPick`
+    /// for the UI and falls back to filename-derived identity.
+    @discardableResult
+    private func resolveCluster(
+        clusterID: String, query: String, parsedYear: Int?
+    ) async -> ResolvedShow {
+        if let cached = tvShowResolutions[clusterID] { return cached }
+
+        // No TMDb key → fallback poster only, no network call.
+        guard !tmdbAPIKey.isEmpty else {
+            let fallback = ResolvedShow(
+                showName: query,
+                year: parsedYear,
+                showPosterData: PosterGenerator.generate(title: query, year: parsedYear)
+            )
+            tvShowResolutions[clusterID] = fallback
+            return fallback
+        }
+
+        let candidates = (try? await TMDbClient.searchTVShows(query: query, apiKey: tmdbAPIKey)) ?? []
+
+        if TVShowCluster.shouldAutoPick(candidates), let top = candidates.first {
+            let resolved = await materializeShow(from: top, fallbackQuery: query, fallbackYear: parsedYear)
+            tvShowResolutions[clusterID] = resolved
+            return resolved
+        }
+
+        // No clear winner — record the cluster as pending and use a fallback
+        // identity so analyze can keep running. The UI surfaces the pick;
+        // `applyShowToCluster` swaps the resolution in once the user chooses.
+        recordPendingPick(clusterID: clusterID, query: query, candidates: candidates)
+        let fallback = ResolvedShow(
+            showName: query,
+            year: parsedYear,
+            showPosterData: PosterGenerator.generate(title: query, year: parsedYear)
+        )
+        tvShowResolutions[clusterID] = fallback
+        return fallback
+    }
+
+    /// Turn a TMDb candidate into a fully populated `ResolvedShow` (genre,
+    /// network, poster bytes). Used after the user picks from the sheet AND
+    /// for the auto-pick path.
+    private func materializeShow(
+        from candidate: TVShowCandidate, fallbackQuery: String, fallbackYear: Int?
+    ) async -> ResolvedShow {
+        var resolved: ResolvedShow
+        if let detail = try? await TMDbClient.fetchTVShow(id: candidate.id, apiKey: tmdbAPIKey) {
+            resolved = detail
+            // Detail's name/year tend to be richer; fall back to the search
+            // candidate if the detail call returned an empty stub.
+            if resolved.showName.isEmpty { resolved.showName = candidate.name }
+            if resolved.year == nil { resolved.year = candidate.year }
+            if resolved.showPosterURL == nil { resolved.showPosterURL = candidate.posterURL }
+        } else {
+            resolved = ResolvedShow(
+                showName: candidate.name,
+                year: candidate.year,
+                showPosterURL: candidate.posterURL,
+                tmdbShowID: candidate.id
+            )
+        }
+        if let url = resolved.showPosterURL {
+            resolved.showPosterData = await TMDbClient.downloadPoster(urlString: url)
+        }
+        if resolved.showPosterData == nil {
+            resolved.showPosterData = PosterGenerator.generate(
+                title: resolved.showName.isEmpty ? fallbackQuery : resolved.showName,
+                year: resolved.year ?? fallbackYear
+            )
+        }
+        return resolved
+    }
+
+    private func recordPendingPick(
+        clusterID: String, query: String, candidates: [TVShowCandidate]
+    ) {
+        let affected = jobs.filter { $0.clusterID == clusterID }.map(\.id)
+        let pick = PendingShowPick(
+            id: clusterID, query: query, candidates: candidates, affectedJobIDs: affected
+        )
+        if let idx = pendingShowPicks.firstIndex(where: { $0.id == clusterID }) {
+            pendingShowPicks[idx] = pick
+        } else {
+            pendingShowPicks.append(pick)
+        }
+    }
+
+    /// User picked a show from the picker. Updates the cluster's resolution
+    /// and re-fetches per-episode info for every job in the cluster.
+    public func applyShowToCluster(
+        clusterID: String, candidate: TVShowCandidate
+    ) async {
+        let resolved = await materializeShow(
+            from: candidate, fallbackQuery: candidate.name, fallbackYear: candidate.year
+        )
+        tvShowResolutions[clusterID] = resolved
+        pendingShowPicks.removeAll { $0.id == clusterID }
+        await refreshEpisodes(in: clusterID, using: resolved)
+    }
+
+    /// User asked to keep the filename-derived identity. Drops the pending
+    /// pick — the cluster's existing fallback ResolvedShow stays in place.
+    public func dismissClusterPick(_ clusterID: String) {
+        pendingShowPicks.removeAll { $0.id == clusterID }
+    }
+
+    /// Bulk action: assign a clusterID to a set of jobs (overwriting any
+    /// existing one), then resolve. Used by multi-select "Set show…".
+    public func reclusterJobs(jobIDs: [UUID], showName: String, year: Int?) async {
+        let clusterID = TVShowCluster.key(showName: showName, year: year)
+        for j in jobs where jobIDs.contains(j.id) {
+            j.clusterID = clusterID
+        }
+        // Force a fresh resolution for this cluster so the picker re-runs.
+        tvShowResolutions[clusterID] = nil
+        _ = await resolveCluster(clusterID: clusterID, query: showName, parsedYear: year)
+        if let resolved = tvShowResolutions[clusterID] {
+            await refreshEpisodes(in: clusterID, using: resolved)
+        }
+    }
+
+    /// Re-build EpisodeMetadata for every job in a cluster against the new
+    /// resolution. Episode numbers come from the original parse (don't
+    /// change), only show identity + per-episode TMDb fetch are re-run.
+    private func refreshEpisodes(in clusterID: String, using show: ResolvedShow) async {
+        for job in jobs where job.clusterID == clusterID {
+            let parsed = FilenameParser.parse(job.fileName)
+            let season = parsed.season ?? 1
+            let episode = parsed.episode ?? 1
+            let episodeID = String(format: "S%02dE%02d", season, episode)
+
+            var epTitle: String? = nil
+            var stillURL: String? = nil
+            var overview: String? = nil
+            var posterData: Data? = nil
+            if let id = show.tmdbShowID, !tmdbAPIKey.isEmpty {
+                if let info = try? await TMDbClient.fetchEpisodeOnly(
+                    showID: id, season: season, episode: episode, apiKey: tmdbAPIKey
+                ) {
+                    epTitle = info.title
+                    stillURL = info.stillURL
+                    overview = info.overview
+                }
+                if let url = stillURL {
+                    posterData = await TMDbClient.downloadPoster(urlString: url)
+                }
+            }
+
+            job.metadata = .tvEpisode(EpisodeMetadata(
+                showName: show.showName,
+                season: season,
+                episode: episode,
+                episodeTitle: epTitle,
+                episodeID: episodeID,
+                year: show.year ?? parsed.year,
+                genre: show.genre,
+                overview: overview,
+                longOverview: overview,
+                network: show.network,
+                posterURL: stillURL,
+                posterData: posterData,
+                showPosterURL: show.showPosterURL,
+                showPosterData: show.showPosterData,
+                tmdbShowID: show.tmdbShowID
+            ))
+        }
+    }
+
+    /// All jobs that belong to a cluster — used by the picker UI to render
+    /// "applies to N episodes".
+    public func jobs(inCluster clusterID: String) -> [FileJob] {
+        jobs.filter { $0.clusterID == clusterID }
+    }
+
+    // MARK: - Recovery
+
+    /// Re-run the ATC register step against files that finished uploading but
+    /// failed registration in the last run. Cheap (one short ATC session, no
+    /// re-upload of bytes). Requires the same device to still be connected.
+    public func retryRegistration() async {
+        guard let pending = pendingRegistration else {
+            overallStatus = "Nothing to retry."
+            return
+        }
+        guard let dev = deviceInfo, dev.udid == pending.deviceUDID else {
+            overallStatus = "Reconnect the original device to retry registration."
+            return
+        }
+        guard !isRunning else { return }
+
+        isRunning = true
+        overallStatus = "Retrying registration on device..."
+
+        let preparedOnly = pending.pairs.map { $0.prepared }
+        let devCopy = dev
+        do {
+            try await Task.detached {
+                try registerUploadedFiles(device: devCopy, files: preparedOnly, verbose: false)
+            }.value
+            for (job, _) in pending.pairs {
+                job.status = .synced
+                job.error = nil
+                job.progress = 1.0
+                deleteTempOutput(for: job)
+            }
+            overallStatus = "\(pending.pairs.count)/\(pending.pairs.count) synced"
+            pendingRegistration = nil
+        } catch {
+            overallStatus = "Retry failed: \(error.localizedDescription)"
+        }
+        isRunning = false
+    }
+
+    /// User decided not to retry — drop the pending state. Bytes are still on
+    /// the device; "Clean Up Staged Media Files" reclaims them.
+    public func discardPendingRegistration() {
+        pendingRegistration = nil
+    }
+
+    /// Result bundle for `recoverOrphans` so the UI can pop a clear summary
+    /// alert instead of just updating the status bar.
+    public struct RecoveryResult {
+        public let localFound: Int        // .m4v files in /tmp
+        public let deviceFound: Int       // orphan files on the device
+        public let registered: Int        // successfully matched + registered
+        public let deviceUnmatched: Int   // device files with no local match
+        public let candidatesUnmatched: Int // local files with no device match
+        public let error: String?
+    }
+
+    @discardableResult
+    public func recoverOrphans() async -> RecoveryResult {
+        guard let dev = deviceInfo else {
+            overallStatus = "Connect the original device to recover orphans."
+            return RecoveryResult(localFound: 0, deviceFound: 0, registered: 0,
+                                  deviceUnmatched: 0, candidatesUnmatched: 0,
+                                  error: "No device connected")
+        }
+        guard !isRunning else {
+            return RecoveryResult(localFound: 0, deviceFound: 0, registered: 0,
+                                  deviceUnmatched: 0, candidatesUnmatched: 0,
+                                  error: "Pipeline already running")
+        }
+
+        isRunning = true
+        defer { isRunning = false }
+        overallStatus = "Scanning local tempdir for transcoded files..."
+
+        // Pull tags + size from every leftover .m4v in /tmp. Doesn't depend on
+        // the in-memory FileJobs queue — the m4v files were tagged before
+        // upload, so they carry full TMDb metadata themselves.
+        let candidates = OrphanRecovery.scanLocalCandidates()
+
+        overallStatus = "Scanning device for uploaded files..."
+        let deviceFiles: [DeviceMediaFile]
+        do {
+            let devCopy = dev
+            deviceFiles = try await Task.detached {
+                try DeviceMaintenance.scanStagingMedia(device: devCopy)
+            }.value
+        } catch {
+            overallStatus = "Device scan failed: \(error.localizedDescription)"
+            return RecoveryResult(
+                localFound: candidates.count, deviceFound: 0, registered: 0,
+                deviceUnmatched: 0, candidatesUnmatched: candidates.count,
+                error: error.localizedDescription
+            )
+        }
+
+        let (pairs, deviceUnmatched, candUnmatched) = OrphanRecovery.match(
+            candidates: candidates, deviceFiles: deviceFiles
+        )
+
+        guard !pairs.isEmpty else {
+            overallStatus = "Nothing to recover (\(candidates.count) local, \(deviceFiles.count) on device, 0 matched)."
+            return RecoveryResult(
+                localFound: candidates.count, deviceFound: deviceFiles.count,
+                registered: 0, deviceUnmatched: deviceUnmatched.count,
+                candidatesUnmatched: candUnmatched.count, error: nil
+            )
+        }
+
+        overallStatus = "Registering \(pairs.count) recovered file(s)..."
+        let preparedList: [PreparedSyncFile] = pairs.map { (cand, dev) in
+            PreparedSyncFile(
+                item: OrphanRecovery.makeSyncItem(from: cand),
+                assetID: ATCSession.generateAssetID(),
+                devicePath: dev.path,
+                slot: dev.slot
+            )
+        }
+        let devCopy = dev
+        do {
+            try await Task.detached {
+                try registerUploadedFiles(device: devCopy, files: preparedList, verbose: false)
+            }.value
+            // Clean up the local /tmp m4v copies we just registered.
+            for (cand, _) in pairs {
+                try? FileManager.default.removeItem(at: cand.localURL)
+            }
+            // Mark any matching FileJobs in the queue as synced so the row
+            // colors update. (Match by inputURL filename stem inside the
+            // tagged title — best-effort; not required for correctness.)
+            pendingRegistration = nil
+            overallStatus = "Recovered \(pairs.count) of \(deviceFiles.count) device files."
+            return RecoveryResult(
+                localFound: candidates.count, deviceFound: deviceFiles.count,
+                registered: pairs.count, deviceUnmatched: deviceUnmatched.count,
+                candidatesUnmatched: candUnmatched.count, error: nil
+            )
+        } catch {
+            overallStatus = "Recovery failed: \(error.localizedDescription)"
+            return RecoveryResult(
+                localFound: candidates.count, deviceFound: deviceFiles.count,
+                registered: 0, deviceUnmatched: deviceUnmatched.count,
+                candidatesUnmatched: candUnmatched.count,
+                error: error.localizedDescription
+            )
+        }
+    }
+
     // MARK: - Pipeline Stages
 
     public func analyzeAll() async {
@@ -267,19 +700,7 @@ public class PipelineController {
                 }
                 job.selectedExternalSubs = Array(0..<info.externalSubtitles.count)
 
-                if !tmdbAPIKey.isEmpty {
-                    job.metadata = await MetadataLookup.lookup(
-                        path: job.inputURL, apiKey: tmdbAPIKey
-                    )
-                } else {
-                    let parsed = FilenameParser.parse(job.fileName)
-                    let fallbackPoster = PosterGenerator.generate(title: parsed.title, year: parsed.year)
-                    job.metadata = .movie(MovieMetadata(
-                        title: parsed.title, year: parsed.year,
-                        genre: nil, overview: nil, longOverview: nil, director: nil,
-                        posterURL: nil, posterData: fallbackPoster, tmdbID: nil
-                    ))
-                }
+                await resolveJobMetadata(job)
 
                 // OpenSubtitles: fetch missing-language SRTs into the per-user cache
                 // and splice them into mediaInfo.externalSubtitles so they flow into
@@ -731,6 +1152,11 @@ public class PipelineController {
                     t.uploadBytes = Int64(capPrepared.item.fileSize)
                     stats.timingsByFile[capJob.fileName] = t
                     capJob.progress = 1.0
+                    // Upload bytes are on the device but ATC register runs as
+                    // a single batch at the end. Move out of `.syncing` so the
+                    // active-upload counter only counts the file currently
+                    // streaming.
+                    capJob.status = .uploaded
                 }
             }
         }
@@ -758,7 +1184,9 @@ public class PipelineController {
             // Loop exited via the cancel-check before the last transcode finished.
             // Nothing to register. Mark any mid-flight job.
             overallStatus = "Cancelled"
-            for (job, _) in preparedPairs where job.status == .syncing || job.status == .transcoding {
+            for (job, _) in preparedPairs
+                where job.status == .syncing || job.status == .uploaded || job.status == .transcoding
+            {
                 job.status = .failed
                 job.error = "Cancelled"
             }
@@ -791,11 +1219,20 @@ public class PipelineController {
                 deleteTempOutput(for: job)
             }
         } catch {
+            // Bytes are on the device; only the ATC register call failed.
+            // Keep the jobs in `.uploaded` so the user can hit "Retry
+            // Registration" without re-uploading. If they never retry, the
+            // existing "Clean Up Staged Media Files" menu item walks the AFC
+            // dirs and frees the orphaned bytes.
             for (job, _) in preparedPairs {
-                job.status = .failed
+                job.status = .uploaded
                 job.error = error.localizedDescription
             }
-            overallStatus = "Registration failed: \(error.localizedDescription)"
+            pendingRegistration = PendingRegistration(
+                deviceUDID: device.udid,
+                pairs: preparedPairs
+            )
+            overallStatus = "Registration failed — Retry Registration in the Device menu (\(error.localizedDescription))"
         }
 
         // Finalize stats
@@ -942,7 +1379,25 @@ public class PipelineController {
 
     /// Remove any leftover transcoded outputs for all jobs — for use on app quit or
     /// explicit "clear temp" actions.
+    ///
+    /// Skips cleanup entirely when there's unfinished work (any job not in
+    /// `.synced` or `.pending` state). This is the difference between a clean
+    /// shutdown after a successful run and a shutdown after a registration
+    /// failure — in the latter case the .m4v files in /tmp are the ONLY way
+    /// to recover the 19+ GB of bytes already uploaded to the device, and
+    /// nuking them on quit means the user has to re-transcode from scratch.
     public func cleanupTempOutputs() {
+        let unfinished = jobs.contains { job in
+            switch job.status {
+            case .synced, .pending: return false
+            default: return true
+            }
+        }
+        if unfinished {
+            NSLog("MediaPorter: skipping temp cleanup — \(jobs.count) jobs unfinished, "
+                + ".m4v files preserved for Recover Orphaned Uploads")
+            return
+        }
         for job in jobs { deleteTempOutput(for: job) }
     }
 
