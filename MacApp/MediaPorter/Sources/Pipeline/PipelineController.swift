@@ -58,6 +58,24 @@ public class PipelineController {
     public var hasPendingRegistration: Bool { pendingRegistration != nil }
     public var pendingRegistrationCount: Int { pendingRegistration?.pairs.count ?? 0 }
 
+    /// Tagged .m4v files left in the system tempdir from a previous session
+    /// that aren't bound to any current FileJob. Refreshed lazily — see
+    /// `refreshLeftovers()`. Used by the main-panel banner.
+    public var leftoverTranscodes: [LeftoverTranscode] = []
+
+    public var leftoverBytesTotal: Int64 {
+        leftoverTranscodes.reduce(0) { $0 + $1.size }
+    }
+
+    public struct LeftoverTranscode: Identifiable, Sendable {
+        public let url: URL
+        public let size: Int64
+        public let title: String
+        /// "Show · S01E11" for TV episodes, nil for movies / untagged files.
+        public let showLabel: String?
+        public var id: URL { url }
+    }
+
     struct PendingRegistration {
         let deviceUDID: String
         var pairs: [(job: FileJob, prepared: PreparedSyncFile)]
@@ -539,6 +557,34 @@ public class PipelineController {
         pendingRegistration = nil
     }
 
+    /// Scan /tmp for tagged .m4v files not associated with any FileJob in
+    /// the current queue. Cheap (AVAsset metadata read, no subprocess).
+    public func refreshLeftovers() {
+        let known = Set(jobs.compactMap { $0.outputURL?.standardizedFileURL })
+        let candidates = OrphanRecovery.scanLocalCandidates()
+        leftoverTranscodes = candidates
+            .filter { !known.contains($0.localURL.standardizedFileURL) }
+            .map { c in
+                let label: String?
+                if c.isTVShow, let show = c.showName, let s = c.season, let e = c.episode {
+                    label = String(format: "%@ · S%02dE%02d", show, s, e)
+                } else {
+                    label = nil
+                }
+                return LeftoverTranscode(
+                    url: c.localURL, size: c.size, title: c.title, showLabel: label
+                )
+            }
+    }
+
+    /// Throw away leftover .m4v files. Used by the banner's Discard action.
+    public func discardLeftovers() {
+        for item in leftoverTranscodes {
+            try? FileManager.default.removeItem(at: item.url)
+        }
+        leftoverTranscodes = []
+    }
+
     /// Result bundle for `recoverOrphans` so the UI can pop a clear summary
     /// alert instead of just updating the status bar.
     public struct RecoveryResult {
@@ -624,6 +670,7 @@ public class PipelineController {
             // colors update. (Match by inputURL filename stem inside the
             // tagged title — best-effort; not required for correctness.)
             pendingRegistration = nil
+            refreshLeftovers()
             overallStatus = "Recovered \(pairs.count) of \(deviceFiles.count) device files."
             return RecoveryResult(
                 localFound: candidates.count, deviceFound: deviceFiles.count,

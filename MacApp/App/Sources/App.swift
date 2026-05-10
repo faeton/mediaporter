@@ -24,6 +24,7 @@ struct MediaPorterApp: App {
                 .preferredColorScheme(tweaks.dark ? .dark : .light)
                 .onAppear {
                     pipeline.startDeviceMonitoring()
+                    pipeline.refreshLeftovers()
                     if let key = ConfigLoader.tmdbAPIKey() {
                         pipeline.tmdbAPIKey = key
                     }

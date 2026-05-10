@@ -58,6 +58,30 @@ struct ContentView: View {
                 HStack(spacing: 0) {
                     // LEFT: File list — drop here = analyze + wait for Send
                     VStack(spacing: 0) {
+                        if !pipeline.leftoverTranscodes.isEmpty {
+                            LeftoverBanner(
+                                theme: theme,
+                                accent: tweaks.accent,
+                                count: pipeline.leftoverTranscodes.count,
+                                bytes: pipeline.leftoverBytesTotal,
+                                deviceConnected: pipeline.isDeviceConnected,
+                                onRecover: {
+                                    Task {
+                                        let r = await pipeline.recoverOrphans()
+                                        await MainActor.run { showRecoveryResult(r) }
+                                    }
+                                },
+                                onDiscard: {
+                                    if confirmDiscardLeftovers(
+                                        count: pipeline.leftoverTranscodes.count,
+                                        bytes: pipeline.leftoverBytesTotal
+                                    ) {
+                                        pipeline.discardLeftovers()
+                                    }
+                                }
+                            )
+                        }
+
                         if !showEmpty {
                             ColumnHeader(
                                 theme: theme, accent: tweaks.accent,
@@ -228,6 +252,79 @@ struct ContentView: View {
             .transition(.opacity)
         }
     }
+}
+
+// MARK: - Leftover transcodes banner
+
+/// Shown above the file list when /tmp has tagged .m4v files from a previous
+/// session. Click-to-recover (requires device); Discard nukes the local
+/// files. Compact strip — doesn't steal much vertical space.
+private struct LeftoverBanner: View {
+    let theme: Theme
+    let accent: AccentKey
+    let count: Int
+    let bytes: Int64
+    let deviceConnected: Bool
+    let onRecover: () -> Void
+    let onDiscard: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "tray.full")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(accent.solid)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(count) leftover transcode\(count == 1 ? "" : "s") from a previous run")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                Text(deviceConnected
+                     ? "\(formatBytes(bytes)) ready to register without re-uploading."
+                     : "\(formatBytes(bytes)). Connect a device to recover.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textDim)
+            }
+            Spacer()
+            Button("Discard", action: onDiscard)
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.text)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(theme.divider, lineWidth: 1))
+            Button("Recover…", action: onRecover)
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 6).fill(accent.solid))
+                .opacity(deviceConnected ? 1.0 : 0.45)
+                .disabled(!deviceConnected)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(accent.soft.opacity(0.35))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(theme.divider).frame(height: 1)
+        }
+    }
+
+    private func formatBytes(_ b: Int64) -> String {
+        let gb = Double(b) / 1_073_741_824
+        if gb >= 1.0 { return String(format: "%.2f GB", gb) }
+        let mb = Double(b) / 1_048_576
+        return String(format: "%.0f MB", mb)
+    }
+}
+
+@MainActor
+private func confirmDiscardLeftovers(count: Int, bytes: Int64) -> Bool {
+    let alert = NSAlert()
+    alert.messageText = "Discard \(count) leftover transcode\(count == 1 ? "" : "s")?"
+    let gb = Double(bytes) / 1_073_741_824
+    alert.informativeText = "This deletes the .m4v files in /tmp \(String(format: "(%.2f GB)", gb)). They won't be recoverable; any orphaned bytes already on the device will need Clean Up Staged Media to free."
+    alert.alertStyle = .warning
+    alert.addButton(withTitle: "Discard")
+    alert.addButton(withTitle: "Cancel")
+    return alert.runModal() == .alertFirstButtonReturn
 }
 
 // MARK: - Column header
