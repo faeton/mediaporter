@@ -27,7 +27,12 @@ struct DeviceColumnView: View {
 
             HStack {
                 Spacer()
-                IpadSilhouette(connected: pipeline.isDeviceConnected, theme: theme, accent: accent)
+                DeviceSilhouette(
+                    connected: pipeline.isDeviceConnected,
+                    deviceClass: pipeline.deviceInfo?.deviceClass ?? "iPad",
+                    theme: theme,
+                    accent: accent
+                )
                 Spacer()
             }
             .padding(.top, 14)
@@ -46,13 +51,22 @@ struct DeviceColumnView: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
+    /// "iPad" / "iPhone" / "iPod" / "device" — used in user-facing copy so the
+    /// button matches what's actually plugged in. Falls back to "device" when
+    /// lockdown hasn't returned a class yet (rare, only the first second after
+    /// connect) or when something unexpected is attached.
+    private var deviceClassLabel: String {
+        let cls = pipeline.deviceInfo?.deviceClass ?? ""
+        return cls.isEmpty ? "device" : cls
+    }
+
     private var sendButton: some View {
         let pendingCount = jobs.filter { $0.status == .analyzed || $0.status == .ready }.count
         return Button(action: onSend) {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 11, weight: .bold))
-                Text("Send \(pendingCount) to iPad")
+                Text("Send \(pendingCount) to \(deviceClassLabel)")
                     .font(.system(size: 13, weight: .semibold))
             }
             .foregroundStyle(.white)
@@ -78,8 +92,11 @@ struct DeviceColumnView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(theme.textDim)
                     .multilineTextAlignment(.center)
+                // One value, not two — the point-height (e.g. "852p") already
+                // shows up in the RECOMMENDED banner with context, so repeating
+                // it here next to the pixel res just looks like a duplicate.
                 if let res = info.nativeResolution {
-                    Text("\(res)  ·  \(info.screenDescription)")
+                    Text(res)
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(theme.textFaint)
                 } else {
@@ -404,68 +421,119 @@ private struct RunSummaryCard: View {
 
 // MARK: - iPad silhouette
 
-struct IpadSilhouette: View {
+/// Connected-device silhouette. Reshapes itself to roughly match the
+/// device class — iPad is wide-ish, iPhone is narrow + tall with a Dynamic
+/// Island, iPod has a chunky home-button bezel below the screen. Anything
+/// unknown falls back to the iPad shape.
+struct DeviceSilhouette: View {
     let connected: Bool
+    let deviceClass: String
     let theme: Theme
     let accent: AccentKey
 
     private var bodyFill: Color { theme.dark ? Color(hex: 0x28282C) : Color(hex: 0xD5DAE3) }
     private var screenFill: Color { theme.dark ? Color(hex: 0x0F0F12) : Color(hex: 0x1F2024) }
 
+    private struct Shape {
+        let bodyW: CGFloat, bodyH: CGFloat
+        let screenW: CGFloat, screenH: CGFloat
+        let cornerRadius: CGFloat
+        let screenCorner: CGFloat
+        /// Vertical offset of the screen relative to body center. Negative =
+        /// up. iPod's home-button bezel pushes the screen up; iPad/iPhone keep
+        /// the screen centered.
+        let screenOffsetY: CGFloat
+        /// Top-bezel feature: dot (iPad camera), notch, or pill (Dynamic Island).
+        let topFeature: TopFeature
+        /// iPod home-button bezel size; nil for iPhone/iPad.
+        let homeButton: CGFloat?
+    }
+    private enum TopFeature { case cameraDot, dynamicIsland, none }
+
+    private var shape: Shape {
+        switch deviceClass.lowercased() {
+        case "iphone":
+            // ~9:19.5 aspect — modern Pro with Dynamic Island. Body 78×170,
+            // screen fills almost the entire face (slim symmetric bezels).
+            return Shape(
+                bodyW: 78, bodyH: 168,
+                screenW: 70, screenH: 156,
+                cornerRadius: 18, screenCorner: 14,
+                screenOffsetY: 0,
+                topFeature: .dynamicIsland,
+                homeButton: nil
+            )
+        case "ipod":
+            // Classic iPod touch: ~3:5 ratio, thick bottom bezel for the
+            // home button, narrower than an iPhone Pro.
+            return Shape(
+                bodyW: 76, bodyH: 156,
+                screenW: 64, screenH: 116,
+                cornerRadius: 10, screenCorner: 4,
+                screenOffsetY: -8,
+                topFeature: .cameraDot,
+                homeButton: 12
+            )
+        default:
+            // iPad — original proportions.
+            return Shape(
+                bodyW: 110, bodyH: 148,
+                screenW: 98, screenH: 136,
+                cornerRadius: 12, screenCorner: 4,
+                screenOffsetY: 0,
+                topFeature: .cameraDot,
+                homeButton: nil
+            )
+        }
+    }
+
     var body: some View {
+        let s = shape
         VStack(spacing: 0) {
             ZStack {
                 // Body
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: s.cornerRadius)
                     .fill(bodyFill)
-                    .frame(width: 110, height: 148)
+                    .frame(width: s.bodyW, height: s.bodyH)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12)
+                        RoundedRectangle(cornerRadius: s.cornerRadius)
                             .strokeBorder(theme.chromeBorder, lineWidth: 0.5)
                     )
+
                 // Screen
-                RoundedRectangle(cornerRadius: 4)
+                RoundedRectangle(cornerRadius: s.screenCorner)
                     .fill(screenFill)
-                    .frame(width: 98, height: 136)
+                    .frame(width: s.screenW, height: s.screenH)
+                    .offset(y: s.screenOffsetY)
                     .overlay(
                         Group {
                             if connected {
-                                // Mock TV app grid
-                                VStack(spacing: 4) {
-                                    HStack(spacing: 2) {
-                                        RoundedRectangle(cornerRadius: 1)
-                                            .fill(accent.solid.opacity(0.9))
-                                            .frame(width: 30, height: 3)
-                                        RoundedRectangle(cornerRadius: 1)
-                                            .fill(Color.white.opacity(0.25))
-                                            .frame(width: 16, height: 3)
-                                        Spacer()
-                                    }
-                                    .padding(.top, 6)
-                                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(28), spacing: 2), count: 3), spacing: 4) {
-                                        ForEach(0..<9, id: \.self) { i in
-                                            RoundedRectangle(cornerRadius: 2)
-                                                .fill(Color.white.opacity(0.08 + 0.03 * Double(i % 3)))
-                                                .frame(height: 32)
-                                        }
-                                    }
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 4)
-                                .frame(width: 98, height: 136)
+                                screenContents(width: s.screenW, height: s.screenH)
+                                    .frame(width: s.screenW, height: s.screenH)
+                                    .clipShape(RoundedRectangle(cornerRadius: s.screenCorner))
                             }
                         }
+                        .offset(y: s.screenOffsetY)
                     )
-                // Camera dot
-                Circle()
-                    .fill(theme.dark ? Color(hex: 0x1C1C1F) : Color(hex: 0xA8AFBD))
-                    .frame(width: 2, height: 2)
-                    .offset(y: -72)
+
+                // Top bezel feature
+                topFeature(s)
+
+                // iPod home button
+                if let hb = s.homeButton {
+                    Circle()
+                        .strokeBorder(
+                            theme.dark ? Color(hex: 0x3A3A3F) : Color(hex: 0xB0B6C2),
+                            lineWidth: 1
+                        )
+                        .frame(width: hb, height: hb)
+                        .offset(y: s.bodyH / 2 - hb / 2 - 6)
+                }
             }
             // Shadow
             Ellipse()
                 .fill(Color.black.opacity(0.2))
-                .frame(width: 96, height: 10)
+                .frame(width: s.bodyW * 0.87, height: 10)
                 .blur(radius: 3)
                 .offset(y: -4)
 
@@ -487,6 +555,58 @@ struct IpadSilhouette: View {
                 )
                 .offset(y: -4)
             }
+        }
+    }
+
+    /// Mock TV-app grid drawn inside the device screen. Number of columns
+    /// scales to whichever device shape we're rendering — 3 cols for iPad,
+    /// 2 for iPhone/iPod where 3 looked cramped.
+    @ViewBuilder
+    private func screenContents(width: CGFloat, height: CGFloat) -> some View {
+        let cols = width > 80 ? 3 : 2
+        let titleWidth = min(width * 0.45, 36)
+        VStack(spacing: 4) {
+            HStack(spacing: 2) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(accent.solid.opacity(0.9))
+                    .frame(width: titleWidth, height: 3)
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.white.opacity(0.25))
+                    .frame(width: titleWidth * 0.55, height: 3)
+                Spacer()
+            }
+            .padding(.top, 6)
+            .padding(.horizontal, 4)
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: cols),
+                spacing: 4
+            ) {
+                ForEach(0..<(cols * 3), id: \.self) { i in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.white.opacity(0.08 + 0.03 * Double(i % 3)))
+                        .frame(height: cols == 3 ? 32 : 28)
+                }
+            }
+            .padding(.horizontal, 4)
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func topFeature(_ s: Shape) -> some View {
+        switch s.topFeature {
+        case .cameraDot:
+            Circle()
+                .fill(theme.dark ? Color(hex: 0x1C1C1F) : Color(hex: 0xA8AFBD))
+                .frame(width: 2, height: 2)
+                .offset(y: -(s.bodyH / 2 - 4))
+        case .dynamicIsland:
+            Capsule()
+                .fill(Color.black)
+                .frame(width: 28, height: 8)
+                .offset(y: -(s.bodyH / 2 - 14))
+        case .none:
+            EmptyView()
         }
     }
 }
