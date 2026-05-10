@@ -24,27 +24,41 @@ struct BatchTimelineView: View {
 
     private var content: some View {
         let total = jobs.count
-        let doneSynced = count([.synced])
-        let overallActive = jobs.contains { [.analyzing, .transcoding, .tagging, .syncing].contains($0.status) }
+        // "Done with sync" = bytes on device. The final ATC register step is a
+        // tiny batch call at the end; counting only `.synced` makes the bar
+        // sit at 0/25 for the whole run, which reads as "nothing happening".
+        let doneOnDevice = count([.uploaded, .synced])
+        let overallActive = jobs.contains {
+            [.analyzing, .transcoding, .tagging, .syncing].contains($0.status)
+        }
         let stages: [Stage] = [
             Stage(key: "analyze", label: "Analyze", systemImage: "eye",
-                  done: count([.analyzed, .transcoding, .tagging, .ready, .syncing, .synced]),
+                  done: count([.analyzed, .transcoding, .tagging, .ready,
+                               .syncing, .uploaded, .synced]),
                   active: count([.analyzing])),
             Stage(key: "transcode", label: "Transcode", systemImage: "bolt.fill",
-                  done: count([.ready, .syncing, .synced]),
+                  done: count([.ready, .syncing, .uploaded, .synced]),
                   active: count([.transcoding, .tagging])),
             Stage(key: "upload", label: "Upload", systemImage: "arrow.up",
-                  done: doneSynced,
+                  done: doneOnDevice,
                   active: count([.syncing]))
         ]
 
+        // "Synced" = fully registered on the device (visible in TV app).
+        // "On device" = bytes uploaded but ATC register hasn't run yet —
+        // the final step is one batch call at the very end of the run, so
+        // showing the cheaper count keeps the headline moving in real time.
+        let fullySynced = count([.synced])
+        let allDone = fullySynced == total && total > 0
         return HStack(spacing: 18) {
             VStack(alignment: .leading, spacing: 0) {
-                Text(overallActive ? "WORKING" : doneSynced == total ? "COMPLETE" : "IDLE")
+                Text(overallActive ? "WORKING" : allDone ? "COMPLETE" : "IDLE")
                     .font(.system(size: 11, weight: .semibold))
                     .tracking(0.4)
                     .foregroundStyle(theme.textDim)
-                Text("\(doneSynced) of \(total) synced")
+                Text(allDone
+                     ? "\(fullySynced) of \(total) synced"
+                     : "\(doneOnDevice) of \(total) on device")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(theme.text)
             }
