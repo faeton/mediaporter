@@ -1427,6 +1427,9 @@ public class PipelineController {
             item.sortAlbum = "\(e.showName.lowercased()), season \(e.season)"
             item.albumArtist = e.showName
             item.sortAlbumArtist = e.showName.lowercased()
+            // Pass the show portrait through as a second artwork — see
+            // SyncItem.showPosterData for the experiment rationale.
+            item.showPosterData = e.showPosterData
         }
         return item
     }

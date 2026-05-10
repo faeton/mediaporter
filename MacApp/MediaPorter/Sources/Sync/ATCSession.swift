@@ -27,6 +27,14 @@ struct SyncItem {
     var isHD: Bool = false
     var channels: Int = 2
     var posterData: Data?
+    /// Show portrait JPEG for TV episodes. Uploaded as a second Airlock
+    /// file at `/Airlock/Media/Artwork/<assetID>_show` and surfaced in
+    /// the insert_track plist via `album_artwork_cache_id`. medialibraryd
+    /// picks it up for the album row's poster slot — the Library list
+    /// shows the portrait instead of the rep episode's still.
+    /// (TV.app's show-detail hero is hardcoded 16:9 and still pulls an
+    /// episode still; that slot is not driven by this field.)
+    var showPosterData: Data?
 }
 
 struct SyncFileInfo {
@@ -166,6 +174,11 @@ class ATCSession {
 
             if f.item.posterData != nil {
                 itemDict["artwork_cache_id"] = Int.random(in: 1...9999)
+            }
+            // Pair to the second Airlock upload below. Drives the album-row
+            // poster on TV.app's Library list.
+            if f.item.showPosterData != nil {
+                itemDict["album_artwork_cache_id"] = Int.random(in: 1...9999)
             }
 
             if f.item.isTVShow {
@@ -320,6 +333,12 @@ class ATCSession {
                 let artPath = "/Airlock/Media/Artwork/\(f.assetID)"
                 log("  AFC: artwork -> \(artPath) (\(poster.count / 1024) KB)")
                 try afc.writeFile(artPath, data: poster)
+            }
+            // Second Airlock artwork — show portrait for the album row.
+            if let showPoster = f.item.showPosterData {
+                let artPath = "/Airlock/Media/Artwork/\(f.assetID)_show"
+                log("  AFC: show artwork -> \(artPath) (\(showPoster.count / 1024) KB)")
+                try afc.writeFile(artPath, data: showPoster)
             }
 
             check("FileProgress", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileProgress" as CFString, [
