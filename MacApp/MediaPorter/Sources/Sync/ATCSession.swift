@@ -14,8 +14,16 @@ struct SyncItem {
     var isMovie: Bool = true
     var isTVShow: Bool = false
     var tvShowName: String?
+    var sortTVShowName: String?
     var seasonNumber: Int?
     var episodeNumber: Int?
+    var episodeSortID: Int?
+    var artist: String?
+    var sortArtist: String?
+    var album: String?
+    var sortAlbum: String?
+    var albumArtist: String?
+    var sortAlbumArtist: String?
     var isHD: Bool = false
     var channels: Int = 2
     var posterData: Data?
@@ -163,8 +171,16 @@ class ATCSession {
             if f.item.isTVShow {
                 itemDict["is_tv_show"] = true
                 if let show = f.item.tvShowName { itemDict["tv_show_name"] = show }
+                if let v = f.item.sortTVShowName { itemDict["sort_tv_show_name"] = v }
                 if let s = f.item.seasonNumber { itemDict["season_number"] = s }
                 if let e = f.item.episodeNumber { itemDict["episode_number"] = e }
+                if let v = f.item.episodeSortID { itemDict["episode_sort_id"] = v }
+                if let v = f.item.artist { itemDict["artist"] = v }
+                if let v = f.item.sortArtist { itemDict["sort_artist"] = v }
+                if let v = f.item.album { itemDict["album"] = v }
+                if let v = f.item.sortAlbum { itemDict["sort_album"] = v }
+                if let v = f.item.albumArtist { itemDict["album_artist"] = v }
+                if let v = f.item.sortAlbumArtist { itemDict["sort_album_artist"] = v }
             } else {
                 itemDict["is_movie"] = true
             }

@@ -909,48 +909,19 @@ public class PipelineController {
             job.progress = 0
         }
 
-        // Build a map from title to job for progress updates
-        let jobsByTitle: [String: FileJob] = Dictionary(
-            readyJobs.map { job in
-                let meta = job.metadata
-                let title = meta?.title ?? job.fileName
-                return (title, job)
-            },
-            uniquingKeysWith: { $1 }
-        )
-
         let items = readyJobs.map { job -> SyncItem in
             let fileURL = job.outputURL ?? job.inputURL
-            let size = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int) ?? job.fileSize
-            let info = job.mediaInfo
-            let meta = job.metadata
-
-            var item = SyncItem(
-                fileURL: fileURL,
-                title: meta?.title ?? job.fileName,
-                sortName: (meta?.title ?? job.fileName).lowercased(),
-                durationMs: Int(info?.duration ?? 0) * 1000,
-                fileSize: size
-            )
-
-            item.isHD = getHDFlag(
-                width: info?.videoStreams.first?.width,
-                height: info?.videoStreams.first?.height
-            ) > 0
-
-            item.channels = info?.audioStreams.first?.channels ?? 2
-            item.posterData = meta?.posterData
-
-            if case .tvEpisode(let e) = meta {
-                item.isMovie = false
-                item.isTVShow = true
-                item.tvShowName = e.showName
-                item.seasonNumber = e.season
-                item.episodeNumber = e.episode
-            }
-
-            return item
+            return self.buildSyncItem(for: job, fileURL: fileURL)
         }
+
+        // Build a map from SyncItem title to job for progress updates.
+        // Must use the SyncItem's title (episode title for TV) — using
+        // ResolvedMetadata.title would collide all 25 episodes onto the
+        // show name and only one row would tick.
+        let jobsByTitle: [String: FileJob] = Dictionary(
+            zip(items, readyJobs).map { ($0.title, $1) },
+            uniquingKeysWith: { $1 }
+        )
 
         let syncResult: Result<[SyncResult], Error> = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -1362,10 +1333,20 @@ public class PipelineController {
         let info = job.mediaInfo
         let meta = job.metadata
 
+        // For TV the displayed/sorted title in the TV app must be the
+        // episode title, not the show name — `ResolvedMetadata.title`
+        // returns `showName` for TV so we can't use it here.
+        let resolvedTitle: String
+        if case .tvEpisode(let e) = meta {
+            resolvedTitle = e.episodeTitle ?? "Episode \(e.episode)"
+        } else {
+            resolvedTitle = meta?.title ?? job.fileName
+        }
+
         var item = SyncItem(
             fileURL: fileURL,
-            title: meta?.title ?? job.fileName,
-            sortName: (meta?.title ?? job.fileName).lowercased(),
+            title: resolvedTitle,
+            sortName: resolvedTitle.lowercased(),
             durationMs: Int(info?.duration ?? 0) * 1000,
             fileSize: size
         )
@@ -1379,8 +1360,16 @@ public class PipelineController {
             item.isMovie = false
             item.isTVShow = true
             item.tvShowName = e.showName
+            item.sortTVShowName = e.showName.lowercased()
             item.seasonNumber = e.season
             item.episodeNumber = e.episode
+            item.episodeSortID = e.episode
+            item.artist = e.showName
+            item.sortArtist = e.showName.lowercased()
+            item.album = "\(e.showName), Season \(e.season)"
+            item.sortAlbum = "\(e.showName.lowercased()), season \(e.season)"
+            item.albumArtist = e.showName
+            item.sortAlbumArtist = e.showName.lowercased()
         }
         return item
     }

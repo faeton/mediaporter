@@ -271,10 +271,16 @@ enum OrphanRecovery {
             channels: c.channels,
             posterData: nil
         )
-        // Not strictly necessary, but keeps the register code happy when it
-        // checks `f.item.posterData != nil` to decide whether to set
-        // artwork_cache_id.
-        _ = item
+        if c.isTVShow, let show = c.showName, let s = c.season, let e = c.episode {
+            item.sortTVShowName = show.lowercased()
+            item.episodeSortID = e
+            item.artist = show
+            item.sortArtist = show.lowercased()
+            item.album = "\(show), Season \(s)"
+            item.sortAlbum = "\(show.lowercased()), season \(s)"
+            item.albumArtist = show
+            item.sortAlbumArtist = show.lowercased()
+        }
         return item
     }
 }
