@@ -23,6 +23,9 @@ struct MediaPorterApp: App {
                 .environment(tweaks)
                 .preferredColorScheme(tweaks.dark ? .dark : .light)
                 .onAppear {
+                    // Hand the delegate a reference so applicationShouldTerminate
+                    // can check for in-flight work before honoring Cmd-Q.
+                    AppDelegate.sharedPipeline = pipeline
                     pipeline.startDeviceMonitoring()
                     pipeline.refreshLeftovers()
                     if let key = ConfigLoader.tmdbAPIKey() {
@@ -90,9 +93,34 @@ struct MediaPorterApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Reference to the active pipeline. Set by the App's onAppear so the
+    /// terminate handler can inspect in-flight work without owning the
+    /// state model itself. Weak so we don't keep the controller alive
+    /// during a clean shutdown.
+    static weak var sharedPipeline: PipelineController?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        AppIcon.install()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let pipeline = AppDelegate.sharedPipeline, pipeline.isRunning else {
+            return .terminateNow
+        }
+        let alert = NSAlert()
+        alert.messageText = "Quit while sync is running?"
+        alert.informativeText = """
+        MediaPorter is currently \(pipeline.overallStatus.isEmpty ? "syncing files to your device" : pipeline.overallStatus.lowercased()).
+
+        Quitting now will abort the in-flight transcode/upload. Files already on the device stay there but may not be registered with the TV app — you can register them later via Device → Recover Orphaned Uploads.
+        """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Keep Running")
+        alert.addButton(withTitle: "Quit Anyway")
+        let response = alert.runModal()
+        return response == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
     }
 }
 
