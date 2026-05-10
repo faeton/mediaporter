@@ -822,7 +822,7 @@ private struct StatusDot: View {
         case .tagging: return Color(hex: 0xBF5AF2)
         case .ready: return Color(red: 0.19, green: 0.82, blue: 0.35)
         case .syncing: return accent.solid
-        case .uploaded: return accent.solid
+        case .uploaded: return Color(red: 0.19, green: 0.82, blue: 0.35)
         case .synced: return Color(red: 0.19, green: 0.82, blue: 0.35)
         case .failed: return Color(red: 1.0, green: 0.27, blue: 0.23)
         }
@@ -836,7 +836,7 @@ private struct StatusDot: View {
         case .tagging: return "Tagging"
         case .ready: return "Ready to send"
         case .syncing: return "Uploading"
-        case .uploaded: return "On device, finalizing"
+        case .uploaded: return "Uploaded"
         case .synced: return "Synced"
         case .failed: return "Failed"
         }

@@ -1217,13 +1217,33 @@ public class PipelineController {
         // ------------------------------------------------------------------
         // Register: single short ATC session for every uploaded file.
         // ------------------------------------------------------------------
-        overallStatus = "Finalizing on device..."
+        // Mark all uploaded rows green-uploaded up front; they stay that way
+        // for the whole register call (medialibraryd commits the batch in
+        // one shot — there's no per-file ack mid-flight). Replaces the
+        // misleading per-row "On device, finalizing".
+        for (job, _) in preparedPairs {
+            job.status = .uploaded
+            job.progress = 1.0
+        }
+        let registerStart = Date()
+        let registerCount = preparedPairs.count
+        let elapsedTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let elapsed = Int(Date().timeIntervalSince(registerStart))
+                let mm = elapsed / 60, ss = elapsed % 60
+                let elapsedStr = String(format: "%d:%02d", mm, ss)
+                self.overallStatus = "Registering \(registerCount) file\(registerCount == 1 ? "" : "s") on device… \(elapsedStr)"
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
         do {
             let preparedOnly = preparedPairs.map { $0.prepared }
             let devCopy = device
             try await Task.detached {
                 try registerUploadedFiles(device: devCopy, files: preparedOnly, verbose: false)
             }.value
+            elapsedTask.cancel()
             for (job, _) in preparedPairs {
                 job.status = .synced
                 job.progress = 1.0
@@ -1237,6 +1257,7 @@ public class PipelineController {
                 deleteTempOutput(for: job)
             }
         } catch {
+            elapsedTask.cancel()
             // Bytes are on the device; only the ATC register call failed.
             // Keep the jobs in `.uploaded` so the user can hit "Retry
             // Registration" without re-uploading. If they never retry, the
