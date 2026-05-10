@@ -416,6 +416,38 @@ public class PipelineController {
         return resolved
     }
 
+    /// For each TV cluster, swap the lowest-(season, episode) job's artwork
+    /// to its show portrait so TV.app's show landing hero gets a proper 2:3
+    /// poster instead of a squished episode still. See the comment at the
+    /// call site in `runPipelined` for the rationale and trade-off.
+    /// Idempotent: running twice (e.g. across retries) is safe — the second
+    /// pass sees `posterData` already equal to `showPosterData` and no-ops.
+    private func designateClusterRepresentatives(in jobs: [FileJob]) {
+        var byCluster: [String: [FileJob]] = [:]
+        for job in jobs {
+            guard let cid = job.clusterID, case .tvEpisode = job.metadata else { continue }
+            byCluster[cid, default: []].append(job)
+        }
+        for (clusterID, clusterJobs) in byCluster {
+            let rep = clusterJobs.min { lhs, rhs in
+                guard case .tvEpisode(let l) = lhs.metadata,
+                      case .tvEpisode(let r) = rhs.metadata else { return false }
+                if l.season != r.season { return l.season < r.season }
+                return l.episode < r.episode
+            }
+            guard let rep,
+                  case .tvEpisode(var meta) = rep.metadata,
+                  let showPoster = meta.showPosterData,
+                  meta.posterData != showPoster else { continue }
+            meta.posterData = showPoster
+            rep.metadata = .tvEpisode(meta)
+            NSLog(
+                "designateClusterRepresentatives: cluster=%@ rep=S%02dE%02d (%@) — swapped tile to show portrait",
+                clusterID, meta.season, meta.episode, meta.showName
+            )
+        }
+    }
+
     /// Episode poster resolution chain — TMDb still → ffmpeg-extracted frame
     /// → 1280×720 landscape synthetic. The accessor at MetadataLookup falls
     /// through to `showPosterData` if this is nil, but that show portrait
@@ -1105,6 +1137,19 @@ public class PipelineController {
             overallStatus = "No device connected"
             return
         }
+
+        // Experiment (P0.5 #6 in plan.md): for each TV cluster, swap the
+        // lowest-(season, episode) job's artwork to the show portrait so
+        // TV.app's show landing page on iOS gets a proper 2:3 hero instead
+        // of a squished episode still. medialibraryd appears to set
+        // `album.representative_item_pid` to the first inserted episode,
+        // which is what TV.app reads for show-level artwork. Cost: that
+        // one episode's per-episode tile gets the portrait squished into
+        // 16:9 — preferable to *every* tile being squished (the old bug)
+        // OR the show landing being squished (the bug we just shipped).
+        // Until we can capture a TV-sync trace from a reference tool to
+        // learn the proper schema, this is the least-bad compromise.
+        designateClusterRepresentatives(in: analyzed)
 
         // ------------------------------------------------------------------
         // Preflight: fail fast if there isn't ~1.1× source size free locally
