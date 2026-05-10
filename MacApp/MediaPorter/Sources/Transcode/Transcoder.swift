@@ -45,6 +45,19 @@ private final class ActiveProcesses: @unchecked Sendable {
         for p in running where p.isRunning {
             p.terminate()
         }
+        // Escalate to SIGKILL after a 2 s grace. If ffmpeg ignores SIGTERM
+        // (filter-graph init, hung muxer flush) the user's Stop button would
+        // never resolve. SIGKILL is unblockable and unblocks the
+        // terminationHandler-driven wait in `transcode()`.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let stillRunning = Array(self.byID.values)
+            self.lock.unlock()
+            for p in stillRunning where p.isRunning {
+                kill(p.processIdentifier, SIGKILL)
+            }
+        }
     }
 }
 
@@ -399,43 +412,57 @@ public enum Transcoder {
             }
         }
 
-        try proc.run()
-        ActiveProcesses.shared.add(proc)
-        defer {
-            ActiveProcesses.shared.remove(proc)
-            errPipe.fileHandleForReading.readabilityHandler = nil
-        }
-
         let durationUs = mediaInfo.duration * 1_000_000
         let fileHandle = outPipe.fileHandleForReading
 
-        // Parse progress on background thread
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global().async {
-                while true {
-                    let data = fileHandle.availableData
-                    if data.isEmpty { break }
-                    guard let line = String(data: data, encoding: .utf8) else { continue }
-                    for part in line.components(separatedBy: .newlines) {
-                        if part.hasPrefix("out_time_ms="),
-                           let us = Double(part.dropFirst("out_time_ms=".count)),
-                           durationUs > 0 {
-                            let pct = min(us / durationUs, 1.0)
-                            DispatchQueue.main.async { progress?(pct) }
-                        }
+        // Stream progress lines on a background queue. Reading availableData
+        // returns empty on EOF (when ffmpeg closes stdout, typically as part
+        // of its shutdown), so the loop exits naturally. We don't need to
+        // await this — termination is signalled separately by the handler
+        // below, and progress is fire-and-forget by design.
+        DispatchQueue.global().async {
+            while true {
+                let data = fileHandle.availableData
+                if data.isEmpty { break }
+                guard let line = String(data: data, encoding: .utf8) else { continue }
+                for part in line.components(separatedBy: .newlines) {
+                    if part.hasPrefix("out_time_ms="),
+                       let us = Double(part.dropFirst("out_time_ms=".count)),
+                       durationUs > 0 {
+                        let pct = min(us / durationUs, 1.0)
+                        DispatchQueue.main.async { progress?(pct) }
                     }
                 }
-                continuation.resume()
             }
         }
 
-        proc.waitUntilExit()
+        // Wait for ffmpeg via terminationHandler instead of waitUntilExit().
+        // Why: waitUntilExit parks on a CFRunLoop and depends on Foundation's
+        // SIGCHLD plumbing reaching that runloop. When transcode runs from a
+        // background actor/queue with no live runloop, the wait can miss the
+        // child-exit notification and hang forever — which is exactly the
+        // bug we just hit. terminationHandler is wired directly to the child
+        // reaper and fires reliably regardless of where we're parked.
+        // Install BEFORE run(): a fast-failing process (bad args, missing
+        // codec) can exit before run() returns, and a handler set after the
+        // fact would never be invoked.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            proc.terminationHandler = { _ in cont.resume() }
+            do {
+                try proc.run()
+                ActiveProcesses.shared.add(proc)
+            } catch {
+                proc.terminationHandler = nil
+                cont.resume()
+            }
+        }
+        ActiveProcesses.shared.remove(proc)
 
-        // The readabilityHandler runs asynchronously — by the time waitUntilExit
-        // returns there can still be bytes in the pipe that haven't hit `tail`
-        // yet. Detach the handler and do a final synchronous drain so we don't
-        // throw "exit code 1" with no context when ffmpeg actually logged the
-        // real cause (filter graph errors, missing libass, bad path, etc.).
+        // Final stderr drain. The readabilityHandler runs asynchronously, so
+        // bytes written just before exit may not have hit `tail` yet —
+        // without this, we'd throw "exit code 1" with no context when
+        // ffmpeg's stderr held the actual cause (filter graph errors,
+        // missing libass, bad path, etc.).
         errPipe.fileHandleForReading.readabilityHandler = nil
         let remaining = errPipe.fileHandleForReading.readDataToEndOfFile()
         if !remaining.isEmpty { tail.append(remaining) }

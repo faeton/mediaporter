@@ -94,6 +94,10 @@ struct BatchTimelineView: View {
                 CancelButton(theme: theme, isCancelling: pipeline.isCancelling) {
                     pipeline.cancel()
                 }
+            } else if allDone {
+                ClearButton(theme: theme, accent: accent) {
+                    pipeline.clearCompleted()
+                }
             }
         }
         .padding(.horizontal, 18)
@@ -156,6 +160,39 @@ private struct CancelButton: View {
         .onHover { hovering = $0 }
         .help("Stop the current run (⌘.)")
         .keyboardShortcut(".", modifiers: .command)
+    }
+}
+
+/// Shown when every job in the queue is `.synced`. Clears completed rows so
+/// the next drag-drop starts from an empty state instead of growing without
+/// bound. Mirrors the Stop button's chrome so the bottom strip has a single
+/// visual rhythm: one trailing pill, action label depends on state.
+private struct ClearButton: View {
+    let theme: Theme
+    let accent: AccentKey
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("Clear")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(accent.solid)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(
+                hovering ? accent.soft.opacity(1.4) : accent.soft,
+                in: Capsule()
+            )
+            .overlay(Capsule().strokeBorder(accent.ring, lineWidth: 0.5))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Remove all synced rows from the queue")
     }
 }
 
