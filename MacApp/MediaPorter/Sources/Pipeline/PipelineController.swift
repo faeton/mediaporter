@@ -43,6 +43,13 @@ public class PipelineController {
     /// individual `EpisodeMetadata`.
     public var tvShowResolutions: [String: ResolvedShow] = [:]
 
+    /// In-flight cluster resolves, keyed by clusterID. When parallel analyze
+    /// (#10) runs N episodes of the same show concurrently, the first to
+    /// reach `resolveCluster` plants a Task here; the others await its
+    /// value instead of firing N parallel TMDb searches. Cleared once the
+    /// resolved show lands in `tvShowResolutions`.
+    private var clusterResolveTasks: [String: Task<ResolvedShow, Never>] = [:]
+
     /// Clusters where TMDb couldn't auto-pick a show — surfaced to the UI so
     /// the user can pick once for the whole cluster instead of N times.
     public var pendingShowPicks: [PendingShowPick] = []
@@ -371,37 +378,36 @@ public class PipelineController {
         clusterID: String, query: String, parsedYear: Int?
     ) async -> ResolvedShow {
         if let cached = tvShowResolutions[clusterID] { return cached }
+        // Coalesce concurrent calls for the same cluster — the first one
+        // does the TMDb lookup, everyone else awaits its result.
+        if let inflight = clusterResolveTasks[clusterID] { return await inflight.value }
 
-        // No TMDb key → fallback poster only, no network call.
-        guard !tmdbAPIKey.isEmpty else {
-            let fallback = ResolvedShow(
-                showName: query,
-                year: parsedYear,
+        let task = Task<ResolvedShow, Never> { @MainActor [tmdbAPIKey] in
+            // No TMDb key → fallback poster only, no network call.
+            guard !tmdbAPIKey.isEmpty else {
+                return ResolvedShow(
+                    showName: query, year: parsedYear,
+                    showPosterData: PosterGenerator.generate(title: query, year: parsedYear)
+                )
+            }
+            let candidates = (try? await TMDbClient.searchTVShows(query: query, apiKey: tmdbAPIKey)) ?? []
+            if TVShowCluster.shouldAutoPick(candidates), let top = candidates.first {
+                return await self.materializeShow(from: top, fallbackQuery: query, fallbackYear: parsedYear)
+            }
+            // No clear winner — record the cluster as pending and use a
+            // fallback identity. UI surfaces the pick; `applyShowToCluster`
+            // swaps the resolution in once the user chooses.
+            self.recordPendingPick(clusterID: clusterID, query: query, candidates: candidates)
+            return ResolvedShow(
+                showName: query, year: parsedYear,
                 showPosterData: PosterGenerator.generate(title: query, year: parsedYear)
             )
-            tvShowResolutions[clusterID] = fallback
-            return fallback
         }
-
-        let candidates = (try? await TMDbClient.searchTVShows(query: query, apiKey: tmdbAPIKey)) ?? []
-
-        if TVShowCluster.shouldAutoPick(candidates), let top = candidates.first {
-            let resolved = await materializeShow(from: top, fallbackQuery: query, fallbackYear: parsedYear)
-            tvShowResolutions[clusterID] = resolved
-            return resolved
-        }
-
-        // No clear winner — record the cluster as pending and use a fallback
-        // identity so analyze can keep running. The UI surfaces the pick;
-        // `applyShowToCluster` swaps the resolution in once the user chooses.
-        recordPendingPick(clusterID: clusterID, query: query, candidates: candidates)
-        let fallback = ResolvedShow(
-            showName: query,
-            year: parsedYear,
-            showPosterData: PosterGenerator.generate(title: query, year: parsedYear)
-        )
-        tvShowResolutions[clusterID] = fallback
-        return fallback
+        clusterResolveTasks[clusterID] = task
+        let resolved = await task.value
+        tvShowResolutions[clusterID] = resolved
+        clusterResolveTasks.removeValue(forKey: clusterID)
+        return resolved
     }
 
     /// Turn a TMDb candidate into a fully populated `ResolvedShow` (genre,
@@ -805,107 +811,130 @@ public class PipelineController {
             NSLog("OpenSubtitles: API key set but username/password/languages missing — skipping auto-fetch. Fill them in Settings → Subtitles.")
         }
 
-        // Re-query on each iteration so jobs added *during* analyze (e.g. a
-        // second drag-drop while the first batch is still analyzing) get
-        // picked up too.
-        var processed = 0
-        while let job = jobs.first(where: { $0.status == .pending }) {
-            processed += 1
-            let totalSoFar = processed + jobs.filter { $0.status == .pending }.count
-            job.status = .analyzing
-            do {
-                var info = try await probeFile(url: job.inputURL)
-                scanExternalSubtitles(mediaInfo: &info)
-                let decision = evaluateCompatibility(mediaInfo: info)
+        // Process in waves: at each iteration, snapshot all currently-pending
+        // jobs and run them concurrently (capped at `analyzeConcurrency`).
+        // After the wave completes, recheck — jobs added mid-wave (a second
+        // drag-drop while the first wave is still running) form the next.
+        // Cluster resolution dedup happens inside `resolveCluster` so 8
+        // episodes of the same show fire one TMDb search, not 8.
+        let analyzeConcurrency = 4
+        while jobs.contains(where: { $0.status == .pending }) {
+            let wave = jobs.filter { $0.status == .pending }
+            let waveTotal = wave.count
+            var waveProcessed = 0
 
-                job.mediaInfo = info
-                job.decision = decision
-
-                // Auto-suggest resolution: use device recommendation if source is larger
-                let srcHeight = info.videoStreams.first?.height ?? 0
-                if let device = DeviceMonitor.shared.currentDevice {
-                    let suggestion = device.suggestedResolution
-                    // Only apply device suggestion if it would actually downscale
-                    job.maxResolution = suggestion.wouldDownscale(from: srcHeight) ? suggestion : .original
-                } else if srcHeight > 1920 {
-                    // No device connected but 4K source → suggest 1080p
-                    job.maxResolution = .fhd
-                } else {
-                    job.maxResolution = .original
-                }
-
-                job.selectedAudio = Array(0..<info.audioStreams.count)
-                job.selectedSubtitles = info.subtitleStreams.enumerated().compactMap { idx, s in
-                    isTextSubtitle(s.codecName) || s.codecName == "mov_text" ? idx : nil
-                }
-                job.selectedExternalSubs = Array(0..<info.externalSubtitles.count)
-
-                await resolveJobMetadata(job)
-
-                // OpenSubtitles: fetch missing-language SRTs into the per-user cache
-                // and splice them into mediaInfo.externalSubtitles so they flow into
-                // the existing embed path.
-                if openSubtitlesReady {
-                    let tmdbID: Int? = {
-                        if case .movie(let m) = job.metadata { return m.tmdbID }
-                        if case .tvEpisode(let e) = job.metadata { return e.tmdbShowID }
-                        return nil
-                    }()
-                    let existingLangs: Set<String> = Set(
-                        info.subtitleStreams.compactMap { $0.language?.lowercased() }
-                        + info.externalSubtitles.map { $0.language.lowercased() }
-                    )
-                    let langs = openSubtitlesLanguages
-                        .split(separator: ",")
-                        .map { $0.trimmingCharacters(in: .whitespaces) }
-                        .filter { !$0.isEmpty }
-                    let missing = langs.filter { l in
-                        let iso3 = iso3FromIso2(openSubtitlesLangCode(l))
-                        let iso2 = openSubtitlesLangCode(l)
-                        return !existingLangs.contains(iso3) && !existingLangs.contains(iso2)
-                    }
-                    if missing.isEmpty {
-                        NSLog("OpenSubtitles: \(job.fileName) — all requested languages already present, skipping")
-                    } else {
-                        overallStatus = "Looking up subtitles: \(job.fileName)"
-                        NSLog("OpenSubtitles: querying %@ for %@", missing.joined(separator: ","), job.fileName)
-                        let client = OpenSubtitlesClient(
-                            apiKey: openSubtitlesAPIKey,
-                            username: openSubtitlesUsername,
-                            password: openSubtitlesPassword
-                        )
-                        let fetched = await fetchOpenSubtitles(
-                            for: job.inputURL,
-                            tmdbID: tmdbID,
-                            languages: missing,
-                            existingLanguages: existingLangs,
-                            cacheDir: openSubtitlesCacheDir,
-                            client: client
-                        )
-                        if fetched.isEmpty {
-                            NSLog("OpenSubtitles: no matches for \(job.fileName)")
-                        } else {
-                            let picked = fetched.map(\.language).joined(separator: ",")
-                            NSLog("OpenSubtitles: \(job.fileName) — added \(fetched.count) track(s): \(picked)")
-                            info.externalSubtitles.append(contentsOf: fetched)
-                            job.mediaInfo = info
+            await withTaskGroup(of: Void.self) { group in
+                var iter = wave.makeIterator()
+                for _ in 0..<min(analyzeConcurrency, waveTotal) {
+                    if let job = iter.next() {
+                        group.addTask { @MainActor [weak self] in
+                            await self?.analyzeOne(job: job)
                         }
                     }
                 }
-
-                // Re-derive selected-subs now that (possibly) new externals exist.
-                job.selectedExternalSubs = Array(0..<info.externalSubtitles.count)
-
-                job.status = .analyzed
-            } catch {
-                job.status = .failed
-                job.error = error.localizedDescription
+                for await _ in group {
+                    waveProcessed += 1
+                    overallProgress = Double(waveProcessed) / Double(waveTotal)
+                    if let job = iter.next() {
+                        group.addTask { @MainActor [weak self] in
+                            await self?.analyzeOne(job: job)
+                        }
+                    }
+                }
             }
-            overallProgress = totalSoFar > 0 ? Double(processed) / Double(totalSoFar) : 0
         }
 
         overallStatus = "Analysis complete"
+        overallProgress = 1.0
         isRunning = false
+    }
+
+    /// Analyze one job: probe + decision + metadata resolve + (optionally)
+    /// OpenSubtitles fetch. Safe to run concurrently for distinct jobs —
+    /// shared state (cluster cache, pending-pick map) is `@MainActor`-isolated
+    /// and `resolveCluster` coalesces concurrent same-cluster calls.
+    private func analyzeOne(job: FileJob) async {
+        job.status = .analyzing
+        do {
+            var info = try await probeFile(url: job.inputURL)
+            scanExternalSubtitles(mediaInfo: &info)
+            let decision = evaluateCompatibility(mediaInfo: info)
+
+            job.mediaInfo = info
+            job.decision = decision
+
+            let srcHeight = info.videoStreams.first?.height ?? 0
+            if let device = DeviceMonitor.shared.currentDevice {
+                let suggestion = device.suggestedResolution
+                job.maxResolution = suggestion.wouldDownscale(from: srcHeight) ? suggestion : .original
+            } else if srcHeight > 1920 {
+                job.maxResolution = .fhd
+            } else {
+                job.maxResolution = .original
+            }
+
+            job.selectedAudio = Array(0..<info.audioStreams.count)
+            job.selectedSubtitles = info.subtitleStreams.enumerated().compactMap { idx, s in
+                isTextSubtitle(s.codecName) || s.codecName == "mov_text" ? idx : nil
+            }
+            job.selectedExternalSubs = Array(0..<info.externalSubtitles.count)
+
+            await resolveJobMetadata(job)
+
+            if openSubtitlesReady {
+                let tmdbID: Int? = {
+                    if case .movie(let m) = job.metadata { return m.tmdbID }
+                    if case .tvEpisode(let e) = job.metadata { return e.tmdbShowID }
+                    return nil
+                }()
+                let existingLangs: Set<String> = Set(
+                    info.subtitleStreams.compactMap { $0.language?.lowercased() }
+                    + info.externalSubtitles.map { $0.language.lowercased() }
+                )
+                let langs = openSubtitlesLanguages
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                let missing = langs.filter { l in
+                    let iso3 = iso3FromIso2(openSubtitlesLangCode(l))
+                    let iso2 = openSubtitlesLangCode(l)
+                    return !existingLangs.contains(iso3) && !existingLangs.contains(iso2)
+                }
+                if missing.isEmpty {
+                    NSLog("OpenSubtitles: \(job.fileName) — all requested languages already present, skipping")
+                } else {
+                    overallStatus = "Looking up subtitles: \(job.fileName)"
+                    NSLog("OpenSubtitles: querying %@ for %@", missing.joined(separator: ","), job.fileName)
+                    let client = OpenSubtitlesClient(
+                        apiKey: openSubtitlesAPIKey,
+                        username: openSubtitlesUsername,
+                        password: openSubtitlesPassword
+                    )
+                    let fetched = await fetchOpenSubtitles(
+                        for: job.inputURL,
+                        tmdbID: tmdbID,
+                        languages: missing,
+                        existingLanguages: existingLangs,
+                        cacheDir: openSubtitlesCacheDir,
+                        client: client
+                    )
+                    if fetched.isEmpty {
+                        NSLog("OpenSubtitles: no matches for \(job.fileName)")
+                    } else {
+                        let picked = fetched.map(\.language).joined(separator: ",")
+                        NSLog("OpenSubtitles: \(job.fileName) — added \(fetched.count) track(s): \(picked)")
+                        info.externalSubtitles.append(contentsOf: fetched)
+                        job.mediaInfo = info
+                    }
+                }
+            }
+
+            job.selectedExternalSubs = Array(0..<info.externalSubtitles.count)
+            job.status = .analyzed
+        } catch {
+            job.status = .failed
+            job.error = error.localizedDescription
+        }
     }
 
     public func transcodeAll() async {
@@ -1288,6 +1317,26 @@ public class PipelineController {
             if workFailed != nil {
                 registerSession.abandonAsset(assetID: pair.prepared.assetID)
                 break
+            }
+
+            // Mid-sync disk poll (#9). Preflight at runPipelined start only
+            // checks once; iOS background traffic (Photos sync, iCloud,
+            // Music) can eat tens of GB while we're transcoding. AFC failing
+            // mid-write surfaces as a cryptic write error several minutes
+            // into the upload — re-query free space here so we abort with
+            // a clear message instead.
+            //
+            // Headroom: file size + 256 MB. medialibraryd needs scratch for
+            // ingestion (artwork DB, search index); 256 MB matches what we
+            // observed it briefly hold during a TV-episode batch.
+            if let result = queryDeviceDiskSpace(device: device.handle) {
+                deviceFreeBytes = result.free
+                let needed = Int64(realPrepared.item.fileSize) + 256 * 1024 * 1024
+                if result.free < needed {
+                    workFailed = "Device filled up during sync (have \(ByteFormat.short(result.free)), need \(ByteFormat.short(needed)) for next file)."
+                    registerSession.abandonAsset(assetID: pair.prepared.assetID)
+                    break
+                }
             }
 
             job.status = .syncing

@@ -105,24 +105,22 @@ feels dead). Code: `Sources/Sync/GateTest.swift`,
 - Real-world batch validation: drag 10+ files, confirm timeline turns
   green progressively and overall wall time matches expectation.
 
-### 9. Mid-sync device-disk poll
-- `checkDiskSpace()` preflight runs once at PipelineController.swift:1066.
-  Nothing watches device free space during the AFC upload loop.
-- Re-query `queryDeviceDiskSpace` once per file (or every Nth chunk) and abort
-  cleanly with a "device filled up" status before AFC errors cryptically.
-- Easier once #5 lands — already a per-file checkpoint.
+### 9. Mid-sync device-disk poll *(shipped 2026-05-10)*
+- `runPipelined` now re-queries `queryDeviceDiskSpace` per file before
+  each AFC upload starts. Aborts cleanly with "Device filled up during
+  sync" if free < incoming + 256 MB headroom (the scratch medialibraryd
+  briefly holds during ingestion). Replaces the cryptic mid-write AFC
+  failure when iOS background traffic eats space mid-batch.
 
-### 10. Parallel analyze
-- `analyzeAll` (PipelineController.swift:693) loops sequentially. Probe is
-  I/O-bound, TMDb is network-bound. `TaskGroup` with concurrency ~4 cuts
-  "Analyzing…" wall time on big drops.
-- Hazard: cluster cache. N episodes of the same show must not fire N parallel
-  TMDb searches.
-- Two viable shapes:
-  - (a) Two-pass: serially resolve unique clusters, then fan out per-file
-    probes + episode lookups.
-  - (b) Per-cluster `actor` so the first lookup populates the cache and
-    subsequent lookups await it.
+### 10. Parallel analyze *(shipped 2026-05-10)*
+- `analyzeAll` runs in waves of `TaskGroup`-with-cap=4. probeFile is
+  I/O-bound and TMDb / OpenSubtitles are network-bound, so 4 episodes
+  analyze in roughly the time of 1.
+- Cluster-resolve dedup: `clusterResolveTasks: [String: Task<...>]`
+  coalesces concurrent same-cluster calls — first job's task is awaited
+  by the rest, so 12 episodes of one show fire one TMDb search, not 12.
+- Wave model picks up jobs added mid-run (second drag-drop while wave 1
+  is still analyzing) — they form the next wave.
 
 ### 10b. Duplicate detection before sync
 - Today: dropping the same file twice happily creates two `item_extra` rows.
