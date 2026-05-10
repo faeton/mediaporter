@@ -72,9 +72,20 @@ enum TMDbError: LocalizedError {
 
 // MARK: - Client
 
-enum TMDbClient {
+public enum TMDbClient {
     private static let baseURL = "https://api.themoviedb.org/3"
     private static let posterBaseURL = "https://image.tmdb.org/t/p/w500"
+    private static let requestTimeout: TimeInterval = 10
+
+    /// Fetch JSON from a URL with an explicit timeout. URLSession.shared.data(from:)
+    /// uses the session's 60s default, which makes "Searching TMDb…" appear to hang
+    /// forever when the network is slow or blocked.
+    private static func getJSON(_ url: URL) async throws -> Any {
+        var req = URLRequest(url: url, timeoutInterval: requestTimeout)
+        req.setValue("MediaPorter/1.0", forHTTPHeaderField: "User-Agent")
+        let (data, _) = try await URLSession.shared.data(for: req)
+        return try JSONSerialization.jsonObject(with: data)
+    }
 
     /// Search for movies by title and optional year.
     static func searchMovie(title: String, year: Int? = nil, apiKey: String) async throws -> [MovieMetadata] {
@@ -85,8 +96,7 @@ enum TMDbClient {
         ]
         if let year { components.queryItems?.append(URLQueryItem(name: "year", value: String(year))) }
 
-        let (data, _) = try await URLSession.shared.data(from: components.url!)
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let json = try await getJSON(components.url!) as? [String: Any],
               let results = json["results"] as? [[String: Any]] else { return [] }
 
         return results.prefix(5).map { r in
@@ -106,6 +116,87 @@ enum TMDbClient {
         }
     }
 
+    /// Search TMDb for TV-show candidates and rank them. Used by the cluster
+    /// picker — prefers shows that actually have episodes (have a `first_air_date`)
+    /// over musicals/parodies/empty stubs that share the title.
+    public static func searchTVShows(
+        query: String, apiKey: String
+    ) async throws -> [TVShowCandidate] {
+        var components = URLComponents(string: "\(baseURL)/search/tv")!
+        components.queryItems = [
+            URLQueryItem(name: "api_key", value: apiKey),
+            URLQueryItem(name: "query", value: query),
+        ]
+
+        guard let json = try await getJSON(components.url!) as? [String: Any],
+              let results = json["results"] as? [[String: Any]] else { return [] }
+
+        let candidates: [TVShowCandidate] = results.compactMap { r in
+            guard let id = r["id"] as? Int else { return nil }
+            let firstAir = r["first_air_date"] as? String ?? ""
+            let posterPath = r["poster_path"] as? String
+            return TVShowCandidate(
+                id: id,
+                name: r["name"] as? String ?? "",
+                originalName: r["original_name"] as? String,
+                year: Int(firstAir.prefix(4)),
+                overview: r["overview"] as? String,
+                posterURL: posterPath.map { "\(posterBaseURL)\($0)" },
+                popularity: (r["popularity"] as? Double) ?? 0
+            )
+        }
+
+        // Rank: shows with an air date first (real series beat musicals/empty
+        // stubs), then by popularity. This is the rule that lets us auto-pick.
+        return candidates.sorted { a, b in
+            let aHas = a.year != nil ? 1 : 0
+            let bHas = b.year != nil ? 1 : 0
+            if aHas != bHas { return aHas > bHas }
+            return a.popularity > b.popularity
+        }.prefix(5).map { $0 }
+    }
+
+    /// Fetch the show-level fields for a known TMDb show id (genre, network,
+    /// poster). Used after the user picks a candidate from the cluster picker.
+    public static func fetchTVShow(
+        id: Int, apiKey: String
+    ) async throws -> ResolvedShow {
+        let url = URL(string: "\(baseURL)/tv/\(id)?api_key=\(apiKey)")!
+        let json = ((try? await getJSON(url)) as? [String: Any]) ?? [:]
+        let firstAir = json["first_air_date"] as? String ?? ""
+        let posterPath = json["poster_path"] as? String
+        let genre = (json["genres"] as? [[String: Any]])?.first?["name"] as? String
+        let network = (json["networks"] as? [[String: Any]])?.first?["name"] as? String
+        return ResolvedShow(
+            showName: json["name"] as? String ?? "",
+            year: Int(firstAir.prefix(4)),
+            genre: genre,
+            network: network,
+            showPosterURL: posterPath.map { "\(posterBaseURL)\($0)" },
+            showPosterData: nil,
+            tmdbShowID: id
+        )
+    }
+
+    /// Fetch only the per-episode fields (title, still, overview) for a show
+    /// that's already been resolved at the cluster level.
+    public static func fetchEpisodeOnly(
+        showID: Int, season: Int, episode: Int, apiKey: String
+    ) async throws -> (title: String?, stillURL: String?, overview: String?) {
+        let url = URL(
+            string: "\(baseURL)/tv/\(showID)/season/\(season)/episode/\(episode)?api_key=\(apiKey)"
+        )!
+        guard let json = try await getJSON(url) as? [String: Any] else {
+            return (nil, nil, nil)
+        }
+        let stillPath = json["still_path"] as? String
+        return (
+            title: json["name"] as? String,
+            stillURL: stillPath.map { "\(posterBaseURL)\($0)" },
+            overview: json["overview"] as? String
+        )
+    }
+
     /// Search for a TV episode.
     static func searchTVEpisode(
         showName: String, season: Int, episode: Int, apiKey: String
@@ -117,8 +208,7 @@ enum TMDbClient {
             URLQueryItem(name: "query", value: showName),
         ]
 
-        let (searchData, _) = try await URLSession.shared.data(from: searchComponents.url!)
-        guard let searchJSON = try JSONSerialization.jsonObject(with: searchData) as? [String: Any],
+        guard let searchJSON = try await getJSON(searchComponents.url!) as? [String: Any],
               let results = searchJSON["results"] as? [[String: Any]],
               let show = results.first,
               let showID = show["id"] as? Int else { return nil }
@@ -128,16 +218,14 @@ enum TMDbClient {
 
         // Step 2: Fetch episode details
         let epURL = URL(string: "\(baseURL)/tv/\(showID)/season/\(season)/episode/\(episode)?api_key=\(apiKey)")!
-        let (epData, _) = try await URLSession.shared.data(from: epURL)
-        guard let epJSON = try JSONSerialization.jsonObject(with: epData) as? [String: Any] else { return nil }
+        guard let epJSON = try await getJSON(epURL) as? [String: Any] else { return nil }
 
         let stillPath = epJSON["still_path"] as? String
         let episodeID = String(format: "S%02dE%02d", season, episode)
 
         // Step 3: Fetch show details for genre/network
         let showURL = URL(string: "\(baseURL)/tv/\(showID)?api_key=\(apiKey)")!
-        let (showData, _) = try await URLSession.shared.data(from: showURL)
-        let showJSON = (try? JSONSerialization.jsonObject(with: showData) as? [String: Any]) ?? [:]
+        let showJSON = ((try? await getJSON(showURL)) as? [String: Any]) ?? [:]
 
         let genres = (showJSON["genres"] as? [[String: Any]])?.first?["name"] as? String
         let networks = (showJSON["networks"] as? [[String: Any]])?.first?["name"] as? String

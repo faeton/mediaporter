@@ -21,6 +21,13 @@ public enum JobStatus: String {
     case tagging
     case ready
     case syncing
+    /// Bytes are on the device but not yet registered with ATC. The pipeline
+    /// runs registration as one short batch call after every file finishes
+    /// uploading, so files sit here for seconds-to-minutes between upload
+    /// complete and final visibility in the TV app. Distinguishing this from
+    /// `.syncing` keeps the timeline counters honest — "1 active" instead of
+    /// "17 active" while uploads are sequential.
+    case uploaded
     case synced
     case failed
 }
@@ -40,6 +47,11 @@ public class FileJob: Identifiable {
     public var mediaInfo: MediaInfo?
     public var decision: TranscodeDecision?
     public var metadata: ResolvedMetadata?
+
+    /// TV-show cluster key (`TVShowCluster.key`) when the file is detected as
+    /// an episode. Files that share a clusterID share one TMDb show lookup
+    /// and one user-edited show identity. nil for movies.
+    public var clusterID: String?
 
     // User selections (populated after analysis)
     public var selectedAudio: [Int] = []          // indices into audioStreams

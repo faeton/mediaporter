@@ -15,6 +15,13 @@ struct ContentView: View {
     private var theme: Theme { Theme(dark: tweaks.dark) }
     private var showEmpty: Bool { pipeline.jobs.isEmpty }
 
+    /// "iPad" / "iPhone" / "iPod" / "device" — keeps drop-zone copy honest
+    /// when an iPhone is plugged in instead of an iPad.
+    private var deviceClassLabel: String {
+        let cls = pipeline.deviceInfo?.deviceClass ?? ""
+        return cls.isEmpty ? "device" : cls
+    }
+
     /// Kick off analyze only — user will click Send to proceed.
     private func analyzeOnly() {
         guard !pipeline.isRunning else { return }
@@ -116,7 +123,8 @@ struct ContentView: View {
                     .onDrop(of: [.fileURL], isTargeted: $isDroppingDevice) { providers in
                         handleDrop(providers, autoSync: true)
                     }
-                    .overlay(dropHighlight(active: isDroppingDevice, label: "Drop to send to iPad",
+                    .overlay(dropHighlight(active: isDroppingDevice,
+                                           label: "Drop to send to \(deviceClassLabel)",
                                            symbol: "arrow.up"))
                 }
                 .frame(maxHeight: .infinity)
@@ -134,6 +142,20 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.15), value: isDroppingList)
         .animation(.easeInOut(duration: 0.15), value: isDroppingDevice)
+        .sheet(item: Binding(
+            get: { pipeline.pendingShowPicks.first },
+            set: { _ in /* dismissal handled inside the sheet */ }
+        )) { pick in
+            ShowPickerSheet(
+                theme: theme,
+                accent: tweaks.accent,
+                clusterID: pick.id,
+                initialQuery: pick.query,
+                initialCandidates: pick.candidates,
+                affectedCount: pick.affectedJobIDs.count,
+                onClose: { /* binding above re-evaluates against pendingShowPicks */ }
+            )
+        }
     }
 
     private func toggle(_ id: UUID) {

@@ -19,6 +19,19 @@ struct FileRowView: View {
     @State private var retryTMDb = true
     @State private var isRetryingLookup = false
 
+    /// Cluster picker presentation — shown for TV files instead of EditTitleSheet.
+    /// `id == clusterID`, so a non-nil value drives `.sheet(item:)`.
+    @State private var showPickerInvocation: ShowPickerInvocation?
+
+    /// Args bundle for the on-demand picker (vs the auto-prompt path in
+    /// ContentView which reads from pipeline.pendingShowPicks).
+    private struct ShowPickerInvocation: Identifiable {
+        let id: String                     // clusterID
+        let query: String
+        let candidates: [TVShowCandidate]
+        let affectedCount: Int
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -570,11 +583,49 @@ struct FileRowView: View {
                 onCancel: { isEditingTitle = false }
             )
         }
+        .sheet(item: $showPickerInvocation) { inv in
+            ShowPickerSheet(
+                theme: theme,
+                accent: accent,
+                clusterID: inv.id,
+                initialQuery: inv.query,
+                initialCandidates: inv.candidates,
+                affectedCount: inv.affectedCount,
+                onClose: { showPickerInvocation = nil }
+            )
+        }
     }
 
     // MARK: - Title editing
 
     private func openEditTitle() {
+        // TV episodes go through the cluster picker — choosing a show there
+        // applies to every episode that shares the cluster id.
+        if case .tvEpisode(let e) = job.metadata, let clusterID = job.clusterID {
+            let affected = pipeline.jobs(inCluster: clusterID).count
+            let query = e.showName
+            showPickerInvocation = ShowPickerInvocation(
+                id: clusterID,
+                query: query,
+                candidates: [],            // populated by the sheet's first search
+                affectedCount: max(affected, 1)
+            )
+            // Kick a search now so the sheet opens populated.
+            if !pipeline.tmdbAPIKey.isEmpty {
+                Task {
+                    if let results = try? await TMDbClient.searchTVShows(
+                        query: query, apiKey: pipeline.tmdbAPIKey
+                    ) {
+                        showPickerInvocation = ShowPickerInvocation(
+                            id: clusterID, query: query,
+                            candidates: results, affectedCount: max(affected, 1)
+                        )
+                    }
+                }
+            }
+            return
+        }
+
         switch job.metadata {
         case .movie(let m):
             editedTitle = m.title
@@ -771,6 +822,7 @@ private struct StatusDot: View {
         case .tagging: return Color(hex: 0xBF5AF2)
         case .ready: return Color(red: 0.19, green: 0.82, blue: 0.35)
         case .syncing: return accent.solid
+        case .uploaded: return accent.solid
         case .synced: return Color(red: 0.19, green: 0.82, blue: 0.35)
         case .failed: return Color(red: 1.0, green: 0.27, blue: 0.23)
         }
@@ -784,6 +836,7 @@ private struct StatusDot: View {
         case .tagging: return "Tagging"
         case .ready: return "Ready to send"
         case .syncing: return "Uploading"
+        case .uploaded: return "On device, finalizing"
         case .synced: return "Synced"
         case .failed: return "Failed"
         }
