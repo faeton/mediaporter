@@ -97,6 +97,11 @@ enum MD {
         UnsafeRawPointer, UnsafePointer<CChar>, Int32, UnsafeMutablePointer<Int>
     ) -> Int32
     typealias AFCFileRefWriteFn = @convention(c) (UnsafeRawPointer, Int, UnsafeRawPointer, Int) -> Int32
+    /// AFCFileRefRead(connection, fileRef, buffer, lengthInOut) — `lengthInOut`
+    /// is in/out: in = max bytes to read; out = bytes actually read.
+    typealias AFCFileRefReadFn = @convention(c) (
+        UnsafeRawPointer, Int, UnsafeMutableRawPointer, UnsafeMutablePointer<Int>
+    ) -> Int32
     typealias AFCFileRefCloseFn = @convention(c) (UnsafeRawPointer, Int) -> Int32
     typealias AFCRemovePathFn = @convention(c) (UnsafeRawPointer, UnsafePointer<CChar>) -> Int32
     typealias AFCDirectoryOpenFn = @convention(c) (
@@ -128,6 +133,7 @@ enum MD {
     static var afcMkdir: AFCDirectoryCreateFn { lookup(loadMobileDevice(), "AFCDirectoryCreate") }
     static var afcFileOpen: AFCFileRefOpenFn { lookup(loadMobileDevice(), "AFCFileRefOpen") }
     static var afcFileWrite: AFCFileRefWriteFn { lookup(loadMobileDevice(), "AFCFileRefWrite") }
+    static var afcFileRead: AFCFileRefReadFn { lookup(loadMobileDevice(), "AFCFileRefRead") }
     static var afcFileClose: AFCFileRefCloseFn { lookup(loadMobileDevice(), "AFCFileRefClose") }
     static var afcRemove: AFCRemovePathFn { lookup(loadMobileDevice(), "AFCRemovePath") }
     static var afcDirOpen: AFCDirectoryOpenFn { lookup(loadMobileDevice(), "AFCDirectoryOpen") }

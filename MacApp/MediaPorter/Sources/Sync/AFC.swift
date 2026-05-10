@@ -6,6 +6,7 @@ enum AFCError: LocalizedError {
     case connectionFailed(Int32)
     case openFailed(String, Int32)
     case writeFailed(Int, Int32)
+    case readFailed(Int, Int32)
     case cancelled
 
     var errorDescription: String? {
@@ -13,6 +14,7 @@ enum AFCError: LocalizedError {
         case .connectionFailed(let rc): return "AFC connection failed (error \(rc))"
         case .openFailed(let path, let rc): return "AFC open '\(path)' failed (error \(rc))"
         case .writeFailed(let offset, let rc): return "AFC write failed at offset \(offset) (error \(rc))"
+        case .readFailed(let offset, let rc): return "AFC read failed at offset \(offset) (error \(rc))"
         case .cancelled: return "Cancelled"
         }
     }
@@ -112,6 +114,31 @@ class AFCClient {
         }
     }
 
+    /// Read a remote file fully into memory. Returns nil if the file doesn't
+    /// exist or can't be opened. Use only for small/medium files (sqlitedb,
+    /// plists, traces) — the device's MediaLibrary.sqlitedb is ~10 MB which
+    /// is fine to hold in memory; don't call this on video.
+    func readFile(_ path: String) throws -> Data {
+        guard let c = conn else { throw AFCError.connectionFailed(-1) }
+        var handle: Int = 0
+        let rc = MD.afcFileOpen(c, path, 1 /* read */, &handle)
+        guard rc == 0 else { throw AFCError.openFailed(path, rc) }
+        defer { _ = MD.afcFileClose(c, handle) }
+
+        var out = Data()
+        var buffer = [UInt8](repeating: 0, count: chunkSize)
+        while true {
+            var len = chunkSize
+            let rrc = buffer.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                MD.afcFileRead(c, handle, ptr.baseAddress!, &len)
+            }
+            guard rrc == 0 else { throw AFCError.readFailed(out.count, rrc) }
+            if len == 0 { break } // EOF
+            out.append(buffer, count: len)
+        }
+        return out
+    }
+
     /// List entries in a device directory. Returns entry names only (no path prefix).
     /// "." and ".." are filtered out. Returns empty array if path doesn't exist.
     func listDirectory(_ path: String) -> [String] {
@@ -174,4 +201,13 @@ class AFCClient {
     }
 
     deinit { close() }
+}
+
+/// Pull a remote AFC file to a local URL. Wrapper for use from outside the
+/// core module (e.g. CLI debug commands). Connects, reads, writes, closes.
+public func pullDeviceFile(remote: String, to local: URL, device: DeviceInfo) throws {
+    let client = try AFCClient(device: device)
+    defer { client.close() }
+    let data = try client.readFile(remote)
+    try data.write(to: local)
 }

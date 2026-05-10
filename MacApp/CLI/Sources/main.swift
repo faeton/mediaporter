@@ -23,6 +23,10 @@ func usage() -> Never {
       sync <file> [file...]   (not implemented yet)
       recover                 register orphaned uploads on the device using
                               tagged .m4v files left in the system tempdir
+      pull <remote> [local]   copy a file off the device via AFC. Default
+                              local path is the basename of the remote.
+                              Useful for inspecting MediaLibrary.sqlitedb,
+                              ArtworkDB, etc. without third-party tools.
     """
     FileHandle.standardError.write(Data((out + "\n").utf8))
     exit(2)
@@ -41,6 +45,10 @@ case "sync":
     exit(2)
 case "recover":
     runRecover()
+case "pull":
+    guard argv.count >= 3 else { usage() }
+    let local = argv.count >= 4 ? argv[3] : (argv[2] as NSString).lastPathComponent
+    runPull(remote: argv[2], local: local)
 case "-h", "--help", "help":
     usage()
 default:
@@ -134,6 +142,27 @@ func runAnalyze(path: String) {
             print(line)
         }
     }
+}
+
+// MARK: - pull
+
+func runPull(remote: String, local: String) {
+    let device: DeviceInfo
+    do {
+        device = try discoverDevice()
+    } catch {
+        FileHandle.standardError.write(Data("no device: \(error)\n".utf8))
+        exit(1)
+    }
+    let url = URL(fileURLWithPath: local)
+    do {
+        try pullDeviceFile(remote: remote, to: url, device: device)
+    } catch {
+        FileHandle.standardError.write(Data("pull failed: \(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+    let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+    print("\(remote) -> \(url.path) (\(size) bytes)")
 }
 
 // MARK: - recover
