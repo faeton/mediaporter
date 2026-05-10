@@ -84,10 +84,44 @@ def search_movie(title: str, year: str | None = None, api_key: str | None = None
     return results
 
 
+def search_tv_shows(show_name: str, api_key: str | None = None) -> list[dict]:
+    """Return ranked TMDb TV-show candidates for a query (top 5).
+
+    Ranking prefers shows that actually have a first_air_date over the bare
+    popularity order TMDb returns — that pushes musicals/specials/empty stubs
+    below real series with the same name.
+    """
+    if not api_key:
+        raise MetadataError("TMDb API key required. Set TMDB_API_KEY or use --tmdb-key.")
+    try:
+        import tmdbsimple as tmdb
+    except ImportError:
+        raise MetadataError("tmdbsimple not installed. Run: pip install tmdbsimple")
+
+    tmdb.API_KEY = api_key
+    search = tmdb.Search()
+    search.tv(query=show_name)
+    results = list(search.results or [])
+    results.sort(
+        key=lambda r: (
+            1 if r.get("first_air_date") else 0,
+            float(r.get("popularity") or 0.0),
+        ),
+        reverse=True,
+    )
+    return results[:5]
+
+
 def search_tv_episode(
-    show_name: str, season: int, episode: int, api_key: str | None = None
+    show_name: str, season: int, episode: int, api_key: str | None = None,
+    show: dict | None = None,
 ) -> EpisodeMetadata | None:
-    """Search TMDb for a TV episode."""
+    """Search TMDb for a TV episode.
+
+    If `show` is provided (a TMDb tv search-result dict), it's used directly
+    instead of running a fresh search — lets the caller pick a specific show
+    after presenting candidates.
+    """
     if not api_key:
         raise MetadataError("TMDb API key required. Set TMDB_API_KEY or use --tmdb-key.")
 
@@ -98,12 +132,11 @@ def search_tv_episode(
 
     tmdb.API_KEY = api_key
 
-    search = tmdb.Search()
-    search.tv(query=show_name)
-    if not search.results:
-        return None
-
-    show = search.results[0]
+    if show is None:
+        candidates = search_tv_shows(show_name, api_key)
+        if not candidates:
+            return None
+        show = candidates[0]
     show_id = show["id"]
 
     try:
@@ -228,34 +261,102 @@ def generate_fallback_poster(title: str, year: str | None = None) -> bytes | Non
     return buf.getvalue()
 
 
-def _prompt_metadata_correction(
-    title: str, year: str | int | None, is_tv: bool = False
-) -> tuple[str, str | None] | None:
-    """Prompt user to correct title/year when TMDb search fails.
+def _pick_tv_show_interactive(
+    initial_query: str, api_key: str
+) -> dict | None:
+    """Interactively pick a TMDb TV show.
 
-    Returns (corrected_title, corrected_year) or None if skipped.
+    Loops: shows top candidates for the current query, lets the user pick by
+    number, type a new query to re-search, or skip. Returns the chosen TMDb
+    search-result dict or None if skipped.
     """
     import sys
     if not sys.stdin.isatty():
         return None
 
-    kind = "show" if is_tv else "movie"
-    print(f"  No TMDb match for \"{title}\"")
-    try:
-        corrected_title = input(f"  Title? [{title}]: ").strip()
-        if not corrected_title:
-            corrected_title = title
-        corrected_year = None
-        if not is_tv:
-            year_input = input(f"  Year? [{year or ''}]: ").strip()
-            corrected_year = year_input if year_input else (str(year) if year else None)
-        # Only retry if user changed something
-        if corrected_title == title and corrected_year == (str(year) if year else None):
+    query = initial_query
+    while True:
+        try:
+            candidates = search_tv_shows(query, api_key)
+        except MetadataError:
             return None
-        print(f"  Searching TMDb for \"{corrected_title}\"...")
-        return (corrected_title, corrected_year)
-    except (EOFError, KeyboardInterrupt):
+
+        if candidates:
+            print(f"  TMDb candidates for \"{query}\":")
+            for i, c in enumerate(candidates, 1):
+                year = (c.get("first_air_date") or "")[:4] or "----"
+                name = c.get("name") or "?"
+                orig = c.get("original_name") or ""
+                orig_str = f" / {orig}" if orig and orig != name else ""
+                pop = c.get("popularity") or 0.0
+                print(f"    {i}. {name}{orig_str} ({year})  [pop {pop:.0f}]")
+        else:
+            print(f"  No TMDb match for \"{query}\".")
+
+        try:
+            prompt = "  Pick number, type new search, or [s]kip: " if candidates \
+                else "  Type new search or [s]kip: "
+            choice = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+        if not choice or choice.lower() in {"s", "skip"}:
+            return None
+        if candidates and choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(candidates):
+                return candidates[idx - 1]
+            print(f"  Out of range (1-{len(candidates)}).")
+            continue
+        query = choice
+
+
+def _pick_movie_interactive(
+    initial_title: str, initial_year: str | int | None, api_key: str
+) -> "MovieMetadata | None":
+    """Interactively pick a TMDb movie. Same loop pattern as the TV picker."""
+    import sys
+    if not sys.stdin.isatty():
         return None
+
+    title = initial_title
+    year = str(initial_year) if initial_year else None
+    while True:
+        try:
+            results = search_movie(title, year, api_key)
+        except MetadataError:
+            return None
+
+        if results:
+            print(f"  TMDb candidates for \"{title}\"" + (f" ({year})" if year else "") + ":")
+            for i, m in enumerate(results, 1):
+                y = m.year or "----"
+                print(f"    {i}. {m.title} ({y})")
+        else:
+            print(f"  No TMDb match for \"{title}\"" + (f" ({year})" if year else "") + ".")
+
+        try:
+            prompt = "  Pick number, type new search (optional 'title|year'), or [s]kip: " \
+                if results else "  Type new search (optional 'title|year') or [s]kip: "
+            choice = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+        if not choice or choice.lower() in {"s", "skip"}:
+            return None
+        if results and choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(results):
+                return results[idx - 1]
+            print(f"  Out of range (1-{len(results)}).")
+            continue
+        if "|" in choice:
+            t, _, y = choice.partition("|")
+            title = t.strip() or title
+            year = y.strip() or None
+        else:
+            title = choice
+            year = None
 
 
 def lookup_metadata(
@@ -319,26 +420,20 @@ def _lookup_metadata_inner(
         show = show_override or guess.get("title", path.stem)
 
         if api_key:
-            meta = search_tv_episode(show, season, episode, api_key)
-            if meta:
-                if meta.poster_url:
-                    meta.poster_data = download_poster(meta.poster_url)
-                if meta.show_poster_url and meta.show_poster_url != meta.poster_url:
-                    meta.show_poster_data = download_poster(meta.show_poster_url)
-                return meta
+            candidates = search_tv_shows(show, api_key)
+            picked = candidates[0] if candidates else None
 
-            # No TMDb match — try interactive correction
-            if not non_interactive:
-                corrected = _prompt_metadata_correction(show, None, is_tv=True)
-                if corrected:
-                    c_show, _ = corrected
-                    meta = search_tv_episode(c_show, season, episode, api_key)
-                    if meta:
-                        if meta.poster_url:
-                            meta.poster_data = download_poster(meta.poster_url)
-                        if meta.show_poster_url and meta.show_poster_url != meta.poster_url:
-                            meta.show_poster_data = download_poster(meta.show_poster_url)
-                        return meta
+            if not non_interactive and not candidates:
+                picked = _pick_tv_show_interactive(show, api_key)
+
+            if picked is not None:
+                meta = search_tv_episode(show, season, episode, api_key, show=picked)
+                if meta:
+                    if meta.poster_url:
+                        meta.poster_data = download_poster(meta.poster_url)
+                    if meta.show_poster_url and meta.show_poster_url != meta.poster_url:
+                        meta.show_poster_data = download_poster(meta.show_poster_url)
+                    return meta
 
         return EpisodeMetadata(
             show_name=show,
@@ -350,23 +445,14 @@ def _lookup_metadata_inner(
     else:
         if api_key:
             results = search_movie(title, str(year) if year else None, api_key)
-            if results:
-                meta = results[0]
-                if meta.poster_url:
-                    meta.poster_data = download_poster(meta.poster_url)
-                return meta
+            picked = results[0] if results else None
 
-            # No TMDb match — try interactive correction
-            if not non_interactive:
-                corrected = _prompt_metadata_correction(title, year)
-                if corrected:
-                    c_title, c_year = corrected
-                    results = search_movie(c_title, c_year, api_key)
-                    if results:
-                        meta = results[0]
-                        if meta.poster_url:
-                            meta.poster_data = download_poster(meta.poster_url)
-                        return meta
-                    return MovieMetadata(title=c_title, year=c_year)
+            if not non_interactive and not results:
+                picked = _pick_movie_interactive(title, year, api_key)
+
+            if picked is not None:
+                if picked.poster_url:
+                    picked.poster_data = download_poster(picked.poster_url)
+                return picked
 
         return MovieMetadata(title=title, year=str(year) if year else None)
