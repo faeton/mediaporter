@@ -863,8 +863,16 @@ private struct PosterThumb: View {
         return true
     }
 
+    private var hasSecondaryArtwork: Bool {
+        // True when the popover will show *additional* artwork beyond what's
+        // already in the thumb (i.e. an episode still alongside the show
+        // portrait). Drives the small stacked-images marker.
+        guard job.metadata?.isEpisode == true else { return false }
+        return job.metadata?.episodeStillData != nil
+    }
+
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
+        ZStack(alignment: .topLeading) {
             theme.posterBg
                 .overlay {
                     if let data = thumbData, let image = NSImage(data: data) {
@@ -877,6 +885,34 @@ private struct PosterThumb: View {
                             .foregroundStyle(theme.textFaint)
                     }
                 }
+            // Episode badge (top-left). A random video frame doesn't read at
+            // 44pt — the episode number does, and it disambiguates rows in a
+            // cluster of identical-looking show portraits.
+            if let badge = job.metadata?.episodeBadge {
+                Text(badge)
+                    .font(.system(size: 10, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.black.opacity(0.72))
+                    )
+                    .padding(3)
+            }
+            // Stacked-images marker (top-right) — hints there's more artwork
+            // accessible on hold. Only shown when there actually is.
+            if hasSecondaryArtwork {
+                Image(systemName: "square.on.square")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(3)
+                    .background(
+                        Circle().fill(Color.black.opacity(0.6))
+                    )
+                    .padding(3)
+                    .frame(maxWidth: .infinity, alignment: .topTrailing)
+            }
             if job.status == .synced {
                 ZStack {
                     Rectangle().fill(Color.black.opacity(0.3))
@@ -919,29 +955,37 @@ private struct PosterThumb: View {
 }
 
 /// Large-size poster preview shown in a popover while the user is holding
-/// down on the thumbnail.
+/// down on the thumbnail. For TV episodes shows both artworks side by side
+/// (show portrait + episode still) so the user can verify the cluster
+/// picker resolved correctly — the device-side portrait isn't otherwise
+/// visible from the Mac app.
 private struct PosterPreview: View {
     let job: FileJob
     let theme: Theme
 
     var body: some View {
-        VStack(spacing: 8) {
-            Group {
-                if let data = job.metadata?.posterData, let image = NSImage(data: data) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                } else {
-                    theme.posterBg
-                        .overlay(
-                            Image(systemName: "film")
-                                .font(.system(size: 48))
-                                .foregroundStyle(theme.textFaint)
-                        )
-                }
+        VStack(spacing: 10) {
+            if job.metadata?.isEpisode == true {
+                // Episode still front-and-centre on expand. Show portrait
+                // already lives in the thumb, so we relegate it to a small
+                // confirmation tile underneath.
+                artworkColumn(
+                    label: job.metadata?.episodeBadge.map { "Episode · \($0)" } ?? "Episode",
+                    data: job.metadata?.episodeStillData,
+                    width: 480, height: 270
+                )
+                artworkColumn(
+                    label: "Show artwork",
+                    data: job.metadata?.showPortraitData,
+                    width: 120, height: 180
+                )
+            } else {
+                artworkColumn(
+                    label: nil,
+                    data: job.metadata?.posterData,
+                    width: 360, height: 540
+                )
             }
-            .frame(width: 360, height: 540)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
 
             if let title = job.metadata?.title {
                 Text(title)
@@ -949,10 +993,43 @@ private struct PosterPreview: View {
                     .foregroundStyle(theme.text)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 360)
+                    .frame(maxWidth: 540)
             }
         }
         .padding(14)
+    }
+
+    @ViewBuilder
+    private func artworkColumn(label: String?, data: Data?, width: CGFloat, height: CGFloat) -> some View {
+        VStack(spacing: 6) {
+            if let label {
+                Text(label)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(theme.textDim)
+                    .textCase(.uppercase)
+            }
+            Group {
+                if let data, let image = NSImage(data: data) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    theme.posterBg
+                        .overlay(
+                            VStack(spacing: 6) {
+                                Image(systemName: "photo")
+                                    .font(.system(size: 28))
+                                    .foregroundStyle(theme.textFaint)
+                                Text("Not available")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(theme.textFaint)
+                            }
+                        )
+                }
+            }
+            .frame(width: width, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
     }
 }
 

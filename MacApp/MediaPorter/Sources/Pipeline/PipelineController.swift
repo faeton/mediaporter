@@ -300,7 +300,7 @@ public class PipelineController {
         let episode = parsed.episode ?? 1
         let episodeID = String(format: "S%02dE%02d", season, episode)
 
-        let show = await resolveCluster(clusterID: clusterID, query: parsed.title, parsedYear: parsed.year)
+        var show = await resolveCluster(clusterID: clusterID, query: parsed.title, parsedYear: parsed.year)
 
         // Per-episode fetch — cheap, but only useful when we have a real TMDb
         // show id to query against.
@@ -311,6 +311,26 @@ public class PipelineController {
             if let info = try? await TMDbClient.fetchEpisodeOnly(
                 showID: id, season: season, episode: episode, apiKey: tmdbAPIKey
             ) {
+                epTitle = info.title
+                stillURL = info.stillURL
+                overview = info.overview
+            }
+        }
+
+        // Race guard: if the user picked a show via the picker while our
+        // episode fetch was in flight, the cluster cache now has a real
+        // tmdbShowID. Without this re-check we'd overwrite refreshEpisodes'
+        // good metadata with the stale fallback we captured before the pick.
+        if show.tmdbShowID == nil,
+           let promoted = tvShowResolutions[clusterID],
+           promoted.tmdbShowID != nil {
+            NSLog("resolveTVEpisode: cluster %@ promoted mid-analyze, re-fetching ep S%02dE%02d",
+                  clusterID, season, episode)
+            show = promoted
+            if let id = show.tmdbShowID, !tmdbAPIKey.isEmpty,
+               let info = try? await TMDbClient.fetchEpisodeOnly(
+                showID: id, season: season, episode: episode, apiKey: tmdbAPIKey
+               ) {
                 epTitle = info.title
                 stillURL = info.stillURL
                 overview = info.overview
@@ -434,15 +454,17 @@ public class PipelineController {
         season: Int,
         episode: Int
     ) async -> Data? {
+        let badge = MetadataLookup.episodeBadgeFormat(season: season, episode: episode)
         if let stillURL, let data = await TMDbClient.downloadPoster(urlString: stillURL) {
-            return data
+            return EpisodeStillStamper.stamp(data, label: badge)
         }
         if let sourceURL, let duration,
            let extracted = await StillExtractor.extract(from: sourceURL, duration: duration) {
-            return extracted
+            return EpisodeStillStamper.stamp(extracted, label: badge)
         }
         let label = String(format: "%@ S%02dE%02d", showName, season, episode)
-        return PosterGenerator.generateLandscape(title: label)
+        guard let synthetic = PosterGenerator.generateLandscape(title: label) else { return nil }
+        return EpisodeStillStamper.stamp(synthetic, label: badge)
     }
 
     private func recordPendingPick(
@@ -497,31 +519,65 @@ public class PipelineController {
     /// resolution. Episode numbers come from the original parse (don't
     /// change), only show identity + per-episode TMDb fetch are re-run.
     private func refreshEpisodes(in clusterID: String, using show: ResolvedShow) async {
-        for job in jobs where job.clusterID == clusterID {
+        let matching = jobs.filter { $0.clusterID == clusterID }
+        NSLog("refreshEpisodes: cluster=%@ showID=%@ jobs=%d",
+              clusterID,
+              show.tmdbShowID.map(String.init) ?? "nil",
+              matching.count)
+        for job in matching {
             let parsed = FilenameParser.parse(job.fileName)
             let season = parsed.season ?? 1
             let episode = parsed.episode ?? 1
             let episodeID = String(format: "S%02dE%02d", season, episode)
 
+            // Distinguish "TMDb returned, no still" from "TMDb call threw".
+            // Transient errors must not silently downgrade a previously-good
+            // still to a synthetic fallback — keep the existing poster on
+            // network failure and only re-resolve when we got a real answer.
             var epTitle: String? = nil
             var stillURL: String? = nil
             var overview: String? = nil
+            var fetchSucceeded = true
             if let id = show.tmdbShowID, !tmdbAPIKey.isEmpty {
-                if let info = try? await TMDbClient.fetchEpisodeOnly(
-                    showID: id, season: season, episode: episode, apiKey: tmdbAPIKey
-                ) {
+                do {
+                    let info = try await TMDbClient.fetchEpisodeOnly(
+                        showID: id, season: season, episode: episode, apiKey: tmdbAPIKey
+                    )
                     epTitle = info.title
                     stillURL = info.stillURL
                     overview = info.overview
+                    NSLog("refreshEpisodes: %@ S%02dE%02d title=%@ still=%@",
+                          job.fileName, season, episode,
+                          info.title ?? "<nil>",
+                          info.stillURL == nil ? "<nil>" : "ok")
+                } catch {
+                    fetchSucceeded = false
+                    NSLog("refreshEpisodes: fetchEpisodeOnly threw for %@ S%02dE%02d: %@",
+                          job.fileName, season, episode, String(describing: error))
                 }
             }
 
-            let posterData = await resolveEpisodePoster(
-                stillURL: stillURL,
-                sourceURL: job.inputURL,
-                duration: job.mediaInfo?.duration,
-                showName: show.showName, season: season, episode: episode
-            )
+            let existing: EpisodeMetadata? = {
+                if case .tvEpisode(let e) = job.metadata { return e }
+                return nil
+            }()
+
+            let posterData: Data?
+            if fetchSucceeded {
+                posterData = await resolveEpisodePoster(
+                    stillURL: stillURL,
+                    sourceURL: job.inputURL,
+                    duration: job.mediaInfo?.duration,
+                    showName: show.showName, season: season, episode: episode
+                )
+            } else {
+                // Keep whatever was there — don't replace a valid TMDb still
+                // with a synthetic just because the network blipped.
+                posterData = existing?.posterData
+                epTitle = existing?.episodeTitle
+                stillURL = existing?.posterURL
+                overview = existing?.overview
+            }
 
             job.metadata = .tvEpisode(EpisodeMetadata(
                 showName: show.showName,

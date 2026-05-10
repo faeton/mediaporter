@@ -24,6 +24,14 @@ enum FilenameParser {
         pattern: #"^(.+?)[.\s_-]+[Ss](\d{1,2})[\s._-]*[Ee](\d{1,2})"#
     )
 
+    // Anime: "[Group] Show - 01 [tags]", "[Group] Show - 12v2 [tags]". No S## prefix,
+    // season defaults to 1 (Erai-raws / SubsPlease / HorribleSubs convention).
+    // Gated on the stem containing a release-group bracket so a movie like
+    // "Apollo - 13" doesn't get misclassified as TV.
+    private static let animePattern = try! NSRegularExpression(
+        pattern: #"^(?:\[[^\]]+\]\s*)?(.+?)\s+-\s+(\d{1,3})(?:v\d+)?(?:[\s\[]|$)"#
+    )
+
     // Movie: "Movie.Name.2024", "Movie Name (2024)", or "Movie Name 1972" at end-of-string.
     // Trailing separator is optional so the year can be the last token in the stem.
     private static let movieYearPattern = try! NSRegularExpression(
@@ -54,6 +62,23 @@ enum FilenameParser {
                 episode: episode,
                 mediaType: .tvShow
             )
+        }
+
+        // Anime episode pattern — only attempted when the stem has a release-group
+        // bracket, so plain titles with " - NN" tails (e.g. "Apollo - 13") aren't
+        // falsely typed as TV.
+        if name.contains("[") {
+            if let match = animePattern.firstMatch(in: name, range: range) {
+                let title = extractGroup(name, match: match, group: 1)
+                let episode = Int(extractGroup(name, match: match, group: 2))
+                return ParsedFilename(
+                    title: cleanTitle(title),
+                    year: nil,
+                    season: 1,
+                    episode: episode,
+                    mediaType: .tvShow
+                )
+            }
         }
 
         // Try movie with year

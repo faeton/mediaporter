@@ -21,17 +21,45 @@ public enum ResolvedMetadata {
         }
     }
 
-    /// Preview thumb for the Mac app UI. Prefers the show's horizontal
-    /// backdrop for TV episodes (one banner shared across the cluster) so
-    /// the row preview is consistent and recognisable. Falls back to the
-    /// per-episode still, then the vertical poster, then the movie poster.
-    /// Never goes to the device — that path uses `posterData`.
+    /// Preview thumb for the Mac app UI. For TV episodes prefers the show
+    /// portrait — it's the most recognisable image and lets the user verify
+    /// the cluster picker resolved to the right show without expanding.
+    /// Falls back to the per-episode still or the show backdrop. The thumb
+    /// frame is portrait-shaped (2:3) so a landscape backdrop only fits
+    /// poorly anyway. Never goes to the device — that path uses `posterData`.
     public var previewThumbData: Data? {
         switch self {
         case .movie(let m): return m.posterData
         case .tvEpisode(let e):
-            return e.showBackdropData ?? e.posterData ?? e.showPosterData
+            return e.showPosterData ?? e.posterData ?? e.showBackdropData
         }
+    }
+
+    /// Compact episode marker for the row thumb badge ("E01", "S2·E03").
+    /// nil for movies. Season is elided when it's the implicit S01.
+    public var episodeBadge: String? {
+        guard case .tvEpisode(let e) = self else { return nil }
+        return MetadataLookup.episodeBadgeFormat(season: e.season, episode: e.episode)
+    }
+
+    /// Show-level portrait (2:3) for TV episodes. nil for movies. Used by
+    /// the row-preview popover so the user can confirm the cluster picker
+    /// resolved to the right show, since the device-side portrait isn't
+    /// otherwise visible from the Mac app.
+    public var showPortraitData: Data? {
+        if case .tvEpisode(let e) = self { return e.showPosterData }
+        return nil
+    }
+
+    /// Per-episode 16:9 still for TV episodes. nil for movies.
+    public var episodeStillData: Data? {
+        if case .tvEpisode(let e) = self { return e.posterData }
+        return nil
+    }
+
+    public var isEpisode: Bool {
+        if case .tvEpisode = self { return true }
+        return false
     }
 }
 
@@ -152,6 +180,11 @@ public enum MetadataLookup {
                     showName: meta.showName, season: meta.season, episode: meta.episode
                 )
             }
+            if let still = meta.posterData {
+                meta.posterData = EpisodeStillStamper.stamp(
+                    still, label: episodeBadgeFormat(season: meta.season, episode: meta.episode)
+                )
+            }
             return .tvEpisode(meta)
         } catch {
             return .tvEpisode(await fallbackEpisode(
@@ -176,6 +209,14 @@ public enum MetadataLookup {
         return PosterGenerator.generateLandscape(title: label)
     }
 
+    /// Compact episode badge ("E01", "S2·E03") — same format as the row-thumb
+    /// badge so the burn-in on the device matches what the user sees in the
+    /// Mac app. Season is elided when implicit S01.
+    static func episodeBadgeFormat(season: Int, episode: Int) -> String {
+        let ep = String(format: "E%02d", episode)
+        return season > 1 ? "S\(season)·\(ep)" : ep
+    }
+
     private static func fallbackMovie(parsed: ParsedFilename) -> MovieMetadata {
         MovieMetadata(
             title: parsed.title,
@@ -194,10 +235,13 @@ public enum MetadataLookup {
         showName: String, season: Int, episode: Int, parsed: ParsedFilename,
         sourceURL: URL?, duration: TimeInterval?
     ) async -> EpisodeMetadata {
-        let posterData = await episodePosterFallback(
+        let rawPoster = await episodePosterFallback(
             sourceURL: sourceURL, duration: duration,
             showName: showName, season: season, episode: episode
         )
+        let posterData = rawPoster.map {
+            EpisodeStillStamper.stamp($0, label: episodeBadgeFormat(season: season, episode: episode))
+        }
         return EpisodeMetadata(
             showName: showName,
             season: season,

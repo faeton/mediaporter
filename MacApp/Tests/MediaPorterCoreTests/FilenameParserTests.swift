@@ -100,4 +100,29 @@ extension FilenameParserTests {
         XCTAssertEqual(p.season, 1)
         XCTAssertEqual(p.episode, 2)
     }
+
+    // Erai-raws / SubsPlease anime convention: "[Group] Show - NN [tags]".
+    // No S##E## marker; season defaults to 1.
+    func testAnimeEraiRawsEpisode() {
+        let p = FilenameParser.parse(
+            "[Erai-raws] Odd Taxi - 01 [720p][Multiple Subtitle].mkv"
+        )
+        XCTAssertEqual(p.mediaType, .tvShow)
+        XCTAssertEqual(p.title, "Odd Taxi")
+        XCTAssertEqual(p.season, 1)
+        XCTAssertEqual(p.episode, 1)
+    }
+
+    func testAnimeWithVersionSuffix() {
+        let p = FilenameParser.parse("[SubsPlease] Frieren - 12v2 [1080p].mkv")
+        XCTAssertEqual(p.mediaType, .tvShow)
+        XCTAssertEqual(p.title, "Frieren")
+        XCTAssertEqual(p.episode, 12)
+    }
+
+    // Negative case: bracket-less "Title - NN" must not be falsely typed as TV.
+    func testDashNumberWithoutBracketsStaysMovie() {
+        let p = FilenameParser.parse("Apollo - 13.mkv")
+        XCTAssertEqual(p.mediaType, .movie)
+    }
 }

@@ -33,9 +33,14 @@ enum AppIcon {
 
         guard let ctx = NSGraphicsContext.current?.cgContext else { return image }
 
-        // Apple "squircle" corner radius is ≈22.37% of the edge.
-        let radius = size * 0.2237
-        let rect = CGRect(x: 0, y: 0, width: size, height: size)
+        // macOS Big Sur+ icon spec: 1024 canvas, ~824 squircle centered,
+        // ~100 transparent padding each side. Without this the tile looks
+        // oversized vs system icons in the Dock and App Switcher.
+        let tile = size * (824.0 / 1024.0)
+        let inset = (size - tile) / 2
+        // Apple "squircle" corner radius is ≈22.37% of the tile edge.
+        let radius = tile * 0.2237
+        let rect = CGRect(x: inset, y: inset, width: tile, height: tile)
         let squircle = CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
 
         // Background gradient — slight top-down sheen so the flat black
@@ -48,16 +53,18 @@ enum AppIcon {
                                   colors: colors,
                                   locations: [0, 1])!
         ctx.drawLinearGradient(gradient,
-                               start: CGPoint(x: 0, y: size),
-                               end: CGPoint(x: 0, y: 0),
+                               start: CGPoint(x: 0, y: rect.maxY),
+                               end: CGPoint(x: 0, y: rect.minY),
                                options: [])
         ctx.restoreGState()
 
         // All foreground geometry uses a normalized 0…1024 coordinate
         // system regardless of the requested size, so callers can render
-        // any resolution without retuning numbers.
-        let scale = size / 1024.0
+        // any resolution without retuning numbers. Translate+scale into
+        // the inset tile so the artwork respects macOS icon padding.
+        let scale = tile / 1024.0
         ctx.saveGState()
+        ctx.translateBy(x: inset, y: inset)
         ctx.scaleBy(x: scale, y: scale)
 
         let pink = accent.cgColor
