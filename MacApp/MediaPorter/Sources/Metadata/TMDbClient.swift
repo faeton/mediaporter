@@ -40,18 +40,22 @@ public struct EpisodeMetadata {
     public var posterData: Data?
     public var showPosterURL: String?
     public var showPosterData: Data?
+    public var showBackdropURL: String?
+    public var showBackdropData: Data?
     public var tmdbShowID: Int?
 
     public init(showName: String, season: Int, episode: Int, episodeTitle: String?,
                 episodeID: String, year: Int?, genre: String?, overview: String?,
                 longOverview: String?, network: String?, posterURL: String?,
                 posterData: Data?, showPosterURL: String?, showPosterData: Data?,
+                showBackdropURL: String? = nil, showBackdropData: Data? = nil,
                 tmdbShowID: Int?) {
         self.showName = showName; self.season = season; self.episode = episode
         self.episodeTitle = episodeTitle; self.episodeID = episodeID; self.year = year
         self.genre = genre; self.overview = overview; self.longOverview = longOverview
         self.network = network; self.posterURL = posterURL; self.posterData = posterData
         self.showPosterURL = showPosterURL; self.showPosterData = showPosterData
+        self.showBackdropURL = showBackdropURL; self.showBackdropData = showBackdropData
         self.tmdbShowID = tmdbShowID
     }
 }
@@ -75,6 +79,7 @@ enum TMDbError: LocalizedError {
 public enum TMDbClient {
     private static let baseURL = "https://api.themoviedb.org/3"
     private static let posterBaseURL = "https://image.tmdb.org/t/p/w500"
+    private static let backdropBaseURL = "https://image.tmdb.org/t/p/w780"
     private static let requestTimeout: TimeInterval = 10
 
     /// Fetch JSON from a URL with an explicit timeout. URLSession.shared.data(from:)
@@ -165,6 +170,7 @@ public enum TMDbClient {
         let json = ((try? await getJSON(url)) as? [String: Any]) ?? [:]
         let firstAir = json["first_air_date"] as? String ?? ""
         let posterPath = json["poster_path"] as? String
+        let backdropPath = json["backdrop_path"] as? String
         let genre = (json["genres"] as? [[String: Any]])?.first?["name"] as? String
         let network = (json["networks"] as? [[String: Any]])?.first?["name"] as? String
         return ResolvedShow(
@@ -174,6 +180,8 @@ public enum TMDbClient {
             network: network,
             showPosterURL: posterPath.map { "\(posterBaseURL)\($0)" },
             showPosterData: nil,
+            showBackdropURL: backdropPath.map { "\(backdropBaseURL)\($0)" },
+            showBackdropData: nil,
             tmdbShowID: id
         )
     }
@@ -214,6 +222,7 @@ public enum TMDbClient {
               let showID = show["id"] as? Int else { return nil }
 
         let showPosterPath = show["poster_path"] as? String
+        let showBackdropPath = show["backdrop_path"] as? String
         let firstAir = show["first_air_date"] as? String ?? ""
 
         // Step 2: Fetch episode details
@@ -245,6 +254,8 @@ public enum TMDbClient {
             posterData: nil,
             showPosterURL: showPosterPath.map { "\(posterBaseURL)\($0)" },
             showPosterData: nil,
+            showBackdropURL: showBackdropPath.map { "\(backdropBaseURL)\($0)" },
+            showBackdropData: nil,
             tmdbShowID: showID
         )
     }

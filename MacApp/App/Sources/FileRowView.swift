@@ -132,7 +132,7 @@ struct FileRowView: View {
 
     private var metaRow: some View {
         HStack(spacing: 6) {
-            StatusDot(status: job.status, theme: theme, accent: accent)
+            StatusDot(status: job.status, hasError: job.error != nil, theme: theme, accent: accent)
             if job.decision != nil {
                 ActionChip(action: job.effectiveAction, theme: theme)
             }
@@ -790,6 +790,7 @@ private struct MetaDot: View {
 
 private struct StatusDot: View {
     let status: JobStatus
+    let hasError: Bool
     let theme: Theme
     let accent: AccentKey
 
@@ -810,7 +811,8 @@ private struct StatusDot: View {
     }
 
     private var isAnimating: Bool {
-        status == .analyzing || status == .transcoding || status == .syncing
+        if status == .uploaded && !hasError { return true }
+        return status == .analyzing || status == .transcoding || status == .syncing
     }
 
     private var dotColor: Color {
@@ -822,7 +824,10 @@ private struct StatusDot: View {
         case .tagging: return Color(hex: 0xBF5AF2)
         case .ready: return Color(red: 0.19, green: 0.82, blue: 0.35)
         case .syncing: return accent.solid
-        case .uploaded: return Color(red: 0.19, green: 0.82, blue: 0.35)
+        // While the batch ATC register is in flight every uploaded row sits
+        // here. Animate it so the user sees the work-in-progress instead of
+        // a static green "done"-looking dot.
+        case .uploaded: return hasError ? Color(red: 1.0, green: 0.58, blue: 0.0) : accent.solid
         case .synced: return Color(red: 0.19, green: 0.82, blue: 0.35)
         case .failed: return Color(red: 1.0, green: 0.27, blue: 0.23)
         }
@@ -836,7 +841,7 @@ private struct StatusDot: View {
         case .tagging: return "Tagging"
         case .ready: return "Ready to send"
         case .syncing: return "Uploading"
-        case .uploaded: return "Uploaded"
+        case .uploaded: return hasError ? "Needs sync" : "Syncing…"
         case .synced: return "Synced"
         case .failed: return "Failed"
         }
@@ -849,8 +854,12 @@ private struct PosterThumb: View {
     let density: Density
     @State private var previewing = false
 
+    private var thumbData: Data? {
+        job.metadata?.previewThumbData
+    }
+
     private var hasPoster: Bool {
-        guard let data = job.metadata?.posterData, NSImage(data: data) != nil else { return false }
+        guard let data = thumbData, NSImage(data: data) != nil else { return false }
         return true
     }
 
@@ -858,7 +867,7 @@ private struct PosterThumb: View {
         ZStack(alignment: .bottomTrailing) {
             theme.posterBg
                 .overlay {
-                    if let data = job.metadata?.posterData, let image = NSImage(data: data) {
+                    if let data = thumbData, let image = NSImage(data: data) {
                         Image(nsImage: image)
                             .resizable()
                             .aspectRatio(contentMode: .fill)

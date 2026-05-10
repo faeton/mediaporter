@@ -18,6 +18,12 @@ public struct ResolvedShow: Equatable, Sendable {
     public var network: String?
     public var showPosterURL: String?
     public var showPosterData: Data?
+    /// Horizontal show artwork (TMDb backdrop_path). 16:9, separate from the
+    /// 2:3 poster. Used as the primary thumb in the Mac app row preview so
+    /// every episode of one show shares the same banner — never sent to the
+    /// device (TV.app's show-detail hero is hardcoded to use an episode still).
+    public var showBackdropURL: String?
+    public var showBackdropData: Data?
     public var tmdbShowID: Int?
 
     public init(
@@ -27,6 +33,8 @@ public struct ResolvedShow: Equatable, Sendable {
         network: String? = nil,
         showPosterURL: String? = nil,
         showPosterData: Data? = nil,
+        showBackdropURL: String? = nil,
+        showBackdropData: Data? = nil,
         tmdbShowID: Int? = nil
     ) {
         self.showName = showName
@@ -35,6 +43,8 @@ public struct ResolvedShow: Equatable, Sendable {
         self.network = network
         self.showPosterURL = showPosterURL
         self.showPosterData = showPosterData
+        self.showBackdropURL = showBackdropURL
+        self.showBackdropData = showBackdropData
         self.tmdbShowID = tmdbShowID
     }
 }

@@ -20,6 +20,19 @@ public enum ResolvedMetadata {
         case .tvEpisode(let e): return e.posterData ?? e.showPosterData
         }
     }
+
+    /// Preview thumb for the Mac app UI. Prefers the show's horizontal
+    /// backdrop for TV episodes (one banner shared across the cluster) so
+    /// the row preview is consistent and recognisable. Falls back to the
+    /// per-episode still, then the vertical poster, then the movie poster.
+    /// Never goes to the device — that path uses `posterData`.
+    public var previewThumbData: Data? {
+        switch self {
+        case .movie(let m): return m.posterData
+        case .tvEpisode(let e):
+            return e.showBackdropData ?? e.posterData ?? e.showPosterData
+        }
+    }
 }
 
 public enum MetadataLookup {

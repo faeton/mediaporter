@@ -337,6 +337,8 @@ public class PipelineController {
             posterData: posterData,
             showPosterURL: show.showPosterURL,
             showPosterData: show.showPosterData,
+            showBackdropURL: show.showBackdropURL,
+            showBackdropData: show.showBackdropData,
             tmdbShowID: show.tmdbShowID
         )
     }
@@ -406,6 +408,9 @@ public class PipelineController {
         }
         if let url = resolved.showPosterURL {
             resolved.showPosterData = await TMDbClient.downloadPoster(urlString: url)
+        }
+        if let url = resolved.showBackdropURL {
+            resolved.showBackdropData = await TMDbClient.downloadPoster(urlString: url)
         }
         if resolved.showPosterData == nil {
             resolved.showPosterData = PosterGenerator.generate(
