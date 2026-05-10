@@ -17,7 +17,7 @@ public enum ResolvedMetadata {
     public var posterData: Data? {
         switch self {
         case .movie(let m): return m.posterData
-        case .tvEpisode(let e): return e.showPosterData ?? e.posterData
+        case .tvEpisode(let e): return e.posterData ?? e.showPosterData
         }
     }
 }
@@ -29,7 +29,9 @@ public enum MetadataLookup {
         showOverride: String? = nil,
         seasonOverride: Int? = nil,
         episodeOverride: Int? = nil,
-        apiKey: String?
+        apiKey: String?,
+        sourceURL: URL? = nil,
+        duration: TimeInterval? = nil
     ) async -> ResolvedMetadata? {
         let parsed = FilenameParser.parse(path.lastPathComponent)
 
@@ -40,7 +42,9 @@ public enum MetadataLookup {
                 showOverride: showOverride,
                 seasonOverride: seasonOverride,
                 episodeOverride: episodeOverride,
-                apiKey: apiKey
+                apiKey: apiKey,
+                sourceURL: sourceURL ?? path,
+                duration: duration
             )
         case .movie:
             return await lookupMovie(parsed: parsed, apiKey: apiKey)
@@ -93,15 +97,18 @@ public enum MetadataLookup {
         showOverride: String?,
         seasonOverride: Int?,
         episodeOverride: Int?,
-        apiKey: String?
+        apiKey: String?,
+        sourceURL: URL?,
+        duration: TimeInterval?
     ) async -> ResolvedMetadata? {
         let showName = showOverride ?? parsed.title
         let season = seasonOverride ?? parsed.season ?? 1
         let episode = episodeOverride ?? parsed.episode ?? 1
 
         guard let apiKey, !apiKey.isEmpty else {
-            return .tvEpisode(fallbackEpisode(
-                showName: showName, season: season, episode: episode, parsed: parsed
+            return .tvEpisode(await fallbackEpisode(
+                showName: showName, season: season, episode: episode, parsed: parsed,
+                sourceURL: sourceURL, duration: duration
             ))
         }
 
@@ -109,8 +116,9 @@ public enum MetadataLookup {
             guard var meta = try await TMDbClient.searchTVEpisode(
                 showName: showName, season: season, episode: episode, apiKey: apiKey
             ) else {
-                return .tvEpisode(fallbackEpisode(
-                    showName: showName, season: season, episode: episode, parsed: parsed
+                return .tvEpisode(await fallbackEpisode(
+                    showName: showName, season: season, episode: episode, parsed: parsed,
+                    sourceURL: sourceURL, duration: duration
                 ))
             }
 
@@ -121,16 +129,38 @@ public enum MetadataLookup {
             if let url = meta.posterURL {
                 meta.posterData = await TMDbClient.downloadPoster(urlString: url)
             }
-            // Fallback poster
-            if meta.showPosterData == nil && meta.posterData == nil {
-                meta.showPosterData = PosterGenerator.generate(title: meta.showName, year: meta.year)
+            // Episode-still fallback chain: ffmpeg extraction → landscape
+            // synthetic. Show portrait stays in `showPosterData` for any
+            // future season-level use; we do NOT route it into posterData
+            // because it gets squished into TV.app's 16:9 episode tile.
+            if meta.posterData == nil {
+                meta.posterData = await episodePosterFallback(
+                    sourceURL: sourceURL, duration: duration,
+                    showName: meta.showName, season: meta.season, episode: meta.episode
+                )
             }
             return .tvEpisode(meta)
         } catch {
-            return .tvEpisode(fallbackEpisode(
-                showName: showName, season: season, episode: episode, parsed: parsed
+            return .tvEpisode(await fallbackEpisode(
+                showName: showName, season: season, episode: episode, parsed: parsed,
+                sourceURL: sourceURL, duration: duration
             ))
         }
+    }
+
+    /// Episode-still fallback: ffmpeg-extracted frame from source if
+    /// available, otherwise a 1280×720 landscape synthetic. Mirrors
+    /// `PipelineController.resolveEpisodePoster` for the non-cluster path.
+    private static func episodePosterFallback(
+        sourceURL: URL?, duration: TimeInterval?,
+        showName: String, season: Int, episode: Int
+    ) async -> Data? {
+        if let sourceURL, let duration,
+           let extracted = await StillExtractor.extract(from: sourceURL, duration: duration) {
+            return extracted
+        }
+        let label = String(format: "%@ S%02dE%02d", showName, season, episode)
+        return PosterGenerator.generateLandscape(title: label)
     }
 
     private static func fallbackMovie(parsed: ParsedFilename) -> MovieMetadata {
@@ -148,9 +178,14 @@ public enum MetadataLookup {
     }
 
     private static func fallbackEpisode(
-        showName: String, season: Int, episode: Int, parsed: ParsedFilename
-    ) -> EpisodeMetadata {
-        EpisodeMetadata(
+        showName: String, season: Int, episode: Int, parsed: ParsedFilename,
+        sourceURL: URL?, duration: TimeInterval?
+    ) async -> EpisodeMetadata {
+        let posterData = await episodePosterFallback(
+            sourceURL: sourceURL, duration: duration,
+            showName: showName, season: season, episode: episode
+        )
+        return EpisodeMetadata(
             showName: showName,
             season: season,
             episode: episode,
@@ -162,7 +197,7 @@ public enum MetadataLookup {
             longOverview: nil,
             network: nil,
             posterURL: nil,
-            posterData: nil,
+            posterData: posterData,
             showPosterURL: nil,
             showPosterData: PosterGenerator.generate(title: showName, year: parsed.year),
             tmdbShowID: nil

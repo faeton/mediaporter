@@ -269,7 +269,10 @@ public class PipelineController {
         if parsed.mediaType == .tvShow {
             let clusterID = TVShowCluster.key(showName: parsed.title, year: parsed.year)
             job.clusterID = clusterID
-            job.metadata = .tvEpisode(await resolveTVEpisode(parsed: parsed, clusterID: clusterID))
+            job.metadata = .tvEpisode(await resolveTVEpisode(
+                parsed: parsed, clusterID: clusterID,
+                sourceURL: job.inputURL, duration: job.mediaInfo?.duration
+            ))
             return
         }
 
@@ -290,7 +293,9 @@ public class PipelineController {
 
     /// Build an `EpisodeMetadata` for a TV file. Resolves the cluster's show
     /// (cached after the first file) then fetches per-episode info.
-    private func resolveTVEpisode(parsed: ParsedFilename, clusterID: String) async -> EpisodeMetadata {
+    private func resolveTVEpisode(
+        parsed: ParsedFilename, clusterID: String, sourceURL: URL?, duration: TimeInterval?
+    ) async -> EpisodeMetadata {
         let season = parsed.season ?? 1
         let episode = parsed.episode ?? 1
         let episodeID = String(format: "S%02dE%02d", season, episode)
@@ -312,10 +317,10 @@ public class PipelineController {
             }
         }
 
-        var posterData: Data? = nil
-        if let url = stillURL {
-            posterData = await TMDbClient.downloadPoster(urlString: url)
-        }
+        let posterData = await resolveEpisodePoster(
+            stillURL: stillURL, sourceURL: sourceURL, duration: duration,
+            showName: show.showName, season: season, episode: episode
+        )
 
         return EpisodeMetadata(
             showName: show.showName,
@@ -411,6 +416,30 @@ public class PipelineController {
         return resolved
     }
 
+    /// Episode poster resolution chain — TMDb still → ffmpeg-extracted frame
+    /// → 1280×720 landscape synthetic. The accessor at MetadataLookup falls
+    /// through to `showPosterData` if this is nil, but that show portrait
+    /// gets squished into TV.app's 16:9 episode tile, so we'd rather upload a
+    /// landscape placeholder than let the show poster reach the device.
+    private func resolveEpisodePoster(
+        stillURL: String?,
+        sourceURL: URL?,
+        duration: TimeInterval?,
+        showName: String,
+        season: Int,
+        episode: Int
+    ) async -> Data? {
+        if let stillURL, let data = await TMDbClient.downloadPoster(urlString: stillURL) {
+            return data
+        }
+        if let sourceURL, let duration,
+           let extracted = await StillExtractor.extract(from: sourceURL, duration: duration) {
+            return extracted
+        }
+        let label = String(format: "%@ S%02dE%02d", showName, season, episode)
+        return PosterGenerator.generateLandscape(title: label)
+    }
+
     private func recordPendingPick(
         clusterID: String, query: String, candidates: [TVShowCandidate]
     ) {
@@ -472,7 +501,6 @@ public class PipelineController {
             var epTitle: String? = nil
             var stillURL: String? = nil
             var overview: String? = nil
-            var posterData: Data? = nil
             if let id = show.tmdbShowID, !tmdbAPIKey.isEmpty {
                 if let info = try? await TMDbClient.fetchEpisodeOnly(
                     showID: id, season: season, episode: episode, apiKey: tmdbAPIKey
@@ -481,10 +509,14 @@ public class PipelineController {
                     stillURL = info.stillURL
                     overview = info.overview
                 }
-                if let url = stillURL {
-                    posterData = await TMDbClient.downloadPoster(urlString: url)
-                }
             }
+
+            let posterData = await resolveEpisodePoster(
+                stillURL: stillURL,
+                sourceURL: job.inputURL,
+                duration: job.mediaInfo?.duration,
+                showName: show.showName, season: season, episode: episode
+            )
 
             job.metadata = .tvEpisode(EpisodeMetadata(
                 showName: show.showName,
