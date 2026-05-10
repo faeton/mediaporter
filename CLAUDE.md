@@ -366,8 +366,9 @@ Keep the Python module as the reference implementation — land fixes in Python 
 
 ## Next Steps
 
-1. **Multi-episode batch sync** — Test syncing multiple episodes in a single ATC session (pipelined uploader should handle this naturally now).
-2. **Orphan detection via AssetManifest** — current cleanup purges everything under `/iTunes_Control/Music/F*/`. Cross-referencing with `AssetManifest` paths would let us keep legitimately-registered content and only remove true orphans.
+1. **Interleave registration with uploads** — current pipeline does `transcode+upload×N → register×1` (single ATC session at end). The register call takes ~30s/file because medialibraryd commits the whole batch on `SyncFinished`, and that wait happens *after* all bytes are already on the device, surfacing as a long "Registering N files…" dead-air phase in the UI. Plan: open the ATC session up front (handshake + sync plist + `FinishedSyncingMetadata` ~3s), receive `AssetManifest`, then send each file's `FileBegin`/`FileComplete` the moment its AFC upload finishes — not in a burst at the end. medialibraryd starts processing each entry as it lands instead of getting hit with N entries at the terminal `SyncFinished`. Expected: most of the current finalize-phase dead air folds into the upload phase. Risk: ATC session has to stay open for the whole run (Ping/Pong keepalive already handles this but needs a 25-file stress test). Touch points: split `MacApp/MediaPorter/Sources/Sync/SyncEngine.swift::registerUploadedFiles` into open/per-file/close; convert `ATCSession.uploadAndRegister` to streaming form; rework `PipelineController.runPipelined` to start the session before the upload loop. Port to Python `src/mediaporter/sync/__init__.py` after Swift validation.
+2. **Multi-episode batch sync** — Test syncing multiple episodes in a single ATC session (pipelined uploader should handle this naturally now).
+3. **Orphan detection via AssetManifest** — current cleanup purges everything under `/iTunes_Control/Music/F*/`. Cross-referencing with `AssetManifest` paths would let us keep legitimately-registered content and only remove true orphans.
 
 ## Resolved Questions (Updated 2026-04-06)
 

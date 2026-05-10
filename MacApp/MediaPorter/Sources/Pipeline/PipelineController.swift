@@ -1295,8 +1295,11 @@ public class PipelineController {
         if job.needsWork {
             job.status = .transcoding
             job.progress = 0
-            let verb = job.needsReencode ? "Transcoding" : "Remuxing"
-            overallStatus = "\(verb) \(job.fileName)..."
+            // Don't write to overallStatus here — transcode/tag run in
+            // parallel with upload. The Transcode pill in the bottom
+            // timeline already conveys progress; clobbering overallStatus
+            // makes the device card flicker between "Uploading" and
+            // "Tagging" mid-batch.
 
             let outputURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)
@@ -1342,7 +1345,8 @@ public class PipelineController {
 
         if let meta = job.metadata, let output = job.outputURL, output != job.inputURL {
             job.status = .tagging
-            overallStatus = "Tagging \(job.fileName)..."
+            // See comment above — bottom timeline carries this; don't fight
+            // the upload phase for overallStatus.
             try? await Tagger.tag(file: output, metadata: meta, mediaInfo: info)
             job.status = .ready
         }
