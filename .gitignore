@@ -18,3 +18,10 @@ scripts/test_*.py
 *.sqlitedb
 .venv/
 .claude/
+
+# site/ (Astro + Cloudflare Pages)
+site/node_modules/
+site/dist/
+site/.astro/
+site/.wrangler/
+site/.dev.vars

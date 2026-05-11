@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none" role="img" aria-label="MediaPorter mark">
+  <title>MediaPorter</title>
+  <rect x="28" y="56" width="56" height="144" rx="8" fill="currentColor"/>
+  <g fill="#000" fill-opacity="0.85">
+    <rect x="36" y="64"  width="8" height="10" rx="2"/>
+    <rect x="36" y="82"  width="8" height="10" rx="2"/>
+    <rect x="36" y="100" width="8" height="10" rx="2"/>
+    <rect x="36" y="118" width="8" height="10" rx="2"/>
+    <rect x="36" y="136" width="8" height="10" rx="2"/>
+    <rect x="36" y="154" width="8" height="10" rx="2"/>
+    <rect x="36" y="172" width="8" height="10" rx="2"/>
+    <rect x="68" y="64"  width="8" height="10" rx="2"/>
+    <rect x="68" y="82"  width="8" height="10" rx="2"/>
+    <rect x="68" y="100" width="8" height="10" rx="2"/>
+    <rect x="68" y="118" width="8" height="10" rx="2"/>
+    <rect x="68" y="136" width="8" height="10" rx="2"/>
+    <rect x="68" y="154" width="8" height="10" rx="2"/>
+    <rect x="68" y="172" width="8" height="10" rx="2"/>
+  </g>
+  <path d="M84 128 C 108 84, 132 172, 156 128"
+        stroke="currentColor" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <rect x="156" y="40" width="80" height="176" rx="14" stroke="currentColor" stroke-width="10" fill="none"/>
+  <path d="M180 104 L 216 128 L 180 152 Z" fill="currentColor"/>
+</svg>

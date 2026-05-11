@@ -1,0 +1,59 @@
+---
+import Base from "../layouts/Base.astro";
+// In v1.1 this can be auto-generated from the root CHANGELOG.md via Astro content collections.
+// Keeping it static now to avoid coupling the site build to source layout changes in MacApp/.
+const releases = [
+  {
+    version: "0.3.2",
+    date: "2026-05-10",
+    notes: [
+      "Skip files already on the device (de-duplicate before upload).",
+      "Mid-sync disk-space polling — aborts cleanly if iOS background traffic eats free space.",
+      "Parallel analysis (probe + TMDb) with per-cluster guard.",
+      "Streaming registration — files appear in the TV app as they upload, not after.",
+      "Anime episode handling: parser, picker race fix, burned-in episode numbers.",
+      "Programmatic dock icon. Cmd-Q guard while syncing.",
+    ],
+  },
+];
+---
+<Base title="Changelog — MediaPorter" description="Release notes for MediaPorter.">
+  <section class="section">
+    <div class="container narrow">
+      <span class="md-tag accent">## changelog</span>
+      <h1 style="margin-top: var(--sp-3); margin-bottom: var(--sp-8);">Changelog</h1>
+
+      {releases.map((r) => (
+        <article class="release">
+          <header class="rel-head">
+            <h2>v{r.version}</h2>
+            <span class="md-comment">// {r.date}</span>
+          </header>
+          <ul>
+            {r.notes.map((n) => <li>{n}</li>)}
+          </ul>
+        </article>
+      ))}
+
+      <p class="md-comment" style="margin-top: var(--sp-12);">
+        # Older entries live in CHANGELOG.md in the repository.
+      </p>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .narrow { max-width: 760px; }
+  .release { padding-block: var(--sp-8); border-bottom: 1px solid var(--border); }
+  .release:last-of-type { border-bottom: none; }
+  .rel-head { display: flex; align-items: baseline; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+  .rel-head h2 { font-family: var(--font-display); }
+  .release ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+  .release li { color: var(--text-2); padding-left: var(--sp-6); position: relative; }
+  .release li::before {
+    content: "+";
+    position: absolute; left: 0;
+    font-family: var(--font-mono);
+    color: var(--accent);
+  }
+</style>

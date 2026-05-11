@@ -1,0 +1,7 @@
+# Cloudflare Pages deploy config.
+# Deploy with: npm run deploy
+# (Equivalent to: npx wrangler pages deploy dist --project-name=porter-md)
+
+name = "porter-md"
+compatibility_date = "2026-05-01"
+pages_build_output_dir = "dist"

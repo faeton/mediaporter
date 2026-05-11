@@ -1,0 +1,271 @@
+---
+import Base from "../layouts/Base.astro";
+import MarkAnimated from "../components/MarkAnimated.astro";
+
+const features = [
+  {
+    tag: "transcode",
+    title: "Smart, not stubborn",
+    body: "Only re-encodes what your device can't play. HEVC stays HEVC. AAC and EAC3 pass through. AC3 → AAC because the iPad TV app silently drops AC3 from its audio switcher.",
+  },
+  {
+    tag: "metadata",
+    title: "Posters, seasons, sort titles",
+    body: "Pulls metadata from TMDb, writes the full TV-app field set (sort titles, episode_sort_id, artwork via Airlock). Episodes group correctly. No \"0.\" prefix bug.",
+  },
+  {
+    tag: "anime",
+    title: "Anime-aware",
+    body: "Detects sequential episodes, handles burned-in episode numbers, deduplicates against what's already on the device.",
+  },
+  {
+    tag: "sync",
+    title: "Pipelined sync, not 30-minute waits",
+    body: "Files appear in the TV app as they finish uploading — not after a long \"finalizing\" wall. Mid-sync disk-space checks. Cmd-Q guard while syncing.",
+  },
+  {
+    tag: "native",
+    title: "Native macOS",
+    body: "Built in Swift. Dark by default. Quits cleanly. Sits in the dock, not in your menu bar — unless you ask.",
+  },
+  {
+    tag: "private",
+    title: "No telemetry. None.",
+    body: "We don't collect data. Not anonymous, not aggregated, not \"for product improvement.\" The app talks to your device, and to TMDb for posters. That's it.",
+  },
+];
+---
+<Base>
+  <!-- HERO -->
+  <section class="hero section">
+    <div class="container hero-grid">
+      <div class="hero-copy">
+        <span class="md-tag accent">## porter.md</span>
+        <h1>
+          Media,
+          <span class="accent">ported.</span><br />
+          <span class="muted">Deep on your devices.</span>
+        </h1>
+        <p class="lede">
+          A native macOS app that transcodes and syncs your video library straight into the
+          built-in iOS/iPadOS <strong>TV app</strong>. No iCloud round-trip. No browser uploader.
+          No "watch on the laptop" workaround.
+        </p>
+
+        <div class="cta-row">
+          <a href="#download" class="btn btn-primary">
+            Download for macOS
+            <span class="md-tag" style="background: rgba(10,10,12,0.15); border-color: transparent; color: #0A0A0C;">v0.3.2</span>
+          </a>
+          <a href="https://github.com/faeton/mediaporter" class="btn btn-ghost" rel="noopener">View source</a>
+        </div>
+
+        <p class="md-comment"># Requires macOS 14+ · iOS / iPadOS 15+</p>
+      </div>
+
+      <div class="hero-mark">
+        <div class="mark-frame">
+          <MarkAnimated size={320} />
+        </div>
+        <p class="caption md-comment">
+          // film → handoff → device
+        </p>
+      </div>
+    </div>
+
+    <!-- Markdown-style hero detail strip -->
+    <div class="container code-strip">
+      <pre class="code"><span class="c"># What MediaPorter does, in one line:</span>
+<span class="k">drag</span> ~/Movies/Severance.S02 <span class="k">→</span> <span class="s">"iPad Pro"</span> <span class="c"># → 8 episodes, posters, sort order, audio switcher fixed</span></pre>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section class="section" id="features">
+    <div class="container">
+      <header class="section-head">
+        <span class="md-tag">## features</span>
+        <h2>Built for the way the TV app actually works.</h2>
+        <p class="lede muted">
+          Every feature here exists because we found a specific way the iPad TV app fails when fed
+          arbitrary video. See <a href="/changelog" class="link">the changelog</a> for the full trail.
+        </p>
+      </header>
+
+      <div class="feature-grid">
+        {features.map((f) => (
+          <article class="card feature">
+            <span class="md-tag accent">{f.tag}</span>
+            <h3>{f.title}</h3>
+            <p>{f.body}</p>
+          </article>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section class="section" id="how">
+    <div class="container how-grid">
+      <div>
+        <span class="md-tag">## how</span>
+        <h2>One drop. Three phases.</h2>
+        <p class="muted lede">
+          MediaPorter watches your library, plans what to do, and shows you the receipts before
+          a single byte moves. You stay in control.
+        </p>
+      </div>
+      <ol class="how-steps">
+        <li>
+          <span class="step">01</span>
+          <div>
+            <h3>Analyze</h3>
+            <p>Probe codecs, audio tracks, subtitles. Match titles to TMDb. Detect anime episode numbers. Skip files already on the device.</p>
+          </div>
+        </li>
+        <li>
+          <span class="step">02</span>
+          <div>
+            <h3>Plan</h3>
+            <p>Per file: keep as-is, remux, or transcode. Audio: pass-through or convert. Disk space check. You approve before anything runs.</p>
+          </div>
+        </li>
+        <li>
+          <span class="step">03</span>
+          <div>
+            <h3>Port</h3>
+            <p>Transcode in parallel. Upload to the device over USB or Wi-Fi. Register each file with the TV app as it lands — not after a 30-minute wait.</p>
+          </div>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- DOWNLOAD -->
+  <section class="section download" id="download">
+    <div class="container">
+      <div class="card download-card">
+        <span class="md-tag accent">## download</span>
+        <h2>Get MediaPorter.</h2>
+        <p class="muted">
+          The macOS app is in private beta while we await Apple Developer Program approval.
+          Drop your email and we'll send a signed build the day notarization lands.
+        </p>
+
+        <form class="email-form" action="mailto:hi@porter.md" method="post" enctype="text/plain">
+          <input type="email" name="email" placeholder="you@example.com" required aria-label="Email"/>
+          <button type="submit" class="btn btn-primary">Notify me</button>
+        </form>
+
+        <p class="md-comment"># No tracking pixel. The form posts a plain mailto: — your client opens.</p>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .hero { padding-top: var(--sp-16); }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    gap: var(--sp-16);
+    align-items: center;
+  }
+  @media (max-width: 880px) {
+    .hero-grid { grid-template-columns: 1fr; gap: var(--sp-12); }
+    .hero-mark { order: -1; display: flex; justify-content: center; }
+  }
+  .hero-copy h1 { margin-top: var(--sp-4); }
+  .hero-copy h1 .accent { color: var(--accent); }
+  .hero-copy h1 .muted { color: var(--text-2); font-weight: 600; }
+  .lede {
+    margin-top: var(--sp-6);
+    font-size: 1.1875rem;
+    color: var(--text-2);
+    max-width: 56ch;
+  }
+  .lede.muted { color: var(--text-2); }
+  .lede strong { color: var(--text); }
+  .cta-row {
+    display: flex; flex-wrap: wrap; gap: var(--sp-3);
+    margin-top: var(--sp-8);
+  }
+
+  .hero-mark { display: flex; flex-direction: column; align-items: center; gap: var(--sp-4); }
+  .mark-frame {
+    width: 360px; max-width: 100%;
+    aspect-ratio: 1;
+    border-radius: var(--r-lg);
+    background:
+      radial-gradient(120% 120% at 30% 20%, rgba(236, 72, 153, 0.18), transparent 55%),
+      var(--surface);
+    border: 1px solid var(--border);
+    display: grid; place-items: center;
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.03),
+      0 30px 60px -30px rgba(236, 72, 153, 0.35);
+  }
+  .caption { margin: 0; }
+
+  .code-strip { margin-top: var(--sp-12); }
+
+  .section-head {
+    display: flex; flex-direction: column; gap: var(--sp-3);
+    margin-bottom: var(--sp-12); max-width: 64ch;
+  }
+  .muted { color: var(--text-2); }
+
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--sp-4);
+  }
+  @media (max-width: 880px) { .feature-grid { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 560px) { .feature-grid { grid-template-columns: 1fr; } }
+  .feature h3 { margin-block: var(--sp-3) var(--sp-2); }
+  .feature p { color: var(--text-2); }
+
+  .how-grid {
+    display: grid;
+    grid-template-columns: 1fr 1.4fr;
+    gap: var(--sp-16);
+  }
+  @media (max-width: 880px) { .how-grid { grid-template-columns: 1fr; gap: var(--sp-8); } }
+  .how-steps { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--sp-6); }
+  .how-steps li { display: grid; grid-template-columns: auto 1fr; gap: var(--sp-6); align-items: start; }
+  .how-steps .step {
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    color: var(--accent);
+    padding: 6px 10px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    border-radius: var(--r-sm);
+    background: var(--code-bg);
+  }
+  .how-steps h3 { margin-bottom: var(--sp-2); }
+  .how-steps p { color: var(--text-2); }
+
+  .download-card { text-align: center; padding-block: var(--sp-12); }
+  .download-card h2 { margin-block: var(--sp-3) var(--sp-4); }
+  .download-card .muted { max-width: 52ch; margin-inline: auto; }
+  .email-form {
+    display: flex; gap: var(--sp-2);
+    max-width: 460px; margin: var(--sp-8) auto var(--sp-3);
+    flex-wrap: wrap; justify-content: center;
+  }
+  .email-form input {
+    flex: 1; min-width: 220px;
+    padding: 12px 14px;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--border);
+    background: var(--code-bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 0.9375rem;
+  }
+  .email-form input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+</style>

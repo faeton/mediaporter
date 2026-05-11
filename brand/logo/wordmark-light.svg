@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 160" role="img" aria-label="MediaPorter">
+  <title>MediaPorter</title>
+  <style>
+    .w { font-family: -apple-system-rounded, ui-rounded, "SF Pro Rounded", "Nunito", sans-serif;
+         font-weight: 700; font-size: 96px; letter-spacing: -0.02em; }
+    .m { fill: #0A0A0C; }
+    .p { fill: #EC4899; }
+  </style>
+  <g transform="translate(0,8) scale(0.56)">
+    <rect x="28" y="56" width="56" height="144" rx="8" fill="#EC4899"/>
+    <g fill="#FFFFFF">
+      <rect x="36" y="64"  width="8" height="10" rx="2"/>
+      <rect x="36" y="82"  width="8" height="10" rx="2"/>
+      <rect x="36" y="100" width="8" height="10" rx="2"/>
+      <rect x="36" y="118" width="8" height="10" rx="2"/>
+      <rect x="36" y="136" width="8" height="10" rx="2"/>
+      <rect x="36" y="154" width="8" height="10" rx="2"/>
+      <rect x="36" y="172" width="8" height="10" rx="2"/>
+      <rect x="68" y="64"  width="8" height="10" rx="2"/>
+      <rect x="68" y="82"  width="8" height="10" rx="2"/>
+      <rect x="68" y="100" width="8" height="10" rx="2"/>
+      <rect x="68" y="118" width="8" height="10" rx="2"/>
+      <rect x="68" y="136" width="8" height="10" rx="2"/>
+      <rect x="68" y="154" width="8" height="10" rx="2"/>
+      <rect x="68" y="172" width="8" height="10" rx="2"/>
+    </g>
+    <path d="M84 128 C 108 84, 132 172, 156 128"
+          stroke="#EC4899" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <rect x="156" y="40" width="80" height="176" rx="14" stroke="#EC4899" stroke-width="10" fill="none"/>
+    <path d="M180 104 L 216 128 L 180 152 Z" fill="#EC4899"/>
+  </g>
+  <text x="170" y="112" class="w">
+    <tspan class="m">Media</tspan><tspan class="p">Porter</tspan>
+  </text>
+</svg>

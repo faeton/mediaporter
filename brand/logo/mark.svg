@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none" role="img" aria-label="MediaPorter mark">
+  <title>MediaPorter</title>
+  <!-- Film card (source) -->
+  <g>
+    <rect x="28" y="56" width="56" height="144" rx="8" fill="#EC4899"/>
+    <!-- film perforations -->
+    <g fill="#0A0A0C">
+      <rect x="36" y="64"  width="8" height="10" rx="2"/>
+      <rect x="36" y="82"  width="8" height="10" rx="2"/>
+      <rect x="36" y="100" width="8" height="10" rx="2"/>
+      <rect x="36" y="118" width="8" height="10" rx="2"/>
+      <rect x="36" y="136" width="8" height="10" rx="2"/>
+      <rect x="36" y="154" width="8" height="10" rx="2"/>
+      <rect x="36" y="172" width="8" height="10" rx="2"/>
+      <rect x="68" y="64"  width="8" height="10" rx="2"/>
+      <rect x="68" y="82"  width="8" height="10" rx="2"/>
+      <rect x="68" y="100" width="8" height="10" rx="2"/>
+      <rect x="68" y="118" width="8" height="10" rx="2"/>
+      <rect x="68" y="136" width="8" height="10" rx="2"/>
+      <rect x="68" y="154" width="8" height="10" rx="2"/>
+      <rect x="68" y="172" width="8" height="10" rx="2"/>
+    </g>
+  </g>
+  <!-- Handoff path: stylized M from film card to device -->
+  <path d="M84 128 C 108 84, 132 172, 156 128"
+        stroke="#EC4899" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- iPad / device silhouette (destination) -->
+  <rect x="156" y="40" width="80" height="176" rx="14" stroke="#EC4899" stroke-width="10" fill="none"/>
+  <!-- Play triangle docked at screen -->
+  <path d="M180 104 L 216 128 L 180 152 Z" fill="#EC4899"/>
+</svg>

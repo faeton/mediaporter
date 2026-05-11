@@ -1,0 +1,66 @@
+---
+import Base from "../layouts/Base.astro";
+const updated = "2026-05-11";
+---
+<Base title="Privacy — MediaPorter" description="MediaPorter collects no personal data. This page explains what the app does, what it doesn't, and what third parties it talks to.">
+  <section class="section">
+    <article class="prose">
+      <span class="md-tag accent">## privacy</span>
+      <h1 style="margin-top: var(--sp-3);">Privacy Policy</h1>
+      <p class="md-comment"># Last updated: {updated}</p>
+
+      <h2>The short version</h2>
+      <p>
+        <strong>MediaPorter does not collect personal data.</strong> No telemetry, no analytics,
+        no crash reports, no "anonymous usage statistics," no account, no sign-in.
+      </p>
+
+      <h2>What the app talks to</h2>
+      <ul>
+        <li>
+          <strong>Your iPhone, iPad, or iPod touch</strong>, over a USB cable or local Wi-Fi link.
+          The app uses the same Apple Mobile Device tunnel that iTunes / Finder used. Communication
+          is between your Mac and your device only.
+        </li>
+        <li>
+          <strong>The Movie Database (TMDb)</strong>, over HTTPS, to look up titles, posters,
+          season/episode information for the media you choose to port. TMDb requests carry the
+          query text and nothing that identifies you. We do not send your IP, device ID, or any
+          stable identifier alongside these requests.
+        </li>
+      </ul>
+
+      <h2>What stays on your Mac</h2>
+      <ul>
+        <li>Your media library and any files you drop onto MediaPorter.</li>
+        <li>Cached posters, probe results, and metadata used to render the app's UI.</li>
+        <li>App preferences (window size, last-used settings, recent device).</li>
+      </ul>
+      <p>None of the above ever leaves your machine.</p>
+
+      <h2>App Store privacy labels</h2>
+      <p>
+        On the App Store, MediaPorter is registered as <strong>Data Not Collected</strong> across
+        every category Apple offers. If that ever changes, this page changes first and a new app
+        version follows.
+      </p>
+
+      <h2>Children</h2>
+      <p>
+        MediaPorter is not directed at children under 13 and does not knowingly collect any data
+        from anyone, including children.
+      </p>
+
+      <h2>Changes</h2>
+      <p>
+        We will update this page if the app's behavior ever changes. The "Last updated" date at
+        the top of the page reflects the most recent revision.
+      </p>
+
+      <h2>Contact</h2>
+      <p>
+        Questions: <a href="mailto:hi@porter.md" class="link">hi@porter.md</a>.
+      </p>
+    </article>
+  </section>
+</Base>

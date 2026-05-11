@@ -1,0 +1,76 @@
+---
+const path = Astro.url.pathname.replace(/\/$/, "") || "/";
+const links: { href: string; label: string }[] = [
+  { href: "/changelog", label: "Changelog" },
+  { href: "/support", label: "Support" },
+  { href: "/privacy", label: "Privacy" },
+];
+---
+<header class="site-header">
+  <div class="container row">
+    <a href="/" class="brand" aria-label="MediaPorter home">
+      <svg width="28" height="28" viewBox="0 0 256 256" aria-hidden="true">
+        <rect x="28" y="56" width="56" height="144" rx="8" fill="#EC4899"/>
+        <path d="M84 128 C 108 84, 132 172, 156 128"
+              stroke="#EC4899" stroke-width="14" stroke-linecap="round" fill="none"/>
+        <rect x="156" y="40" width="80" height="176" rx="14" stroke="#EC4899" stroke-width="10" fill="none"/>
+        <path d="M180 104 L 216 128 L 180 152 Z" fill="#EC4899"/>
+      </svg>
+      <span class="wordmark"><span>Media</span><span class="accent">Porter</span><span class="tld">.md</span></span>
+    </a>
+
+    <nav aria-label="Primary">
+      <ul>
+        {links.map((l) => (
+          <li>
+            <a href={l.href} class:list={["nav-link", path === l.href && "is-active"]}>{l.label}</a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<style>
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: color-mix(in srgb, var(--bg) 80%, transparent);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid var(--border);
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-block: var(--sp-3);
+  }
+  .brand { display: inline-flex; align-items: center; gap: var(--sp-3); color: var(--text); }
+  .wordmark {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.125rem;
+    letter-spacing: -0.01em;
+  }
+  .wordmark .accent { color: var(--accent); }
+  .wordmark .tld {
+    color: var(--text-3);
+    font-family: var(--font-mono);
+    font-weight: 400;
+    font-size: 0.9rem;
+    margin-left: 2px;
+  }
+  nav ul { display: flex; gap: var(--sp-6); list-style: none; padding: 0; margin: 0; }
+  .nav-link {
+    color: var(--text-2);
+    font-size: 0.9375rem;
+    transition: color var(--dur-fast) var(--ease);
+  }
+  .nav-link:hover, .nav-link.is-active { color: var(--text); }
+  @media (max-width: 560px) {
+    nav ul { gap: var(--sp-4); }
+    .wordmark .tld { display: none; }
+  }
+</style>

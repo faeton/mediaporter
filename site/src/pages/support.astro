@@ -1,0 +1,66 @@
+---
+import Base from "../layouts/Base.astro";
+---
+<Base title="Support — MediaPorter" description="Help, bug reports, feature requests, and FAQ for MediaPorter.">
+  <section class="section">
+    <article class="prose">
+      <span class="md-tag accent">## support</span>
+      <h1 style="margin-top: var(--sp-3);">Support</h1>
+      <p>
+        MediaPorter is built by a small team (mostly one human plus a lot of AI pair-programming).
+        We read every report. Send what you've got — we'd rather hear it than not.
+      </p>
+
+      <h2>Get in touch</h2>
+      <ul>
+        <li><strong>Bug reports & feature requests:</strong> <a href="https://github.com/faeton/mediaporter/issues" class="link" rel="noopener">GitHub issues</a></li>
+        <li><strong>Email:</strong> <a href="mailto:hi@porter.md" class="link">hi@porter.md</a></li>
+      </ul>
+
+      <h2>Before filing a bug</h2>
+      <p>Include the following — it lets us diagnose in minutes instead of hours:</p>
+      <ul>
+        <li>MediaPorter version (Menu → About).</li>
+        <li>macOS version, and the iOS/iPadOS version on the target device.</li>
+        <li>What you dropped on the app (a file name and a brief description is fine).</li>
+        <li>What you expected vs. what happened.</li>
+        <li>If the sync failed: the error shown, and the last visible status line.</li>
+      </ul>
+
+      <h2>FAQ</h2>
+
+      <h3>Does this need iTunes?</h3>
+      <p>No. iTunes is gone on macOS. MediaPorter talks to your device directly, the same way Finder does for backups.</p>
+
+      <h3>Does the device need to be jailbroken?</h3>
+      <p>No. MediaPorter uses Apple's public device-pairing protocol — the same one Finder, Xcode, and <code>pymobiledevice3</code> use.</p>
+
+      <h3>Why does the first sync ask for a sudo password?</h3>
+      <p>
+        Until iOS 17.4, opening a USB tunnel to the device requires elevated privileges (<code>remoted</code>
+        needs to start a tunnel daemon). On 17.4 and later this is being phased out. We are tracking the
+        change and will drop the requirement as soon as we can verify it works across versions.
+      </p>
+
+      <h3>Will my source files be modified?</h3>
+      <p>No. MediaPorter reads your originals and writes transcoded outputs to a separate working folder
+        before uploading. Originals are never touched.</p>
+
+      <h3>Why is the audio different in the iPad TV app?</h3>
+      <p>
+        The iPad TV app silently removes AC3 audio tracks from its audio switcher. MediaPorter transcodes
+        AC3 to AAC so your tracks survive. AAC and EAC3 are passed through unchanged.
+      </p>
+
+      <h3>Why does an episode show up as "0. Episode Title"?</h3>
+      <p>
+        That's a TV-app rendering bug that hits when the <code>episode_sort_id</code> field is missing.
+        MediaPorter writes the full required metadata set, including <code>episode_sort_id</code>, so this
+        shouldn't happen with files we sync.
+      </p>
+
+      <h3>Does this work over Wi-Fi?</h3>
+      <p>Yes, after the first USB pairing. The connection auto-discovers on the same local network.</p>
+    </article>
+  </section>
+</Base>

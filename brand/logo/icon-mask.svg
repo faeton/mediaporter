@@ -1,0 +1,6 @@
+<!-- Apple HIG squircle mask (continuous curve, not simple rounded rect).
+     Use as clip-path or to generate the App Store icon shape.
+     Path adapted from the public-domain "iOS app icon" superellipse approximation. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <path d="M0,512 C0,128 128,0 512,0 C896,0 1024,128 1024,512 C1024,896 896,1024 512,1024 C128,1024 0,896 0,512 Z" fill="#000"/>
+</svg>

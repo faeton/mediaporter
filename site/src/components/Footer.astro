@@ -1,0 +1,59 @@
+---
+const year = new Date().getFullYear();
+---
+<footer class="site-footer">
+  <div class="container">
+    <div class="grid">
+      <div>
+        <div class="lockup">
+          <span class="word">MediaPorter</span>
+          <span class="tld">.md</span>
+        </div>
+        <p class="tagline md-comment"># Media, ported. Deep on your devices.</p>
+      </div>
+      <nav aria-label="Footer">
+        <h4>Product</h4>
+        <ul>
+          <li><a href="/#features">Features</a></li>
+          <li><a href="/changelog">Changelog</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Footer">
+        <h4>Help</h4>
+        <ul>
+          <li><a href="/support">Support</a></li>
+          <li><a href="/privacy">Privacy</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="base">
+      <span class="md-comment">// © {year} MediaPorter. All rights reserved.</span>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    border-top: 1px solid var(--border);
+    padding-block: var(--sp-12);
+    margin-top: var(--sp-24);
+    color: var(--text-2);
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1fr;
+    gap: var(--sp-12);
+    align-items: start;
+  }
+  @media (max-width: 720px) {
+    .grid { grid-template-columns: 1fr 1fr; gap: var(--sp-8); }
+  }
+  .lockup { font-family: var(--font-display); font-weight: 700; font-size: 1.25rem; color: var(--text); }
+  .lockup .tld { color: var(--text-3); font-family: var(--font-mono); font-weight: 400; font-size: 1rem; }
+  .tagline { margin-top: var(--sp-2); }
+  h4 { font-family: var(--font-mono); font-size: 0.8125rem; font-weight: 500; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 var(--sp-3); }
+  ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+  ul a { color: var(--text-2); }
+  ul a:hover { color: var(--text); }
+  .base { margin-top: var(--sp-12); padding-top: var(--sp-6); border-top: 1px solid var(--border); }
+</style>

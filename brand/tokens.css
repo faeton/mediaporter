@@ -1,0 +1,64 @@
+/* MediaPorter design tokens — generated from tokens.json. Edit there, not here. */
+:root {
+  color-scheme: dark;
+
+  /* Color */
+  --accent: #EC4899;
+  --accent-soft: #F9A8D4;
+  --accent-deep: #BE185D;
+  --bg: #0A0A0C;
+  --surface: #141418;
+  --surface-2: #1C1C22;
+  --border: #2A2A33;
+  --text: #F5F5F7;
+  --text-2: #A1A1AA;
+  --text-3: #71717A;
+  --code-bg: #16161B;
+  --code-comment: #6B7280;
+  --ok: #34D399;
+  --warn: #F59E0B;
+  --err: #F87171;
+
+  /* Typography */
+  --font-display: -apple-system-rounded, ui-rounded, "SF Pro Rounded", "Nunito", sans-serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Inter", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  --fs-h1: 3.5rem;
+  --fs-h2: 2.25rem;
+  --fs-h3: 1.5rem;
+  --fs-body: 1.0625rem;
+  --fs-caption: 0.875rem;
+  --fs-code: 0.9375rem;
+
+  /* Space */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+  --sp-24: 96px;
+  --sp-32: 128px;
+
+  /* Radius */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 16px;
+  --r-xl-pct: 22.37%;
+
+  /* Motion */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-fast: 200ms;
+  --dur-slow: 400ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
