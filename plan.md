@@ -122,19 +122,27 @@ feels dead). Code: `Sources/Sync/GateTest.swift`,
 - Wave model picks up jobs added mid-run (second drag-drop while wave 1
   is still analyzing) — they form the next wave.
 
-### 10b. Duplicate detection before sync
-- Today: dropping the same file twice happily creates two `item_extra` rows.
-  TV.app shows the episode twice. No code path checks "already on device."
-- Approach: after analyze, before transcode, pull
-  `/iTunes_Control/iTunes/MediaLibrary.sqlitedb` (we already have the
-  helper from #8 gate-test) and query `item_extra.location` /
-  `file_size` for matches. For TV jobs also query by
-  `tv_show_name + season_number + episode_number` so a re-encode with a
-  different filename still counts as duplicate.
-- UI: per-row chip "already on device" with a toggle "sync anyway".
-  Default: skip — the common case is "I dragged the season folder twice."
-- Cheap-ish: one DB pull per sync run (already done in `prepareSync`'s
-  AssetManifest path; we'd lift the pull earlier).
+### 10b. Duplicate detection before sync *(shipped 2026-05-11)*
+- `loadDeviceLibrary(device:)` pulls `MediaLibrary.sqlitedb` (+ wal/shm)
+  via AFC and SELECTs `(title, total_time_ms)` from `item_extra` where
+  `media_kind IN (2, 32)` (movies + TV episodes). Run once at the start
+  of `analyzeAll` when a device is connected; snapshot lives on
+  `PipelineController.deviceLibrarySnapshot`.
+- `analyzeOne` tags each `FileJob.duplicateOnDevice` by matching the
+  job's computed sync title against the snapshot (durationMs within
+  ±2 s). Title is what SyncItem would set in the plist — episode title
+  for TV, movie/file title for movies — so it round-trips exactly with
+  what landed on the device on a previous sync.
+- `runPipelined` filters out `duplicateOnDevice && !syncDespiteDuplicate`
+  before opening the register session; if every analyzed job is a
+  duplicate, status reads "Nothing to sync (all files already on device)"
+  and we don't open the ATC session at all.
+- UI: per-row chip in `FileRowView` shows "on device — skip" by default;
+  clicking toggles `syncDespiteDuplicate` and the chip becomes
+  "will duplicate" (amber) so the user knows they're opting into a
+  duplicate row.
+- Snapshot is cleared after `runPipelined` completes — the rows we just
+  added would otherwise flag the next analyze as duplicates.
 
 ---
 

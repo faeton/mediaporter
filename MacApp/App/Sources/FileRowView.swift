@@ -160,6 +160,25 @@ struct FileRowView: View {
                     .background(theme.chipSkip, in: RoundedRectangle(cornerRadius: 3))
                     .foregroundStyle(theme.chipSkipText)
             }
+            if job.duplicateOnDevice == true {
+                MetaDot(theme: theme)
+                Button {
+                    job.syncDespiteDuplicate.toggle()
+                } label: {
+                    Text(job.syncDespiteDuplicate ? "will duplicate" : "on device — skip")
+                        .font(.system(size: 10))
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(
+                            job.syncDespiteDuplicate ? Color(hex: 0xFF9F0A).opacity(0.18) : theme.chipSkip,
+                            in: RoundedRectangle(cornerRadius: 3)
+                        )
+                        .foregroundStyle(job.syncDespiteDuplicate ? Color(hex: 0xFF9F0A) : theme.chipSkipText)
+                }
+                .buttonStyle(.plain)
+                .help(job.syncDespiteDuplicate
+                      ? "Will sync anyway and create a duplicate row in TV.app. Click to skip."
+                      : "Already on the device. Click to sync anyway (creates a duplicate row).")
+            }
         }
         .padding(.top, 4)
     }

@@ -50,6 +50,13 @@ public class PipelineController {
     /// resolved show lands in `tvShowResolutions`.
     private var clusterResolveTasks: [String: Task<ResolvedShow, Never>] = [:]
 
+    /// Snapshot of the device's MediaLibrary used for duplicate detection
+    /// (#10b). Loaded once per analyzeAll run when a device is connected,
+    /// cleared after sync completes (rows we just added would otherwise
+    /// flag the next batch as duplicates). Empty array = device offline or
+    /// pull failed — analyze still works, just no dedup flags.
+    public var deviceLibrarySnapshot: [DeviceLibraryEntry] = []
+
     /// Clusters where TMDb couldn't auto-pick a show — surfaced to the UI so
     /// the user can pick once for the whole cluster instead of N times.
     public var pendingShowPicks: [PendingShowPick] = []
@@ -811,6 +818,20 @@ public class PipelineController {
             NSLog("OpenSubtitles: API key set but username/password/languages missing — skipping auto-fetch. Fill them in Settings → Subtitles.")
         }
 
+        // Refresh the device-library snapshot for duplicate detection
+        // (#10b) once per analyze run. We do this BEFORE the waves so every
+        // analyzeOne can tag its job with `duplicateOnDevice`. Run off the
+        // MainActor — sqlite3 + AFC pull together take ~1-2 s.
+        if let device = deviceInfo {
+            let devCopy = device
+            deviceLibrarySnapshot = (try? await Task.detached {
+                try loadDeviceLibrary(device: devCopy)
+            }.value) ?? []
+            NSLog("Device library snapshot: %d entries", deviceLibrarySnapshot.count)
+        } else {
+            deviceLibrarySnapshot = []
+        }
+
         // Process in waves: at each iteration, snapshot all currently-pending
         // jobs and run them concurrently (capped at `analyzeConcurrency`).
         // After the wave completes, recheck — jobs added mid-wave (a second
@@ -930,6 +951,23 @@ public class PipelineController {
             }
 
             job.selectedExternalSubs = Array(0..<info.externalSubtitles.count)
+
+            // Duplicate check (#10b). Compute the same title SyncItem will
+            // use, then look it up in the device snapshot by (title,
+            // durationMs ±2 s). Off by default — no snapshot → nil.
+            if !deviceLibrarySnapshot.isEmpty {
+                let syncTitle: String
+                if case .tvEpisode(let e) = job.metadata {
+                    syncTitle = e.episodeTitle ?? "Episode \(e.episode)"
+                } else {
+                    syncTitle = job.metadata?.title ?? job.fileName
+                }
+                let durMs = Int((job.mediaInfo?.duration ?? 0) * 1000)
+                job.duplicateOnDevice = deviceLibrarySnapshot.contains(
+                    title: syncTitle, durationMs: durMs
+                )
+            }
+
             job.status = .analyzed
         } catch {
             job.status = .failed
@@ -1189,8 +1227,17 @@ public class PipelineController {
     ///   - collect PipelineStats into `lastRunStats`
     public func runPipelined() async {
         cancelFlag.set(false) // Fresh run — clear any stale cancel state.
-        let analyzed = jobs.filter { $0.status == .analyzed }
-        guard !analyzed.isEmpty else { return }
+        // Filter out files that already exist on the device (#10b). User
+        // can opt back in per-row via `syncDespiteDuplicate`. Skipped jobs
+        // stay in .analyzed and are simply ignored by this run.
+        let analyzed = jobs.filter {
+            $0.status == .analyzed
+                && !($0.duplicateOnDevice == true && !$0.syncDespiteDuplicate)
+        }
+        guard !analyzed.isEmpty else {
+            overallStatus = "Nothing to sync (all files already on device)"
+            return
+        }
         guard let device = deviceInfo else {
             overallStatus = "No device connected"
             return
@@ -1454,6 +1501,10 @@ public class PipelineController {
         await Task.detached { registerSession.finish() }.value
         elapsedTask.cancel()
         overallStatus = "\(synced)/\(preparedPairs.count) synced"
+
+        // Invalidate the device-library snapshot — the rows we just added
+        // would otherwise falsely flag the next analyze as duplicates.
+        deviceLibrarySnapshot = []
 
         // Reclaim temp space for every successfully synced job.
         for (job, _) in preparedPairs where job.status == .synced {

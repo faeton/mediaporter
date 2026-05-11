@@ -53,6 +53,17 @@ public class FileJob: Identifiable {
     /// and one user-edited show identity. nil for movies.
     public var clusterID: String?
 
+    /// Set by analyzeOne when an entry on the device's MediaLibrary matches
+    /// this job's (title, duration). Drives the "on device" chip and the
+    /// pipeline's skip-by-default behaviour (#10b). nil = not yet checked
+    /// (no device snapshot was available during analyze).
+    public var duplicateOnDevice: Bool?
+
+    /// User opt-in override for `duplicateOnDevice`. When true, the
+    /// pipeline syncs the file even though a match exists on the device
+    /// (creates a duplicate row — same caveat as before #10b).
+    public var syncDespiteDuplicate: Bool = false
+
     // User selections (populated after analysis)
     public var selectedAudio: [Int] = []          // indices into audioStreams
     public var selectedSubtitles: [Int] = []      // indices into subtitleStreams
