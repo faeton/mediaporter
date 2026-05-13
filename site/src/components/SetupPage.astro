@@ -1,0 +1,153 @@
+---
+import Base from "../layouts/Base.astro";
+import { type Locale, STRINGS, localizePath } from "../i18n/locales";
+
+interface Props {
+  locale: Locale;
+}
+const { locale } = Astro.props;
+const t = STRINGS[locale];
+
+const howToLd = {
+  "@context": "https://schema.org",
+  "@type": "HowTo",
+  inLanguage: locale,
+  name: t.setupHeading,
+  description: t.setupLede,
+  step: [
+    ...t.setupTmdbSteps.map((s, i) => ({
+      "@type": "HowToStep",
+      position: i + 1,
+      name: t.setupTmdbTitle,
+      text: s,
+    })),
+    ...t.setupOsSteps.map((s, i) => ({
+      "@type": "HowToStep",
+      position: t.setupTmdbSteps.length + i + 1,
+      name: t.setupOsTitle,
+      text: s,
+    })),
+  ],
+};
+---
+<Base
+  locale={locale}
+  title={t.setupPageTitle}
+  description={t.setupPageDescription}
+  jsonLd={[howToLd]}
+>
+  <section class="section setup-hero">
+    <div class="container">
+      <span class="md-tag accent">## setup</span>
+      <h1>{t.setupHeading}</h1>
+      <p class="lede">{t.setupLede}</p>
+      <ul class="intro-bullets">
+        {t.setupIntroBullets.map((b) => <li>{b}</li>)}
+      </ul>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <article class="card setup-card">
+        <span class="md-tag accent">{t.setupTmdbTag}</span>
+        <h2>{t.setupTmdbTitle}</h2>
+        <p class="muted">{t.setupTmdbWhat}</p>
+        <ol class="steps">
+          {t.setupTmdbSteps.map((s) => <li>{s}</li>)}
+        </ol>
+        <p class="free md-comment">// {t.setupTmdbFree}</p>
+        <a
+          href="https://www.themoviedb.org/settings/api"
+          class="btn btn-primary"
+          rel="noopener"
+          target="_blank"
+        >{t.setupTmdbCta}</a>
+      </article>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <article class="card setup-card">
+        <span class="md-tag accent">{t.setupOsTag}</span>
+        <h2>{t.setupOsTitle}</h2>
+        <p class="muted">{t.setupOsWhat}</p>
+        <ol class="steps">
+          {t.setupOsSteps.map((s) => <li>{s}</li>)}
+        </ol>
+        <p class="free md-comment">// {t.setupOsFree}</p>
+        <a
+          href="https://www.opensubtitles.com/consumers"
+          class="btn btn-primary"
+          rel="noopener"
+          target="_blank"
+        >{t.setupOsCta}</a>
+      </article>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="apply-note">
+        <h2>{t.setupApplyHeading}</h2>
+        <p class="muted">{t.setupApplyBody}</p>
+        <a href={localizePath(locale, "/") + "#download"} class="btn btn-ghost">{t.ctaDownload}</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .setup-hero { padding-top: var(--sp-12); }
+  .setup-hero h1 { margin-top: var(--sp-4); max-width: 24ch; }
+  .lede {
+    margin-top: var(--sp-6);
+    font-size: 1.1875rem;
+    color: var(--text-2);
+    max-width: 60ch;
+  }
+  .intro-bullets {
+    list-style: none;
+    padding: 0;
+    margin-top: var(--sp-8);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+    max-width: 64ch;
+  }
+  .intro-bullets li {
+    color: var(--text-2);
+    padding-left: var(--sp-6);
+    position: relative;
+  }
+  .intro-bullets li::before {
+    content: "›";
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+    font-family: var(--font-mono);
+  }
+
+  .setup-card { padding: var(--sp-8); display: flex; flex-direction: column; gap: var(--sp-4); }
+  .setup-card h2 { margin: 0; }
+  .setup-card .muted { color: var(--text-2); margin: 0; max-width: 64ch; }
+  .steps {
+    margin: 0;
+    padding-left: var(--sp-6);
+    display: flex; flex-direction: column; gap: var(--sp-2);
+    color: var(--text);
+  }
+  .steps li { color: var(--text-2); }
+  .free { margin: 0; color: var(--text-3); }
+  .setup-card .btn { align-self: flex-start; margin-top: var(--sp-2); }
+
+  .apply-note {
+    border: 1px dashed var(--border);
+    border-radius: var(--r-sm);
+    padding: var(--sp-8);
+    text-align: center;
+  }
+  .apply-note h2 { margin: 0 0 var(--sp-3); }
+  .apply-note .muted { max-width: 60ch; margin: 0 auto var(--sp-6); }
+</style>

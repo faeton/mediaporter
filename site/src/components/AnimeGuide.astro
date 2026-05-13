@@ -1,0 +1,228 @@
+---
+import Base from "../layouts/Base.astro";
+import { type Locale, STRINGS, localizePath, getGuide } from "../i18n/locales";
+
+interface Props {
+  locale: Locale;
+}
+const { locale } = Astro.props;
+const g = getGuide(locale);
+const t = STRINGS[locale];
+
+const basePath = "/guides/anime-on-iphone-and-ipad";
+const canonical = "https://porter.md" + localizePath(locale, basePath);
+
+// Article authoring dates
+const datePublished = "2026-05-11";
+const dateModified = "2026-05-13";
+
+const howToLd = {
+  "@context": "https://schema.org",
+  "@type": "HowTo",
+  name: g.title,
+  description: g.description,
+  inLanguage: locale,
+  totalTime: "PT15M",
+  tool: [
+    { "@type": "HowToTool", name: "MediaPorter for macOS" },
+    { "@type": "HowToTool", name: "iPhone or iPad" },
+    { "@type": "HowToTool", name: "USB cable" },
+  ],
+  step: g.steps.map((s, i) => ({
+    "@type": "HowToStep",
+    position: i + 1,
+    name: s.name,
+    text: s.text,
+  })),
+};
+
+const articleLd = {
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  headline: g.hero.title,
+  description: g.description,
+  inLanguage: locale,
+  url: canonical,
+  datePublished,
+  dateModified,
+  author: { "@type": "Organization", name: "MediaPorter", url: "https://porter.md" },
+  publisher: {
+    "@type": "Organization",
+    name: "MediaPorter",
+    logo: { "@type": "ImageObject", url: "https://porter.md/favicon.svg" },
+  },
+  mainEntityOfPage: canonical,
+  image: "https://porter.md/og.png",
+};
+
+const faqLd = {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  inLanguage: locale,
+  mainEntity: t.faq.map((q) => ({
+    "@type": "Question",
+    name: q.q,
+    acceptedAnswer: { "@type": "Answer", text: q.a },
+  })),
+};
+
+const breadcrumbLd = {
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  itemListElement: [
+    { "@type": "ListItem", position: 1, name: "porter.md", item: "https://porter.md" + localizePath(locale, "/") },
+    { "@type": "ListItem", position: 2, name: t.navGuides, item: canonical },
+    { "@type": "ListItem", position: 3, name: g.hero.title },
+  ],
+};
+---
+<Base
+  locale={locale}
+  title={g.title}
+  description={g.description}
+  jsonLd={[articleLd, howToLd, faqLd, breadcrumbLd]}
+  alternateBasePath={basePath}
+>
+  <article class="guide section">
+    <div class="container guide-grid">
+      <aside class="toc">
+        <h4>{g.toc}</h4>
+        <ol>
+          {g.sections.map((s) => (
+            <li><a href={`#${s.id}`}>{s.heading}</a></li>
+          ))}
+        </ol>
+      </aside>
+
+      <div class="guide-body">
+        <header>
+          <span class="md-tag accent">{g.hero.eyebrow}</span>
+          <h1>{g.hero.title}</h1>
+          <p class="lede">{g.hero.lede}</p>
+          <p class="byline md-comment">// {datePublished} · updated {dateModified}</p>
+        </header>
+
+        {g.sections.map((s) => (
+          <section id={s.id} class="guide-section">
+            <h2>{s.heading}</h2>
+            {s.id === "steps" ? (
+              <>
+                <p>{s.body}</p>
+                <ol class="steps">
+                  {g.steps.map((step, i) => (
+                    <li>
+                      <span class="step-n">{String(i + 1).padStart(2, "0")}</span>
+                      <div>
+                        <h3>{step.name}</h3>
+                        <p>{step.text}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              </>
+            ) : (
+              <p>{s.body}</p>
+            )}
+          </section>
+        ))}
+
+        <aside class="callout md-comment">{g.callout}</aside>
+
+        <section class="related">
+          <h3>{g.related}</h3>
+          <ul>
+            <li><a href={localizePath(locale, "/changelog")}>{t.navChangelog}</a></li>
+            <li><a href={localizePath(locale, "/") + "#faq"}>{t.faqHeading}</a></li>
+            <li><a href={localizePath(locale, "/") + "#download"}>{t.downloadCta}</a></li>
+          </ul>
+        </section>
+      </div>
+    </div>
+  </article>
+</Base>
+
+<style>
+  .guide { padding-top: var(--sp-12); }
+  .guide-grid {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: var(--sp-12);
+    align-items: start;
+  }
+  @media (max-width: 880px) {
+    .guide-grid { grid-template-columns: 1fr; gap: var(--sp-6); }
+    .toc { position: static; }
+  }
+  .toc {
+    position: sticky;
+    top: 84px;
+    font-size: 0.9375rem;
+  }
+  .toc h4 {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0 0 var(--sp-3);
+  }
+  .toc ol {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    border-left: 1px solid var(--border);
+    padding-left: var(--sp-3);
+  }
+  .toc a { color: var(--text-2); }
+  .toc a:hover { color: var(--text); }
+
+  .guide-body header h1 { margin-block: var(--sp-3) var(--sp-4); }
+  .guide-body .lede { font-size: 1.1875rem; color: var(--text-2); max-width: 64ch; }
+  .byline { margin-top: var(--sp-3); font-size: 0.875rem; }
+
+  .guide-section {
+    margin-top: var(--sp-12);
+    max-width: 70ch;
+  }
+  .guide-section h2 { margin-bottom: var(--sp-4); scroll-margin-top: 96px; }
+  .guide-section p { color: var(--text-2); }
+
+  .steps {
+    list-style: none;
+    padding: 0;
+    margin-top: var(--sp-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-5);
+  }
+  .steps li { display: grid; grid-template-columns: auto 1fr; gap: var(--sp-5); align-items: start; }
+  .step-n {
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    color: var(--accent);
+    padding: 6px 10px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    border-radius: var(--r-sm);
+    background: var(--code-bg);
+  }
+  .steps h3 { margin-bottom: var(--sp-2); }
+  .steps p { color: var(--text-2); }
+
+  .callout {
+    margin-top: var(--sp-12);
+    padding: var(--sp-4) var(--sp-5);
+    border: 1px dashed var(--border);
+    border-radius: var(--r-sm);
+    background: var(--code-bg);
+    max-width: 70ch;
+  }
+
+  .related { margin-top: var(--sp-12); max-width: 70ch; }
+  .related h3 { margin-bottom: var(--sp-3); }
+  .related ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+  .related a { color: var(--text-2); }
+  .related a:hover { color: var(--text); }
+</style>

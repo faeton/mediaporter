@@ -2,46 +2,142 @@
 import "../styles/global.css";
 import Header from "../components/Header.astro";
 import Footer from "../components/Footer.astro";
+import {
+  type Locale,
+  DEFAULT_LOCALE,
+  HTML_LANG,
+  OG_LOCALE,
+  STRINGS,
+  alternates,
+  stripLocale,
+} from "../i18n/locales";
 
 interface Props {
+  /** Page locale. Defaults to English. */
+  locale?: Locale;
+  /** Title used in <title>. Falls back to the locale's homepage title. */
   title?: string;
+  /** Meta description. Falls back to the locale's homepage description. */
   description?: string;
+  /** Optional OG image path. */
   ogImage?: string;
+  /** Optional JSON-LD blocks (already serializable objects). */
+  jsonLd?: unknown[];
+  /** Override the base path for hreflang alternates. Defaults to the current path with locale stripped. */
+  alternateBasePath?: string;
 }
 
 const {
-  title = "MediaPorter — Sync video to the iPad TV app",
-  description = "Native macOS app that transcodes and syncs your video library straight into the built-in iOS/iPadOS TV app. No iCloud. No iTunes. No data collection.",
+  locale = DEFAULT_LOCALE,
+  title,
+  description,
   ogImage = "/og.png",
+  jsonLd = [],
+  alternateBasePath,
 } = Astro.props;
 
-const canonical = new URL(Astro.url.pathname, Astro.site ?? "https://porter.md").toString();
+const strings = STRINGS[locale];
+const pageTitle = title ?? strings.htmlTitle;
+const pageDescription = description ?? strings.metaDescription;
+
+const siteOrigin = (Astro.site ?? new URL("https://porter.md")).origin;
+// With build.format: 'file' Astro emits "/foo.html"; strip that for the canonical URL.
+const normalizedPath = Astro.url.pathname
+  .replace(/\.html$/, "")
+  .replace(/\/index$/, "/")
+  .replace(/\/$/, "") || "/";
+const canonical = normalizedPath === "/" ? siteOrigin + "/" : siteOrigin + normalizedPath;
+
+const basePath = alternateBasePath ?? stripLocale(normalizedPath);
+const hreflangs = alternates(basePath, siteOrigin);
+
+const orgLd = {
+  "@context": "https://schema.org",
+  "@type": "Organization",
+  name: "MediaPorter",
+  url: "https://porter.md",
+  logo: "https://porter.md/favicon.svg",
+  sameAs: ["https://github.com/faeton/mediaporter"],
+};
+
+const softwareLd = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  name: "MediaPorter",
+  description: pageDescription,
+  applicationCategory: "MultimediaApplication",
+  operatingSystem: "macOS 14+",
+  url: "https://porter.md",
+  inLanguage: HTML_LANG[locale],
+  offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+  softwareVersion: "0.3.2",
+  author: { "@type": "Organization", name: "MediaPorter" },
+};
+
+const allLd = [orgLd, softwareLd, ...jsonLd];
 ---
 <!DOCTYPE html>
-<html lang="en">
+<html lang={HTML_LANG[locale]}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{title}</title>
-    <meta name="description" content={description} />
+    <title>{pageTitle}</title>
+    <meta name="description" content={pageDescription} />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <meta name="generator" content={Astro.generator} />
     <link rel="canonical" href={canonical} />
+
+    {hreflangs.map((a) => (
+      <link rel="alternate" hreflang={a.hreflang} href={a.href} />
+    ))}
+    <link rel="alternate" hreflang="x-default" href={`${siteOrigin}${basePath === "/" ? "/" : basePath}`} />
 
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="mask-icon" href="/favicon.svg" color="#EC4899" />
     <meta name="theme-color" content="#0A0A0C" />
 
-    <meta property="og:title" content={title} />
-    <meta property="og:description" content={description} />
+    <meta property="og:site_name" content="MediaPorter" />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={pageDescription} />
     <meta property="og:url" content={canonical} />
     <meta property="og:type" content="website" />
-    <meta property="og:image" content={new URL(ogImage, Astro.site ?? "https://porter.md").toString()} />
+    <meta property="og:locale" content={OG_LOCALE[locale]} />
+    {(["en", "ru", "zh", "ko"] as Locale[])
+      .filter((l) => l !== locale)
+      .map((l) => <meta property="og:locale:alternate" content={OG_LOCALE[l]} />)}
+    <meta property="og:image" content={new URL(ogImage, siteOrigin).toString()} />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={pageTitle} />
+    <meta name="twitter:description" content={pageDescription} />
+
+    {allLd.map((block) => (
+      <script type="application/ld+json" set:html={JSON.stringify(block)} />
+    ))}
+
+    <!-- Matomo -->
+    <script is:inline>
+      var _paq = (window._paq = window._paq || []);
+      _paq.push(['trackPageView']);
+      _paq.push(['enableLinkTracking']);
+      (function () {
+        var u = '//m.unt1.com/';
+        _paq.push(['setTrackerUrl', u + 'matomo.php']);
+        _paq.push(['setSiteId', '4']);
+        var d = document,
+          g = d.createElement('script'),
+          s = d.getElementsByTagName('script')[0];
+        g.async = true;
+        g.src = u + 'matomo.js';
+        s.parentNode.insertBefore(g, s);
+      })();
+    </script>
+    <!-- End Matomo Code -->
   </head>
   <body>
-    <Header />
+    <Header locale={locale} />
     <main>
       <slot />
     </main>
-    <Footer />
+    <Footer locale={locale} />
   </body>
 </html>

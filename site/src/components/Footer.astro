@@ -1,4 +1,11 @@
 ---
+import { type Locale, DEFAULT_LOCALE, STRINGS, localizePath } from "../i18n/locales";
+
+interface Props {
+  locale?: Locale;
+}
+const { locale = DEFAULT_LOCALE } = Astro.props;
+const t = STRINGS[locale];
 const year = new Date().getFullYear();
 ---
 <footer class="site-footer">
@@ -9,25 +16,27 @@ const year = new Date().getFullYear();
           <span class="word">MediaPorter</span>
           <span class="tld">.md</span>
         </div>
-        <p class="tagline md-comment"># Media, ported. Deep on your devices.</p>
+        <p class="tagline md-comment">{t.footerTagline}</p>
       </div>
       <nav aria-label="Footer">
-        <h4>Product</h4>
+        <h4>{t.footerProduct}</h4>
         <ul>
-          <li><a href="/#features">Features</a></li>
-          <li><a href="/changelog">Changelog</a></li>
+          <li><a href={localizePath(locale, "/") + "#features"}>{t.footerFeatures}</a></li>
+          <li><a href={localizePath(locale, "/guides/anime-on-iphone-and-ipad")}>{t.navGuides}</a></li>
+          <li><a href={localizePath(locale, "/setup")}>{t.navSetup}</a></li>
+          <li><a href={localizePath(locale, "/changelog")}>{t.navChangelog}</a></li>
         </ul>
       </nav>
       <nav aria-label="Footer">
-        <h4>Help</h4>
+        <h4>{t.footerHelp}</h4>
         <ul>
-          <li><a href="/support">Support</a></li>
-          <li><a href="/privacy">Privacy</a></li>
+          <li><a href={localizePath(locale, "/support")}>{t.navSupport}</a></li>
+          <li><a href={localizePath(locale, "/privacy")}>{t.navPrivacy}</a></li>
         </ul>
       </nav>
     </div>
     <div class="base">
-      <span class="md-comment">// © {year} MediaPorter. All rights reserved.</span>
+      <span class="md-comment">// {t.footerRights.replace("{year}", String(year))}</span>
     </div>
   </div>
 </footer>

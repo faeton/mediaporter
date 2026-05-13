@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <radialGradient id="glow" cx="20%" cy="20%" r="80%">
+      <stop offset="0%" stop-color="#EC4899" stop-opacity="0.22"/>
+      <stop offset="60%" stop-color="#0A0A0C" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="hair" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="#0A0A0C"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <rect width="1200" height="630" fill="url(#hair)"/>
+
+  <!-- Mark, scaled from 256-box brand glyph -->
+  <g transform="translate(80,135) scale(1.4)">
+    <rect x="28" y="56" width="56" height="144" rx="8" fill="#EC4899"/>
+    <path d="M84 128 C 108 84, 132 172, 156 128"
+          stroke="#EC4899" stroke-width="14" stroke-linecap="round" fill="none"/>
+    <rect x="156" y="40" width="80" height="176" rx="14" stroke="#EC4899" stroke-width="10" fill="none"/>
+    <path d="M180 104 L 216 128 L 180 152 Z" fill="#EC4899"/>
+  </g>
+
+  <!-- Wordmark + tagline -->
+  <g font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', system-ui, sans-serif">
+    <text x="500" y="240" font-size="86" font-weight="800" letter-spacing="-2" fill="#FFFFFF">
+      MediaPorter<tspan fill="#71717A" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-weight="400" font-size="40" dx="6">.md</tspan>
+    </text>
+    <text x="500" y="320" font-size="40" font-weight="600" fill="#A1A1AA">
+      Media, <tspan fill="#EC4899">ported.</tspan>
+    </text>
+    <text x="500" y="380" font-size="28" font-weight="500" fill="#A1A1AA">
+      Anime &amp; video → iPhone and iPad TV app.
+    </text>
+    <text x="500" y="425" font-size="22" font-weight="400" fill="#71717A">
+      No iCloud. No iTunes. No telemetry.
+    </text>
+  </g>
+
+  <!-- Footer strip -->
+  <g font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="22" fill="#71717A">
+    <text x="80" y="570"># porter.md — native macOS · open source · macOS 14+ · iOS / iPadOS 15+</text>
+  </g>
+</svg>

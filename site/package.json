@@ -12,6 +12,7 @@
     "deploy": "astro build && wrangler pages deploy dist --project-name=porter-md"
   },
   "dependencies": {
+    "@astrojs/sitemap": "^3.7.2",
     "astro": "^5.0.0"
   },
   "devDependencies": {

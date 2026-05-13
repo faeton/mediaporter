@@ -1,0 +1,11 @@
+# Old per-device anime guide URLs were merged into one canonical page on 2026-05-13.
+# 301 to preserve any external links and pass PageRank.
+
+/guides/anime-on-iphone        /guides/anime-on-iphone-and-ipad        301
+/guides/anime-on-ipad          /guides/anime-on-iphone-and-ipad        301
+/ru/guides/anime-on-iphone     /ru/guides/anime-on-iphone-and-ipad     301
+/ru/guides/anime-on-ipad       /ru/guides/anime-on-iphone-and-ipad     301
+/zh/guides/anime-on-iphone     /zh/guides/anime-on-iphone-and-ipad     301
+/zh/guides/anime-on-ipad       /zh/guides/anime-on-iphone-and-ipad     301
+/ko/guides/anime-on-iphone     /ko/guides/anime-on-iphone-and-ipad     301
+/ko/guides/anime-on-ipad       /ko/guides/anime-on-iphone-and-ipad     301

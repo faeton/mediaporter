@@ -1,0 +1,36 @@
+# MediaPorter
+
+> MediaPorter is a native macOS application that transcodes and syncs video files (movies, TV shows, anime) directly into the built-in TV app on iPhone and iPad. It uses Apple's on-device sync protocol (ATC), bypassing iCloud and the now-removed iTunes path. No telemetry. Open source. Requires macOS 14+ and iOS / iPadOS 15+.
+
+The product solves a specific gap: Apple offers no consumer way to load arbitrary video into the native iOS / iPadOS TV app. MediaPorter rebuilds that path with metadata correctness (TMDb lookup, sort titles, episode numbering, poster artwork), codec-aware transcoding (HEVC pass-through, AC-3 → AAC because the iPad TV app silently hides AC-3 from the audio switcher), and pipelined sync (files appear as they upload, not after a 30-minute finalize wall).
+
+The site is multilingual. Equivalent pages exist at `/`, `/ru`, `/zh`, `/ko`.
+
+## Core pages
+
+- [Home — English](https://porter.md/): product overview, features, FAQ.
+- [Home — Russian](https://porter.md/ru): Главная.
+- [Home — Chinese (Simplified)](https://porter.md/zh): 首页。
+- [Home — Korean](https://porter.md/ko): 홈.
+
+## Anime guide — flagship topic
+
+The step-by-step guide for the canonical query "how to put anime on iPhone / iPad" covers
+.mkv, fan-subbed releases, dual audio, soft subtitles, specials/OVAs. One unified URL per
+locale (iPhone and iPad share the same flow):
+
+- [Anime on iPhone and iPad — English](https://porter.md/guides/anime-on-iphone-and-ipad)
+- [Аниме на iPhone и iPad — Русский](https://porter.md/ru/guides/anime-on-iphone-and-ipad)
+- [动漫导入 iPhone 和 iPad — 中文](https://porter.md/zh/guides/anime-on-iphone-and-ipad)
+- [iPhone과 iPad에 애니메이션 — 한국어](https://porter.md/ko/guides/anime-on-iphone-and-ipad)
+
+## Support
+
+- [Changelog](https://porter.md/changelog)
+- [Support](https://porter.md/support)
+- [Privacy](https://porter.md/privacy)
+- [Source code (GitHub)](https://github.com/faeton/mediaporter)
+
+## Optional
+
+- [Sitemap](https://porter.md/sitemap-index.xml)
