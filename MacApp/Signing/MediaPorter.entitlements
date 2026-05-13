@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        MediaPorter needs to dlopen Apple's private MobileDevice.framework
+        and AirTrafficHost.framework at runtime (see Sync/Frameworks.swift).
+        Those frameworks are signed by Apple, not by us, so the hardened
+        runtime's library-validation will refuse to load them unless we
+        opt out here. Notarization accepts this entitlement — it's a
+        runtime-protections relaxation, not an API restriction.
+
+        We also ship libcig.dylib under Resources/, signed with our
+        Developer ID — library-validation would still allow it (same
+        Team ID), but explicit opt-out keeps the rule consistent for
+        every dylib we load.
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
