@@ -1465,6 +1465,28 @@ public class PipelineController {
         var workFailed: String? = nil
         var registeredCount = 0
 
+        // Background disk-space watchdog. The per-file check below
+        // (`queryDeviceDiskSpace`) only fires between files, but a single
+        // file's upload can take tens of minutes on a slow link — long enough
+        // for iOS background traffic to eat several GB. Poll every 10 s and
+        // trip the detector if free space drops below 256 MB; the upload's
+        // isCancelled closure picks it up between 1 MB chunks and aborts.
+        let diskDetector = DiskFullDetector()
+        let diskHandle = device.handle
+        let diskPoller = Task.detached {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                if Task.isCancelled { break }
+                guard let r = queryDeviceDiskSpace(device: diskHandle) else { continue }
+                if r.free < 256 * 1024 * 1024 {
+                    diskDetector.trigger(
+                        "Device filled up during upload (only \(ByteFormat.short(r.free)) free)."
+                    )
+                    break
+                }
+            }
+        }
+
         for (idx, pair) in preparedPairs.enumerated() {
             let job = pair.job
             if cancelFlag.get() { break }
@@ -1558,7 +1580,7 @@ public class PipelineController {
                     lastReport = now
                     let pct = total > 0 ? Double(sent) / Double(total) : 0
                     Task { @MainActor in capJob.progress = pct }
-                }, isCancelled: { capCancel.get() })
+                }, isCancelled: { capCancel.get() || diskDetector.isFull() })
                 let uploadElapsed = Date().timeIntervalSince(uploadStart)
 
                 // Bytes landed — flip the row to .uploaded for the brief
@@ -1590,6 +1612,10 @@ public class PipelineController {
             do { try await prev.value }
             catch { workFailed = error.localizedDescription }
         }
+        diskPoller.cancel()
+        // Prefer the disk-full message when both fired — the underlying AFC
+        // error is just "cancelled" because that's how the upload aborted.
+        if let diskMsg = diskDetector.reason() { workFailed = diskMsg }
         uploader.close()
 
         // Any analyzed job we didn't reach (cancel, prior failure) needs a
@@ -1984,4 +2010,21 @@ final class AtomicBool: @unchecked Sendable {
     private var value = false
     func set(_ v: Bool) { lock.lock(); value = v; lock.unlock() }
     func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+/// Shared between the upload Task (which polls `isFull()` between 1 MB chunks)
+/// and the background disk-poll Task (which calls `trigger()` if the device
+/// drops below the safety threshold). First trigger wins so we get the
+/// original free-bytes number in the error message rather than whatever it
+/// drifted to by the time the upload noticed.
+final class DiskFullDetector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var triggered = false
+    private var msg: String?
+    func trigger(_ reason: String) {
+        lock.lock(); defer { lock.unlock() }
+        if !triggered { triggered = true; msg = reason }
+    }
+    func isFull() -> Bool { lock.lock(); defer { lock.unlock() }; return triggered }
+    func reason() -> String? { lock.lock(); defer { lock.unlock() }; return msg }
 }
