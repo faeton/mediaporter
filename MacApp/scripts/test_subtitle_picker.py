@@ -198,6 +198,32 @@ VARIANTS: list[Variant] = [
         ],
         notes="second sub marked CC/SDH — different AVMediaSelectionGroup characteristic",
     ),
+    # Round 2: F proved that only distinct language codes split a same-lang
+    # pair. F's second entry shows up as "qaa" in the iOS picker because we
+    # didn't set handler_name on it. K and L probe whether handler_name is
+    # used as the picker label when the lang code is private-use.
+    _v(
+        "K", "SubPicker K RusPlusQaaNamed",
+        sub_maps=["-map", "1:0", "-map", "2:0"],
+        sub_meta=[
+            "-metadata:s:s:0", "language=rus",
+            "-metadata:s:s:0", "handler_name=CafeSubs",
+            "-metadata:s:s:1", "language=qaa",
+            "-metadata:s:s:1", "handler_name=Crunchyroll",
+        ],
+        notes="rus(handler=CafeSubs) + qaa(handler=Crunchyroll) — does qaa entry show Crunchyroll or 'qaa'?",
+    ),
+    _v(
+        "L", "SubPicker L QaaQabBothNamed",
+        sub_maps=["-map", "1:0", "-map", "2:0"],
+        sub_meta=[
+            "-metadata:s:s:0", "language=qaa",
+            "-metadata:s:s:0", "handler_name=CafeSubs",
+            "-metadata:s:s:1", "language=qab",
+            "-metadata:s:s:1", "handler_name=Crunchyroll",
+        ],
+        notes="both private-use codes (qaa + qab) — do both rows show handler names?",
+    ),
 ]
 
 # ffprobe-confirmed findings from a dry-run build (before device sync):
