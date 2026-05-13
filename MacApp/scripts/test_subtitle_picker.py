@@ -33,7 +33,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE = REPO_ROOT / "test_fixtures" / "Breaking.Bad.S01E01.Pilot.1080p.mkv"
-OUT_DIR = Path(__file__).resolve().parent / "test_fixtures" / "subtitle_picker"
+# Outputs go to the gitignored repo-root `test_fixtures/` so multi-GB
+# variant builds never accidentally land in git.
+OUT_DIR = REPO_ROOT / "test_fixtures" / "subtitle_picker"
 
 # Take a 30 s clip so each variant uploads fast.
 CLIP_START = "00:00:30"
