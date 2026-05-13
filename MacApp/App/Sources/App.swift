@@ -112,7 +112,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // at launch with install guidance than let it surface as per-file
         // "ffprobe not found" errors after the user drops a batch.
         if !Prerequisites.ffmpegAvailable {
+            DebugLog.write("prereq.ffmpeg", "missing — showing install dialog")
             showFFmpegMissingAlert()
+        } else {
+            DebugLog.write("prereq.ffmpeg", "ok")
         }
     }
 
