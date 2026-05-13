@@ -1,5 +1,74 @@
 # Changelog
 
+The Swift MacApp under `MacApp/` is the shipping target. Versions starting with 0.4.0 track the MacApp; the 0.1.x – 0.3.x entries describe the now-frozen Python CLI under `python-reference/`.
+
+## 0.6.0 — 2026-05-14
+
+The cluster-extras release. Drop a folder of episodes with dub / sub subfolders, pick studios / labels once at cluster level, and Mediaporter muxes each episode's extras into the transcode pass — with the user-chosen default audio surviving into the TV app. Plus the long tail of post-0.5.0 reliability + UX work, signing + notarization, and the first signed DMG shipping from porter.md.
+
+### New
+
+- **TV-show clustering** — episodes from the same drop are grouped by parsed (show name, year). One TMDb lookup per cluster (not per file), one show-pick re-applies across every episode. A pending-pick is surfaced as a single resolvable conflict instead of N modal prompts.
+- **Cluster-scoped selection (#11a / 11b)** — audio / sub / resolution / burn-in changes on one episode raise an "Apply to all N other episodes?" popover that auto-dismisses after 5 s. "Always" toggle silences the prompt entirely; reachable from both the popover and Settings → TV shows.
+  - Intent is stored as `(lang, codec)` pairs, not stream indices — survives across episodes where track order differs.
+  - When a sibling has no matching `(lang, codec)` for the cluster's audio intent, fall back to selecting every audio track instead of bricking the output with an empty audio map.
+- **External-track scanner (#11c)** — walks the source directory (depth ≤ 4) for `.mka / .ac3 / .eac3 / .flac / .aac / .m4a / .opus` (dubs) and `.srt / .ass / .ssa / .vtt` (subs). Groups by parent folder = label, infers language from path tokens, detects "forced" subs by token (`forced`, `signs`, `songs`, `надписи`, `форсированные`). Scanner runs once per directory, not once per file.
+- **ClusterExtrasSection UI (#11d)** — collapsible section at the top of the file list, one per cluster with extras. Per-studio audio checkbox + Default radio (CLAUDE.md #10 compliant: exactly one default at output); per-label sub checkbox + "Burn in" radio that auto-includes the sub in the mux and flags the file for transcode.
+- **External-track mux pass (#11e)** — pre-transcode ffmpeg pass combines source video + selected dubs / subs into an intermediate MKV (codec-copy, chapters + data streams stripped, ASS / SSA pre-converted to SRT, exactly one default audio). The existing transcode stage runs against the intermediate unchanged.
+- **Burn-in on cluster-extras subs** — selecting Burn-in on a cluster-extras sub label is now end-to-end: the sub is auto-included for the mux, the burn-in language is carried through the mux, and the post-mux re-probe rewrites the burn-in target to the newly embedded subtitle stream index. Works for direct picks and for propagated burn-in language from a sibling.
+- **OpenSubtitles auto-fetch** — when API key + login + languages are set in Settings, analyze fetches missing-language SRTs via moviehash / TMDb id into `~/Library/Caches/MediaPorter/opensubtitles` and includes them in the next pipeline run.
+- **Burn-in subtitles** — embedded text (libass via `-vf subtitles=`), sidecar SRT, and bitmap (PGS / VOBSUB via `filter_complex overlay`) are all burnable. Bitmap canvas size is picked per codec (1920×1080 for PGS, 720×576 for DVD); downscale is applied after overlay so burned glyphs scale with the picture.
+- **Anime episode handling** — filename parser learned `S01 - E01`, `Show.S01E01-Final`, and friends; episode picker race fix prevents stale TMDb responses from clobbering current selections; tagger drops the "0." prefix on TV episodes by writing `episode_sort_id` to the insert_track plist.
+- **Duplicate skip (#10b)** — analyze pulls a snapshot of the device's `MediaLibrary.sqlitedb` via AFC and flags files whose (title, durationMs ±2 s) already exist. Skipped by default; per-row override puts them back into the queue.
+- **Streaming registration (#8)** — ATC session opens before the upload loop; per-file `FileBegin/FileComplete` fires the moment AFC finishes a file; medialibraryd commits rows continuously. Replaces the previous "one big register call at the end" path. Failed registration leaves bytes on the device with a "Retry Registration" menu item that re-runs just the ATC step.
+- **Mid-sync disk watchdog (#5 / #9)** — background poll every 10 s queries device free space and aborts cleanly if it drops below 256 MB during a long upload; per-file preflight checks file size + 256 MB headroom before each FileBegin. Previously a runaway Photos / iCloud sync mid-upload surfaced as a cryptic AFC write error several minutes in.
+- **Parallel analyze (#10)** — analyzeAll runs probe + decision + TMDb resolve in waves of up to 4. Cluster resolution is deduped per cluster id so 8 episodes of the same show fire one TMDb search instead of 8.
+- **Storage-aware recommendation banner (#3)** — banner respects the device's panel resolution by default; Settings → Transcode → "I AirPlay or cast to a 4K display" toggle flips it to keep originals.
+- **Zombie ffmpeg sweep (#6)** — at launch, sweep system ffmpeg processes whose command line references the app's temp prefix and SIGKILL them. Recovers cleanly from a previous SIGKILL / panic that bypassed `ActiveProcesses.cancelAll()`.
+- **Orphan-aware cleanup (#2)** — "Clean Up Staged Media Files" cross-references the device's `AssetManifest` and removes only true orphans under `/iTunes_Control/Music/F*/`. Surfaces leftover transcoded `.m4v` outputs from previous failed runs with a one-click cleanup banner.
+- **Help menu — bug report + diagnostic info** — one-click captures a redacted report (app version, OS, device, last debug log tail) and opens a pre-filled GitHub issue.
+- **ffmpeg precheck at launch** — surfaces a one-shot dialog with `brew install ffmpeg` guidance when ffmpeg is missing on $PATH; verdict logged to the debug log. Release builds will bundle ffmpeg inside the `.app`.
+- **Cancel + Retry per row** — Cancel button on the bottom timeline kills every in-flight ffmpeg (mux pass, ass→srt pre-pass, main transcode all participate now), unwinds the AFC upload at the next 1 MB chunk, and abandons in-flight ATC asset registrations. Retry button on a failed row re-runs only that file.
+- **Hold-to-preview poster** — hold any row's poster thumbnail to see the full-size artwork (show portrait + episode still side by side for TV).
+- **Multi-device support** — picks iPad first when multiple devices are attached; explicit override is persisted across launches.
+- **CLI 'pull' command** — `mediaporterctl pull <devicepath>` reads any file off the device via AFC, mirroring Apple's Finder behaviour. Useful for protocol debugging and inspecting on-device state.
+- **Sign-and-notarize pipeline** — `MacApp/scripts/build-app.sh` + `release.sh` produce a signed + notarized + stapled DMG via Developer ID. Hardened runtime with `disable-library-validation` for the bundled `libcig.dylib`. First public DMG hosted on [porter.md](https://porter.md).
+- **AppIcon generation** — `AppIcon.icns` is built from the runtime brand mark composition; same artwork used in dock, Finder, and Spotlight.
+
+### Changed
+
+- **Default audio is preserved through transcode** — the final ffmpeg pass now pins the input's existing `default` disposition (set by the cluster-extras mux step on the user's chosen dub) instead of always forcing track 0 as default. The Default radio in ClusterExtrasSection is now wired all the way to the TV app.
+- **Burn-in forces a transcode** — `needsReencode` / `videoBeingReencoded` return true when `burnInSubtitle` is set or a deferred `pendingBurnInExtraLang` is staged. Previously a sibling that received a propagated burn-in onto otherwise-compatible video would skip ffmpeg and silently drop the burn-in.
+- **`reclusterJobs` migrates cluster state** — when "Set show…" reassigns a job to a new cluster, `clusterExtras` and `clusterSelections` move with it. Old keys are GC'd when no remaining job references them.
+- **TMDb `original_language` fallback for untagged audio** — embedded audio with no `language` tag (or `und`) inherits the title's `original_language` so the iPad TV-app switcher doesn't surface every untagged anime track as "Unknown".
+- **Two-artwork sync** — every TV episode gets both a show portrait (used as the Library tile) and an episode still. Movie posters stay single-artwork.
+- **Honest UX during the post-upload register wait** — finishing-sync stage no longer flashes "0 synced" while medialibraryd commits; the timeline reads "X on device" until rows actually land, then flips to "X synced" + Clear button. Transcode / tag no longer clobber the device-card status while uploads run in parallel.
+- **Selection-aware work classification** — deselecting an incompatible track flips `needsReencode` off if it was the only reason to transcode. AC3-only files where the user dropped the AC3 track now copy through without any ffmpeg pass.
+- **Cmd-Q guard while syncing** — confirms before quitting during an active run so half-uploaded files don't leak as orphans.
+- **Dock icon set programmatically** — no .icns dependency at debug-build time; release builds use the icns bundled into Resources.
+- **Cleanup confirmation shows total size** — Device → Clean Up surfaces "Free up X GB" instead of just a file count.
+- **Same-language sub warning** — when two subs share a language code, the row warns that the iOS picker dedupes them into a single entry regardless of `title` / `handler_name` / disposition. Verified on iPhone 16 Pro / iOS 26.4.2 via `scripts/test_subtitle_picker.py`.
+- **Tagger no longer hangs** — `ffmpeg` stdin is detached from the tty and tagging waits on `terminationHandler` continuations instead of `waitUntilExit`. Long tagging operations on big files don't freeze the UI.
+
+### Fixed
+
+- **Cancel during mux leaked a zombie ffmpeg** — `ExternalMux.mux` and `convertAssToSrt` now register their `Process` with the shared `ActiveProcesses` registry, so `Transcoder.cancelAll()` reaches them. SIGTERM then SIGKILL after a 2 s grace, identical to the main transcode pass.
+- **Burn-in on cluster-extras subs silently dropped** — fixed end-to-end (see "New" → Burn-in on cluster-extras subs).
+- **Always-apply toggle was a roach motel** — once enabled in the popover, the popover never resurfaced (because Always silently propagates) so the toggle was unreachable. Now also in Settings → TV shows.
+- **Burn-in chip disappeared on siblings after propagation** — sibling jobs with compatible video had `videoBeingReencoded == false`, so the UI hid the burn-in flame. Now any non-nil burn-in (resolved or deferred) makes the chip render.
+- **PGS burn-in on a 4K → 1080p downscale** — bitmap subtitle was overlaid at the source canvas then ignored on scale, leaving subs in the top-left corner. Now scales to source dims before overlay, then downscales the composite. Sub text scales with the picture.
+- **Stale assets bricking SyncFinished** — parse `AssetManifest`, send `FileError` (ErrorCode 0) for any AssetID that isn't ours. Prevents the device from waiting forever for assets from a previous failed run.
+- **TV episode "0." prefix in TV.app** — `insert_track` plist was missing `episode_sort_id`. Without it the TV app couldn't sort and prefixed every title with "0.".
+- **852p banner copy** — the recommendation banner was extracting the device's panel height (852 for iPhone 16 Pro) and reporting it as the target. Now reports a ResolutionLimit name ("1080p", "Original") instead.
+- **Misleading "recommend 1080p" banner on AirPlay setups** — replaced by the storage-aware + AirPlay-to-4K logic.
+- **Hung transcoder after a previous run** — `unwedge` path clears `isAnalyzing / isRunning` flags and the cancel state when a previous run died unexpectedly; "Clear" button on the bottom timeline reaches `synced` jobs only.
+
+### Protocol / framework
+
+- `dlopen` Apple's `MobileDevice.framework` and `AirTrafficHost.framework` at runtime — no admin prompts, no `SMAppService` dialog, no sudo. The `pymobiledevice3 remote start-tunnel` step is Python-reference-only.
+- Wired `ATHFileError`, fixed `AT*` return-type signatures in the ctypes shim, ported stale-asset `FileError` flow from the Python reference.
+- Per-stream `disposition.default` propagated from `ffprobe` through `StreamInfo.isDefault`; final transcode pins exactly one default at output (mp4 muxer forces ≥1 default).
+
 ## 0.3.2 — 2026-04-13
 
 Corrects the iPad audio-language-switcher rule and drops a lot of incidental re-encoding along the way. Previous versions believed "every audio track must share a codec or the switcher disappears" and normalized the whole track set; the real rule is codec-specific and much cheaper.
