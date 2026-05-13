@@ -14,14 +14,19 @@ public struct MovieMetadata {
     public var posterURL: String?
     public var posterData: Data?
     public var tmdbID: Int?
+    /// TMDb `original_language` (ISO 639-1, 2-letter, e.g. "ja"). Used as a
+    /// fallback when an audio stream has no language tag — anime EAC3 mux
+    /// often ships without one and TV.app surfaces it as "Unknown".
+    public var originalLanguage: String?
 
     public init(title: String, year: Int?, genre: String?, overview: String?,
                 longOverview: String?, director: String?, posterURL: String?,
-                posterData: Data?, tmdbID: Int?) {
+                posterData: Data?, tmdbID: Int?, originalLanguage: String? = nil) {
         self.title = title; self.year = year; self.genre = genre
         self.overview = overview; self.longOverview = longOverview
         self.director = director; self.posterURL = posterURL
         self.posterData = posterData; self.tmdbID = tmdbID
+        self.originalLanguage = originalLanguage
     }
 }
 
@@ -43,13 +48,16 @@ public struct EpisodeMetadata {
     public var showBackdropURL: String?
     public var showBackdropData: Data?
     public var tmdbShowID: Int?
+    /// TMDb `original_language` for the show (ISO 639-1, 2-letter, e.g. "ja").
+    /// Fallback for untagged audio streams (see `MovieMetadata.originalLanguage`).
+    public var originalLanguage: String?
 
     public init(showName: String, season: Int, episode: Int, episodeTitle: String?,
                 episodeID: String, year: Int?, genre: String?, overview: String?,
                 longOverview: String?, network: String?, posterURL: String?,
                 posterData: Data?, showPosterURL: String?, showPosterData: Data?,
                 showBackdropURL: String? = nil, showBackdropData: Data? = nil,
-                tmdbShowID: Int?) {
+                tmdbShowID: Int?, originalLanguage: String? = nil) {
         self.showName = showName; self.season = season; self.episode = episode
         self.episodeTitle = episodeTitle; self.episodeID = episodeID; self.year = year
         self.genre = genre; self.overview = overview; self.longOverview = longOverview
@@ -57,6 +65,7 @@ public struct EpisodeMetadata {
         self.showPosterURL = showPosterURL; self.showPosterData = showPosterData
         self.showBackdropURL = showBackdropURL; self.showBackdropData = showBackdropData
         self.tmdbShowID = tmdbShowID
+        self.originalLanguage = originalLanguage
     }
 }
 
@@ -116,7 +125,8 @@ public enum TMDbClient {
                 director: nil,
                 posterURL: posterPath.map { "\(posterBaseURL)\($0)" },
                 posterData: nil,
-                tmdbID: r["id"] as? Int
+                tmdbID: r["id"] as? Int,
+                originalLanguage: r["original_language"] as? String
             )
         }
     }
@@ -147,7 +157,8 @@ public enum TMDbClient {
                 year: Int(firstAir.prefix(4)),
                 overview: r["overview"] as? String,
                 posterURL: posterPath.map { "\(posterBaseURL)\($0)" },
-                popularity: (r["popularity"] as? Double) ?? 0
+                popularity: (r["popularity"] as? Double) ?? 0,
+                originalLanguage: r["original_language"] as? String
             )
         }
 
@@ -182,7 +193,8 @@ public enum TMDbClient {
             showPosterData: nil,
             showBackdropURL: backdropPath.map { "\(backdropBaseURL)\($0)" },
             showBackdropData: nil,
-            tmdbShowID: id
+            tmdbShowID: id,
+            originalLanguage: json["original_language"] as? String
         )
     }
 
@@ -256,7 +268,9 @@ public enum TMDbClient {
             showPosterData: nil,
             showBackdropURL: showBackdropPath.map { "\(backdropBaseURL)\($0)" },
             showBackdropData: nil,
-            tmdbShowID: showID
+            tmdbShowID: showID,
+            originalLanguage: show["original_language"] as? String
+                ?? (showJSON["original_language"] as? String)
         )
     }
 

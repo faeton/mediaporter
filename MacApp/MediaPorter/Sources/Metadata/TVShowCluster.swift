@@ -25,6 +25,10 @@ public struct ResolvedShow: Equatable, Sendable {
     public var showBackdropURL: String?
     public var showBackdropData: Data?
     public var tmdbShowID: Int?
+    /// TMDb `original_language` (ISO 639-1). Drives the audio-language
+    /// fallback when an embedded stream has no language tag — anime EAC3
+    /// mixes especially tend to ship untagged.
+    public var originalLanguage: String?
 
     public init(
         showName: String,
@@ -35,7 +39,8 @@ public struct ResolvedShow: Equatable, Sendable {
         showPosterData: Data? = nil,
         showBackdropURL: String? = nil,
         showBackdropData: Data? = nil,
-        tmdbShowID: Int? = nil
+        tmdbShowID: Int? = nil,
+        originalLanguage: String? = nil
     ) {
         self.showName = showName
         self.year = year
@@ -46,6 +51,7 @@ public struct ResolvedShow: Equatable, Sendable {
         self.showBackdropURL = showBackdropURL
         self.showBackdropData = showBackdropData
         self.tmdbShowID = tmdbShowID
+        self.originalLanguage = originalLanguage
     }
 }
 
@@ -58,14 +64,19 @@ public struct TVShowCandidate: Identifiable, Sendable {
     public let overview: String?
     public let posterURL: String?
     public let popularity: Double
+    /// TMDb `original_language` (ISO 639-1) — propagated to the resolved
+    /// show + downstream episodes for the audio-language fallback.
+    public let originalLanguage: String?
 
     public init(
         id: Int, name: String, originalName: String?, year: Int?,
-        overview: String?, posterURL: String?, popularity: Double
+        overview: String?, posterURL: String?, popularity: Double,
+        originalLanguage: String? = nil
     ) {
         self.id = id; self.name = name; self.originalName = originalName
         self.year = year; self.overview = overview
         self.posterURL = posterURL; self.popularity = popularity
+        self.originalLanguage = originalLanguage
     }
 }
 

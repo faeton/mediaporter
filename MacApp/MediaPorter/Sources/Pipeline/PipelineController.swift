@@ -385,7 +385,8 @@ public class PipelineController {
             showPosterData: show.showPosterData,
             showBackdropURL: show.showBackdropURL,
             showBackdropData: show.showBackdropData,
-            tmdbShowID: show.tmdbShowID
+            tmdbShowID: show.tmdbShowID,
+            originalLanguage: show.originalLanguage
         )
     }
 
@@ -443,12 +444,14 @@ public class PipelineController {
             if resolved.showName.isEmpty { resolved.showName = candidate.name }
             if resolved.year == nil { resolved.year = candidate.year }
             if resolved.showPosterURL == nil { resolved.showPosterURL = candidate.posterURL }
+            if resolved.originalLanguage == nil { resolved.originalLanguage = candidate.originalLanguage }
         } else {
             resolved = ResolvedShow(
                 showName: candidate.name,
                 year: candidate.year,
                 showPosterURL: candidate.posterURL,
-                tmdbShowID: candidate.id
+                tmdbShowID: candidate.id,
+                originalLanguage: candidate.originalLanguage
             )
         }
         if let url = resolved.showPosterURL {
@@ -1146,6 +1149,7 @@ public class PipelineController {
                         selectedSubtitles: job.selectedSubtitles,
                         externalSubs: externalSubs,
                         burnIn: job.burnInSubtitle,
+                        originalLanguageFallback: job.metadata?.originalLanguage,
                         progress: { pct in
                             let now = Date()
                             if pct < 1.0, now.timeIntervalSince(lastTranscodeUpdate) < 0.25 { return }
@@ -1317,6 +1321,7 @@ public class PipelineController {
                     selectedSubtitles: job.selectedSubtitles,
                     externalSubs: externalSubs,
                     burnIn: job.burnInSubtitle,
+                    originalLanguageFallback: job.metadata?.originalLanguage,
                     progress: { pct in
                         let now = Date()
                         if pct < 1.0, now.timeIntervalSince(lastTranscodeUpdate) < 0.25 { return }
@@ -1429,12 +1434,22 @@ public class PipelineController {
         // after every byte has shipped. Per-file FileBegin/FileComplete now
         // fires immediately after each AFC upload finishes — medialibraryd
         // commits the row within ~1 s (plan #8 gate-test).
-        overallStatus = "Opening sync session..."
+        overallStatus = "Opening sync session…"
         let registerSession = RegisterSession(device: device, verbose: false)
         do {
             let infos = preparedPairs.map { $0.prepared.asSyncFileInfo }
+            // RegisterSession.open emits stage labels — "Waiting for device
+            // to settle…", "Connecting (ATC handshake)…", "Writing sync
+            // manifest…", "Waiting for device library scan…", "Clearing
+            // stale pending asset(s)…". Without this hook, overallStatus
+            // sat at "Opening sync session…" for the whole 5-15 s and the
+            // app looked frozen.
             try await Task.detached {
-                try registerSession.open(files: infos)
+                try registerSession.open(files: infos) { stage in
+                    DispatchQueue.main.async {
+                        self.overallStatus = stage
+                    }
+                }
             }.value
         } catch {
             uploader.close()
@@ -1738,7 +1753,8 @@ public class PipelineController {
                     selectedAudio: job.selectedAudio,
                     selectedSubtitles: job.selectedSubtitles,
                     externalSubs: externalSubs,
-                    burnIn: job.burnInSubtitle
+                    burnIn: job.burnInSubtitle,
+                    originalLanguageFallback: job.metadata?.originalLanguage
                 ) { pct in
                     let now = Date()
                     // Always let the final 1.0 through — the throttle would

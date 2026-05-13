@@ -61,6 +61,15 @@ public enum ResolvedMetadata {
         if case .tvEpisode = self { return true }
         return false
     }
+
+    /// TMDb `original_language` (ISO 639-1) for the title. nil when TMDb
+    /// didn't resolve or the title was created via the fallback path.
+    public var originalLanguage: String? {
+        switch self {
+        case .movie(let m): return m.originalLanguage
+        case .tvEpisode(let e): return e.originalLanguage
+        }
+    }
 }
 
 public enum MetadataLookup {

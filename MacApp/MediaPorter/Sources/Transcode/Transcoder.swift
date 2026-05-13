@@ -139,6 +139,11 @@ public enum Transcoder {
     }
 
     /// Build the ffmpeg command for a transcode/remux job.
+    /// - Parameter originalLanguageFallback: ISO 639-1 or 639-2 code used
+    ///   when an embedded audio stream has no language tag (or "und").
+    ///   Typically the TMDb `original_language` of the title. Without this,
+    ///   anime EAC3 mixes that ship untagged surface as "Unknown" in the
+    ///   iPad TV-app audio switcher.
     static func buildCommand(
         mediaInfo: MediaInfo,
         decision: TranscodeDecision,
@@ -150,8 +155,10 @@ public enum Transcoder {
         selectedAudio: [Int]? = nil,
         selectedSubtitles: [Int]? = nil,
         externalSubs: [ExternalSubtitle] = [],
-        burnIn: BurnInSubtitle? = nil
+        burnIn: BurnInSubtitle? = nil,
+        originalLanguageFallback: String? = nil
     ) -> [String] {
+        let langFallback = LanguageCodes.toIso6392T(originalLanguageFallback)
         guard let ffmpeg = FFmpegLocator.ffmpeg else { return [] }
         var cmd = [ffmpeg.path, "-hide_banner", "-y", "-progress", "pipe:1"]
 
@@ -329,8 +336,16 @@ public enum Transcoder {
                 cmd += ["-c:a:\(outIdx)", "copy"]
             }
 
-            // Audio metadata
-            let lang = aa.stream.language ?? "und"
+            // Audio metadata. Embedded `language` tag wins; "und" / nil
+            // falls back to the title's TMDb `original_language` so the iOS
+            // switcher doesn't surface every untagged track as "Unknown".
+            let probed = aa.stream.language?.lowercased()
+            let lang: String
+            if let probed, !probed.isEmpty, probed != "und" {
+                lang = probed
+            } else {
+                lang = langFallback ?? "und"
+            }
             cmd += ["-metadata:s:a:\(outIdx)", "language=\(lang)"]
             if let title = aa.stream.title {
                 cmd += ["-metadata:s:a:\(outIdx)", "handler_name=\(title)"]
@@ -400,6 +415,7 @@ public enum Transcoder {
         selectedSubtitles: [Int]? = nil,
         externalSubs: [ExternalSubtitle] = [],
         burnIn: BurnInSubtitle? = nil,
+        originalLanguageFallback: String? = nil,
         progress: ((Double) -> Void)? = nil
     ) async throws -> URL {
         guard let ffmpeg = FFmpegLocator.ffmpeg else { throw TranscodeError.ffmpegNotFound }
@@ -416,7 +432,8 @@ public enum Transcoder {
             selectedAudio: selectedAudio,
             selectedSubtitles: selectedSubtitles,
             externalSubs: externalSubs,
-            burnIn: burnIn
+            burnIn: burnIn,
+            originalLanguageFallback: originalLanguageFallback
         )
 
         guard !cmd.isEmpty else { throw TranscodeError.ffmpegNotFound }
