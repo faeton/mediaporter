@@ -224,6 +224,20 @@ VARIANTS: list[Variant] = [
         ],
         notes="both private-use codes (qaa + qab) — do both rows show handler names?",
     ),
+    # Round 3: BCP-47 extended language tag. mp4 has a separate `elng` atom
+    # (extended_language_tag) that carries the full BCP-47 string alongside
+    # the 3-letter mdhd lang. iOS may surface region/variant when present.
+    _v(
+        "M", "SubPicker M BcpRegion",
+        sub_maps=["-map", "1:0", "-map", "2:0"],
+        sub_meta=[
+            "-metadata:s:s:0", "language=ru-RU",
+            "-metadata:s:s:0", "handler_name=CafeSubs",
+            "-metadata:s:s:1", "language=ru-UA",
+            "-metadata:s:s:1", "handler_name=Crunchyroll",
+        ],
+        notes="BCP-47 region tags ru-RU / ru-UA — does iOS show 'Russian (Russia)' / 'Russian (Ukraine)'?",
+    ),
 ]
 
 # ffprobe-confirmed findings from a dry-run build (before device sync):

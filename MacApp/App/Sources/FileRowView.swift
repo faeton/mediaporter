@@ -468,6 +468,73 @@ struct FileRowView: View {
         }
     }
 
+    /// Collect labels of every subtitle track currently selected for this
+    /// job, keyed by ISO 639-2/T language. Embedded streams come first (in
+    /// selection order), then external SRTs, then cluster-mux extras. Used
+    /// by `sameLangSubWarning` to surface the iOS picker's same-language
+    /// dedup behavior — the TV-app collapses two tracks that share a lang
+    /// code into a single picker entry regardless of `title`, `handler_name`,
+    /// or disposition. We verified this on iPhone 16 Pro / iOS 26.4.2 with
+    /// the `MacApp/scripts/test_subtitle_picker.py` variant set: only F (rus
+    /// + qaa) and I (rus + ukr) split the picker; everything else collapsed.
+    private var selectedSubLabelsByLang: [(lang: String, labels: [String])] {
+        let subs = job.mediaInfo?.subtitleStreams ?? []
+        let exts = job.mediaInfo?.externalSubtitles ?? []
+
+        var order: [String] = []
+        var grouped: [String: [String]] = [:]
+        func add(_ rawLang: String?, _ label: String) {
+            let key = LanguageCodes.toIso6392T(rawLang) ?? "und"
+            if grouped[key] == nil { order.append(key) }
+            grouped[key, default: []].append(label)
+        }
+
+        for i in job.selectedSubtitles where i < subs.count {
+            let s = subs[i]
+            let label = (s.title?.isEmpty == false) ? s.title! : "embedded #\(i + 1)"
+            add(s.language, label)
+        }
+        for i in job.selectedExternalSubs where i < exts.count {
+            let e = exts[i]
+            let parent = e.path.deletingLastPathComponent().lastPathComponent
+            add(e.language, parent.isEmpty ? e.path.lastPathComponent : parent)
+        }
+        for ref in job.externalTracksToMux where ref.kind == .sub {
+            add(ref.lang, ref.label)
+        }
+        return order.map { ($0, grouped[$0] ?? []) }
+    }
+
+    /// Warning rendered above the subtitle list when 2+ tracks share a
+    /// language code. iPad TV-app's picker shows only one of them; the
+    /// rest are in the mp4 but invisible to the user.
+    @ViewBuilder
+    private var sameLangSubWarning: some View {
+        let conflicts = selectedSubLabelsByLang.filter { $0.labels.count > 1 }
+        if !conflicts.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(conflicts, id: \.lang) { c in
+                    let display = Locale.current.localizedString(forLanguageCode: c.lang)?
+                        .capitalized ?? c.lang.uppercased()
+                    let visible = c.labels.first ?? c.lang
+                    let hidden = c.labels.dropFirst().joined(separator: ", ")
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.chipSkipText)
+                        (Text("iPad TV.app shows only one \(display) subtitle — using ")
+                            + Text(visible).bold()
+                            + Text(". \(hidden) won't appear in the picker."))
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.textDim)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(.bottom, 6)
+        }
+    }
+
     /// One-line explainer shown above the subtitle checklist. Message depends
     /// on what kinds of subs the file actually has, so it's informative instead
     /// of generic ("drop a .srt next to the file" wouldn't help if the user
@@ -584,6 +651,7 @@ struct FileRowView: View {
         OptionsRow(label: "Subtitles", systemImage: "captions.bubble", theme: theme) {
             VStack(alignment: .leading, spacing: 2) {
                 subtitleExplainer
+                sameLangSubWarning
                 if let subs = job.mediaInfo?.subtitleStreams {
                     ForEach(subs.indices, id: \.self) { i in
                         subtitleRow(subs: subs, index: i)
