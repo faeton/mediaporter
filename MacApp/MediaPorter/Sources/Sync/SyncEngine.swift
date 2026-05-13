@@ -153,7 +153,7 @@ final class RegisterSession {
     /// inside the items is unused at this stage (plist doesn't reference
     /// it); callers can pass placeholder sizes if real values aren't known
     /// yet.
-    func open(files: [SyncFileInfo]) throws {
+    func open(files: [SyncFileInfo], progress: ((String) -> Void)? = nil) throws {
         var lastError: Error?
         for attempt in 0..<2 {
             // Fresh session per attempt — handshake leaves stale state if
@@ -161,18 +161,24 @@ final class RegisterSession {
             // medialibraryd has a moment to commit any in-flight state from
             // the previous run; longer on retry.
             let settle: UInt32 = attempt == 0 ? 2 : 6
+            progress?(attempt == 0
+                ? "Waiting for device to settle…"
+                : "Retrying after handshake failure — waiting longer…")
             sleep(settle)
 
             let s = ATCSession(device: device, verbose: verbose)
             do {
+                progress?("Connecting to device (ATC handshake)…")
                 let (grappa, anchorStr) = try s.handshake()
                 let newAnchor = String(Int(anchorStr)! + 1)
+                progress?("Building sync manifest…")
                 let plistData = s.buildSyncPlist(files: files, anchor: Int(newAnchor)!)
                 let cigData = try s.computeCIG(deviceGrappa: grappa, plistData: plistData)
                 let registerAFC = try AFCClient(device: device)
                 try s.prepareSync(
                     afc: registerAFC, files: files,
-                    plistData: plistData, cigData: cigData, anchor: newAnchor
+                    plistData: plistData, cigData: cigData, anchor: newAnchor,
+                    progress: progress
                 )
                 self.session = s
                 self.afc = registerAFC
@@ -195,6 +201,16 @@ final class RegisterSession {
     func registerFile(_ f: SyncFileInfo) throws {
         guard let session else { throw SyncError.handshakeFailed("registerFile before open") }
         try session.registerFile(f)
+    }
+
+    func beginFile(_ f: SyncFileInfo) throws {
+        guard let session else { throw SyncError.handshakeFailed("beginFile before open") }
+        try session.beginFile(f)
+    }
+
+    func completeFile(_ f: SyncFileInfo) throws {
+        guard let session else { throw SyncError.handshakeFailed("completeFile before open") }
+        try session.completeFile(f)
     }
 
     func abandonAsset(assetID: Int) {

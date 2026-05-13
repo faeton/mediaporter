@@ -74,7 +74,10 @@ public enum MetadataLookup {
         sourceURL: URL? = nil,
         duration: TimeInterval? = nil
     ) async -> ResolvedMetadata? {
-        let parsed = FilenameParser.parse(path.lastPathComponent)
+        let parsed = FilenameParser.parse(
+            path.lastPathComponent,
+            parentDir: path.deletingLastPathComponent().lastPathComponent
+        )
 
         switch parsed.mediaType {
         case .tvShow:

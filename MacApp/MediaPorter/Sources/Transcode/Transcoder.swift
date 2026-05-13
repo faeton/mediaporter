@@ -295,7 +295,19 @@ public enum Transcoder {
                 }
 
                 if hwAccel && detectVideoToolbox() {
-                    cmd += ["-c:v", "hevc_videotoolbox", "-q:v", String(quality.vtQuality), "-tag:v", "hvc1"]
+                    // iOS HEVC decoder is strict: without yuv420p + Main profile +
+                    // colour metadata the file decodes to black on device (valid
+                    // container, no frames rendered). VideoToolbox defaults to
+                    // nv12/Main and *omits* colour atoms unless asked.
+                    cmd += ["-c:v", "hevc_videotoolbox",
+                            "-q:v", String(quality.vtQuality),
+                            "-profile:v", "main",
+                            "-pix_fmt", "yuv420p",
+                            "-tag:v", "hvc1",
+                            "-color_primaries", "bt709",
+                            "-color_trc", "bt709",
+                            "-colorspace", "bt709",
+                            "-color_range", "tv"]
                 } else {
                     cmd += ["-c:v", "libx265", "-crf", String(quality.crf),
                             "-preset", quality.preset, "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]
@@ -339,15 +351,37 @@ public enum Transcoder {
                 let sub = mediaInfo.subtitleStreams[i]
                 let lang = sub.language ?? "und"
                 cmd += ["-metadata:s:s:\(subOutIdx)", "language=\(lang)"]
+                // Title distinguishes multiple tracks in the same language
+                // (e.g. CafeSubs vs Crunchyroll, both rus). TV.app dedupes
+                // by lang otherwise.
+                if let title = sub.title {
+                    cmd += ["-metadata:s:s:\(subOutIdx)", "title=\(title)"]
+                    cmd += ["-metadata:s:s:\(subOutIdx)", "handler_name=\(title)"]
+                }
                 subOutIdx += 1
             }
             for ext in embedExternals {
                 cmd += ["-metadata:s:s:\(subOutIdx)", "language=\(ext.language)"]
+                // External subs come from the user's filesystem; derive a
+                // human label from the parent directory name so the picker
+                // shows e.g. "CafeSubs" rather than two identical "rus" rows.
+                let label = ext.path.deletingLastPathComponent().lastPathComponent
+                if !label.isEmpty {
+                    cmd += ["-metadata:s:s:\(subOutIdx)", "title=\(label)"]
+                    cmd += ["-metadata:s:s:\(subOutIdx)", "handler_name=\(label)"]
+                }
                 subOutIdx += 1
             }
         } else {
             cmd += ["-sn"]
         }
+
+        // Strip chapter + data streams. ffmpeg's mp4 muxer auto-materializes
+        // chapter metadata as a `bin_data / codec_tag=text / SubtitleHandler`
+        // track even when we don't `-map` it; iOS treats that as a phantom
+        // selectable text alternative and breaks the audio-switcher UI for
+        // files that otherwise satisfy the AUDIO_SWITCHER_RULE.
+        cmd += ["-map_chapters", "-1", "-dn"]
 
         // Output
         cmd += ["-movflags", "+faststart", "-f", "mp4", outputPath.path]
@@ -386,6 +420,9 @@ public enum Transcoder {
         )
 
         guard !cmd.isEmpty else { throw TranscodeError.ffmpegNotFound }
+
+        DebugLog.write("ffmpeg", "\(ffmpeg.path) " + cmd.dropFirst().joined(separator: " "))
+        DebugLog.write("ffmpeg.output", outputPath.path)
 
         let proc = Process()
         proc.executableURL = ffmpeg
@@ -483,6 +520,35 @@ public enum Transcoder {
         // tick. Without this snap the row sits at "98%" through tagging.
         progress?(1.0)
 
+        // Post-transcode introspection — temporary, for the binding bug. We
+        // need to know the *actual* codec_tag, profile, and pix_fmt of the
+        // file we hand to iOS, not what we asked ffmpeg for (VideoToolbox
+        // and -c copy paths produce surprises).
+        probeOutputForDebug(outputPath)
+
         return outputPath
+    }
+
+    private static func probeOutputForDebug(_ url: URL) {
+        let ffprobe = (FFmpegLocator.ffmpeg?.deletingLastPathComponent().appendingPathComponent("ffprobe")) ?? URL(fileURLWithPath: "/opt/homebrew/bin/ffprobe")
+        guard FileManager.default.isExecutableFile(atPath: ffprobe.path) else { return }
+        let proc = Process()
+        proc.executableURL = ffprobe
+        proc.arguments = ["-v", "error", "-show_entries",
+                          "stream=index,codec_type,codec_name,codec_tag_string,profile,pix_fmt,color_space,color_primaries,color_transfer,color_range,width,height,channels:stream_tags=language,handler_name,title:disposition=default",
+                          "-of", "csv=p=0", url.path]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            if let s = String(data: data, encoding: .utf8) {
+                for line in s.split(separator: "\n") where !line.isEmpty {
+                    DebugLog.write("ffprobe.out", "\(url.lastPathComponent): \(line)")
+                }
+            }
+        } catch {}
     }
 }

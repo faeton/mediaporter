@@ -1529,6 +1529,13 @@ public class PipelineController {
             let capCancel = cancelFlag
             let uploadStart = Date()
             prevWork = Task.detached { [weak self] in
+                // FileBegin BEFORE upload — announces the asset so the bytes
+                // arriving at /iTunes_Control/Music/Fxx/<slot>.mp4 get bound
+                // to assetID. With FileBegin sent after upload, bytes land
+                // anonymously, medialibraryd treats them as orphan content,
+                // and the row never binds (location='', file_size=0).
+                try registerSession.beginFile(capPrepared.asSyncFileInfo)
+
                 var lastReport = Date.distantPast
                 try uploader.upload(capPrepared, progress: { sent, total in
                     let now = Date()
@@ -1546,11 +1553,10 @@ public class PipelineController {
                     capJob.status = .uploaded
                 }
 
-                // Send FileBegin / artwork / FileProgress / FileComplete on
-                // the live ATC session. Fast (~ms range; no waiting for
-                // SyncFinished here). Failure here means medialibraryd will
-                // be stuck — caller's finishSync() will log the timeout.
-                try registerSession.registerFile(capPrepared.asSyncFileInfo)
+                // Artwork + FileProgress + FileComplete on the live ATC
+                // session. Fast (~ms range). Failure here means medialibraryd
+                // will be stuck — caller's finishSync() will log the timeout.
+                try registerSession.completeFile(capPrepared.asSyncFileInfo)
 
                 await MainActor.run { [weak self] in
                     capJob.status = .synced
@@ -1657,9 +1663,51 @@ public class PipelineController {
 
     /// Transcode + tag a single analyzed job in place. Shared between runPipelined and transcodeOne.
     private func runTranscodeStep(for job: FileJob) async {
-        guard let info = job.mediaInfo, let decision = job.decision else {
+        guard job.mediaInfo != nil, job.decision != nil else {
             job.status = .failed
             job.error = "Missing analysis data"
+            return
+        }
+
+        // Pre-mux external dubs/subs into an intermediate MKV — same step as
+        // runAll (line ~1078). Without this the pipelined path silently drops
+        // every extra cluster track because ffmpeg is fed the source file
+        // directly and never sees the sidecar audio/sub.
+        var muxIntermediate: URL? = nil
+        if !job.externalTracksToMux.isEmpty {
+            job.status = .muxing
+            let intermediate = FileManager.default.temporaryDirectory
+                .appendingPathComponent("mp-mux-\(UUID().uuidString).mkv")
+            do {
+                try await ExternalMux.mux(
+                    sourceVideo: job.inputURL,
+                    extras: job.externalTracksToMux,
+                    outputPath: intermediate
+                )
+                var newInfo = try await probeFile(url: intermediate)
+                scanExternalSubtitles(mediaInfo: &newInfo)
+                let newDecision = evaluateCompatibility(mediaInfo: newInfo)
+                job.mediaInfo = newInfo
+                job.decision = newDecision
+                muxIntermediate = intermediate
+                job.selectedAudio = Array(0..<newInfo.audioStreams.count)
+                job.selectedSubtitles = newInfo.subtitleStreams.enumerated().compactMap { idx, s in
+                    isTextSubtitle(s.codecName) || s.codecName == "mov_text" ? idx : nil
+                }
+                job.externalTracksToMux = []
+            } catch {
+                job.status = .failed
+                job.error = "External mux: \(error.localizedDescription)"
+                return
+            }
+        }
+        defer {
+            if let u = muxIntermediate { try? FileManager.default.removeItem(at: u) }
+        }
+
+        guard let info = job.mediaInfo, let decision = job.decision else {
+            job.status = .failed
+            job.error = "Missing analysis data after mux"
             return
         }
 
@@ -1734,7 +1782,12 @@ public class PipelineController {
         // returns `showName` for TV so we can't use it here.
         let resolvedTitle: String
         if case .tvEpisode(let e) = meta {
-            resolvedTitle = e.episodeTitle ?? "Episode \(e.episode)"
+            // Generic fallbacks like "Episode 1" collide with Apple's
+            // cloud-catalog matching in medialibraryd — the row goes in
+            // unbound (location='', file_size=0) and the file won't play.
+            // A show-qualified title sidesteps the match.
+            resolvedTitle = e.episodeTitle
+                ?? String(format: "%@ — S%02dE%02d", e.showName, e.season, e.episode)
         } else {
             resolvedTitle = meta?.title ?? job.fileName
         }
@@ -1751,6 +1804,19 @@ public class PipelineController {
             height: info?.videoStreams.first?.height
         ) > 0
         item.channels = info?.audioStreams.first?.channels ?? 2
+
+        // Predict post-mux/transcode track multiplicity for the insert_track
+        // plist. The flags drive whether TV.app shows the audio/subtitle
+        // pickers — without them the user gets a forced single track even
+        // if extras were merged in.
+        let extraDubs = job.externalTracksToMux.filter { $0.kind == .dub }.count
+        let extraSubs = job.externalTracksToMux.filter { $0.kind == .sub }.count
+        let selAudio = job.selectedAudio.count
+        let selSubs = job.selectedSubtitles.count
+        let extSubs = job.selectedExternalSubs.count
+        item.hasAlternateAudio = (selAudio + extraDubs) > 1
+        item.hasSubtitles = (selSubs + extSubs + extraSubs) > 0
+
         item.posterData = meta?.posterData
         if case .tvEpisode(let e) = meta {
             item.isMovie = false
@@ -1766,8 +1832,10 @@ public class PipelineController {
             item.sortAlbum = "\(e.showName.lowercased()), season \(e.season)"
             item.albumArtist = e.showName
             item.sortAlbumArtist = e.showName.lowercased()
-            // Pass the show portrait through as a second artwork — see
-            // SyncItem.showPosterData for the experiment rationale.
+            // For TV the Library tile renders posterData. The episode still
+            // is landscape and looks wrong squished into a portrait slot —
+            // prefer the show portrait when we have one.
+            item.posterData = e.showPosterData ?? e.posterData
             item.showPosterData = e.showPosterData
         }
         return item

@@ -69,8 +69,17 @@ public enum ExternalMux {
         var cmd: [String] = ["-y", "-i", sourceVideo.path]
         for (url, _) in inputs { cmd.append("-i"); cmd.append(url.path) }
 
-        // Keep everything from source.
-        cmd.append("-map"); cmd.append("0")
+        // Keep only video/audio/sub from source. `-map 0` pulled attached_pic,
+        // fonts, data streams and chapters into the intermediate mkv, which
+        // then surfaced as `bin_data` text tracks in the final mp4 and broke
+        // the iOS TV-app's audio/subtitle switchers. Explicit per-type maps
+        // + `-map_chapters -1` keep the intermediate clean. `?` makes the
+        // map optional so files without audio or subs don't fail.
+        cmd.append("-map"); cmd.append("0:v:0")
+        cmd.append("-map"); cmd.append("0:a?")
+        cmd.append("-map"); cmd.append("0:s?")
+        cmd.append("-map_chapters"); cmd.append("-1")
+        cmd.append("-dn")
 
         // Map each external as a single audio or subtitle stream.
         for (i, (_, ref)) in inputs.enumerated() {

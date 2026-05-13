@@ -40,8 +40,12 @@ enum Tagger {
             cmd += ["-i", posterPath.path]
         }
 
-        // Map streams
-        cmd += ["-map", "0"]
+        // Map only the streams that should reach iOS: video, audio, subs.
+        // The previous `-map 0` pulled chapter / data / attached_pic streams
+        // through unchanged from the transcoder output, which broke the TV
+        // app's audio + subtitle switchers (phantom selectable text track).
+        cmd += ["-map", "0:v:0", "-map", "0:a", "-map", "0:s?"]
+        cmd += ["-map_chapters", "-1", "-dn"]
         if posterTempURL != nil {
             cmd += ["-map", "1"]
             cmd += ["-disposition:v:1", "attached_pic"]

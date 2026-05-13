@@ -80,6 +80,7 @@ class AFCClient {
     ) throws {
         guard let c = conn else { return }
         let fileSize = try FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as! Int
+        DebugLog.write("afc.upload.begin", "\(localURL.path) (\(fileSize) B) -> \(remotePath)")
 
         var handle: Int = 0
         let rc = MD.afcFileOpen(c, remotePath, 2, &handle)
@@ -112,6 +113,8 @@ class AFCClient {
             sent += read
             progress?(sent, fileSize)
         }
+        DebugLog.write("afc.upload.end",
+            "\(remotePath) sent=\(sent) expected=\(fileSize) \(sent == fileSize ? "OK" : "TRUNCATED")")
     }
 
     /// Read a remote file fully into memory. Returns nil if the file doesn't

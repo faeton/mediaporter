@@ -26,6 +26,15 @@ struct SyncItem {
     var sortAlbumArtist: String?
     var isHD: Bool = false
     var channels: Int = 2
+    /// True when the muxed output has more than one audio stream — needed
+    /// so TV.app surfaces the audio track switcher. Without it, only the
+    /// default track is exposed regardless of how many we shipped in the
+    /// mp4. Drives `video_info.has_alternate_audio` in the insert_track
+    /// plist.
+    var hasAlternateAudio: Bool = false
+    /// True when at least one subtitle stream is in the output. Drives
+    /// `video_info.has_subtitles` so the sub picker appears.
+    var hasSubtitles: Bool = false
     var posterData: Data?
     /// Show portrait JPEG for TV episodes. Uploaded as a second Airlock
     /// file at `/Airlock/Media/Artwork/<assetID>_show` and surfaced in
@@ -214,9 +223,9 @@ class ATCSession {
                 "item": itemDict,
                 "location": ["kind": "MPEG-4 video file"],
                 "video_info": [
-                    "has_alternate_audio": false,
+                    "has_alternate_audio": f.item.hasAlternateAudio,
                     "is_anamorphic": false,
-                    "has_subtitles": false,
+                    "has_subtitles": f.item.hasSubtitles,
                     "is_hd": f.item.isHD,
                     "is_compressed": false,
                     "has_closed_captions": false,
@@ -441,9 +450,11 @@ class ATCSession {
         files: [SyncFileInfo],
         plistData: Data,
         cigData: Data,
-        anchor: String
+        anchor: String,
+        progress: ((String) -> Void)? = nil
     ) throws {
         // Step 1: Write plist + CIG
+        progress?("Writing sync manifest to device…")
         afc.makedirs("/iTunes_Control/Sync/Media")
         let plistPath = String(format: "/iTunes_Control/Sync/Media/Sync_%08d.plist", Int(anchor)!)
         try afc.writeFile(plistPath, data: plistData)
@@ -464,6 +475,7 @@ class ATCSession {
         var gotManifest = false
         let ourIDs = Set(files.map { String($0.assetID) })
         var staleIDs: [String] = []
+        progress?("Waiting for device library scan (AssetManifest)…")
         log("  Waiting for AssetManifest...")
         for _ in 0..<30 {
             let (msg, name) = readMsg(timeout: 15)
@@ -486,6 +498,7 @@ class ATCSession {
         // own FileBegins is safer than the old end-of-batch sweep (no race
         // with medialibraryd accepting our IDs first).
         if !staleIDs.isEmpty {
+            progress?("Clearing \(staleIDs.count) stale pending asset(s) from prior syncs…")
             log("  Clearing \(staleIDs.count) stale pending asset(s)...")
             for sid in staleIDs {
                 check("FileError", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileError" as CFString, [
@@ -510,11 +523,20 @@ class ATCSession {
     /// via AFC at this point (caller's responsibility — typically right
     /// after `AFCUploader.upload` returns for this file). Each call commits
     /// the row in MediaLibrary.sqlitedb within ~1 s on the device.
-    func registerFile(_ f: SyncFileInfo) throws {
-        guard let afc = streamingAFC else {
-            throw SyncError.handshakeFailed("registerFile called before prepareSync")
+    /// Send FileBegin only. Must be sent BEFORE AFC upload so medialibraryd
+    /// can match incoming bytes at `f.devicePath` to the announced asset_id.
+    /// The Swift port previously did this AFTER upload (registerFile bundled
+    /// both halves) and rows ended up unbound — bytes arrived at the path
+    /// with no prior claim, medialibraryd stored them as orphan, and the
+    /// later FileComplete didn't retroactively bind. python-reference's
+    /// upload_and_register is FileBegin → upload → FileProgress+Complete.
+    func beginFile(_ f: SyncFileInfo) throws {
+        guard streamingAFC != nil else {
+            throw SyncError.handshakeFailed("beginFile called before prepareSync")
         }
         let aid = String(f.assetID)
+        DebugLog.write("atc.FileBegin",
+            "asset=\(aid) path=\(f.devicePath) size=\(f.item.fileSize)")
         log("  >> FileBegin (asset=\(aid))")
         check("FileBegin", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileBegin" as CFString, [
             "AssetID": aid,
@@ -522,6 +544,15 @@ class ATCSession {
             "TotalSize": f.item.fileSize,
             "Dataclass": "Media",
         ] as NSDictionary as CFDictionary)!))
+    }
+
+    /// Send artwork upload + FileProgress + FileComplete. Call AFTER the AFC
+    /// upload of `f.devicePath` has finished. Pair with a prior beginFile.
+    func completeFile(_ f: SyncFileInfo) throws {
+        guard let afc = streamingAFC else {
+            throw SyncError.handshakeFailed("completeFile called before prepareSync")
+        }
+        let aid = String(f.assetID)
 
         if let poster = f.item.posterData {
             let artPath = "/Airlock/Media/Artwork/\(f.assetID)"
@@ -542,11 +573,22 @@ class ATCSession {
         ] as NSDictionary as CFDictionary)!))
 
         log("  >> FileComplete (path=\(f.devicePath))")
+        DebugLog.write("atc.FileComplete", "asset=\(aid) path=\(f.devicePath)")
         check("FileComplete", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileComplete" as CFString, [
             "AssetID": aid,
             "AssetPath": f.devicePath,
             "Dataclass": "Media",
         ] as NSDictionary as CFDictionary)!))
+    }
+
+    /// Legacy bundled call — FileBegin + artwork + FileProgress + FileComplete
+    /// in one shot. Kept for callers that pre-uploaded (legacy register path,
+    /// orphan recovery). Do NOT use from the streaming pipelined flow — bytes
+    /// must already be on the device when this runs, otherwise rows stay
+    /// unbound.
+    func registerFile(_ f: SyncFileInfo) throws {
+        try beginFile(f)
+        try completeFile(f)
     }
 
     /// Send FileError(0) for an asset we will NOT be FileCompleting (transcode

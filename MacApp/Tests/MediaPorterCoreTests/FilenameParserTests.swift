@@ -125,4 +125,48 @@ extension FilenameParserTests {
         let p = FilenameParser.parse("Apollo - 13.mkv")
         XCTAssertEqual(p.mediaType, .movie)
     }
+
+    // Anime rip carries season in the show name itself ("Show S3 - 05").
+    // Must lift the trailing S## off into `season` and out of `title`,
+    // otherwise the TMDb query is polluted and season silently stays at 1.
+    func testAnimeTrailingSeasonMarkerSAbbrev() {
+        let p = FilenameParser.parse(
+            "[BudLightSubs] Jujutsu Kaisen S3 - 05 [1080p].mkv"
+        )
+        XCTAssertEqual(p.mediaType, .tvShow)
+        XCTAssertEqual(p.title, "Jujutsu Kaisen")
+        XCTAssertEqual(p.season, 3)
+        XCTAssertEqual(p.episode, 5)
+    }
+
+    // Parent folder encodes the season ("Jujutsu.Kaisen.Season3.WEB-DL"),
+    // filename itself doesn't. Folder is consulted only when the filename
+    // gave no explicit season — explicit S##E## must still win.
+    func testParentDirSeasonFallback() {
+        let p = FilenameParser.parse(
+            "[Erai-raws] Odd Taxi - 01 [720p].mkv",
+            parentDir: "Odd.Taxi.Season2.WEB-DL.1080p"
+        )
+        XCTAssertEqual(p.season, 2)
+        XCTAssertEqual(p.episode, 1)
+    }
+
+    func testParentDirIgnoredWhenFilenameExplicit() {
+        let p = FilenameParser.parse(
+            "Breaking.Bad.S01E02.720p.mkv",
+            parentDir: "Breaking.Bad.Season5"
+        )
+        XCTAssertEqual(p.season, 1)
+        XCTAssertEqual(p.episode, 2)
+    }
+
+    func testAnimeTrailingSeasonMarkerSpelledOut() {
+        let p = FilenameParser.parse(
+            "[SubsPlease] Mushoku Tensei Season 2 - 12 [1080p].mkv"
+        )
+        XCTAssertEqual(p.mediaType, .tvShow)
+        XCTAssertEqual(p.title, "Mushoku Tensei")
+        XCTAssertEqual(p.season, 2)
+        XCTAssertEqual(p.episode, 12)
+    }
 }
