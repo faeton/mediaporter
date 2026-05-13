@@ -123,3 +123,100 @@ public extension Array where Element == DeviceLibraryEntry {
         }
     }
 }
+
+/// Cleanup-side reading of the device library: which `/iTunes_Control/Music/Fxx/<name>`
+/// paths the device's medialibraryd considers registered. The path is the
+/// concatenation of `base_location.path` (e.g. `iTunes_Control/Music/F39`)
+/// and `item_extra.location` (e.g. `FSYH.mp4`), normalized with a leading
+/// slash to match what `DeviceMaintenance.scanStagingMedia` returns.
+///
+/// Used to identify true orphans: scanned files that don't appear in this
+/// set are leftovers from abandoned syncs and safe to delete.
+public struct RegisteredPaths: Sendable {
+    /// Fully-qualified registered paths (e.g. /iTunes_Control/Music/F39/FSYH.mp4).
+    public let paths: Set<String>
+    /// Slot directories (e.g. F39) that have at least one item row but no
+    /// resolvable filename — the row exists with `base_location_id > 0` but
+    /// `item_extra.location` is empty (binding still in flight from a fresh
+    /// sync). Anything in those slots gets the benefit of the doubt and is
+    /// kept regardless of filename match.
+    public let pendingSlots: Set<String>
+}
+
+public func loadDeviceRegisteredPaths(device: DeviceInfo) throws -> RegisteredPaths {
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("mp-devpaths-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let afc: AFCClient
+    do { afc = try AFCClient(device: device) }
+    catch { throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription) }
+    defer { afc.close() }
+
+    var mainPulled = false
+    for f in dbFiles {
+        do {
+            let data = try afc.readFile("\(dbDir)/\(f)")
+            try data.write(to: tmp.appendingPathComponent(f))
+            if f == dbFiles[0] { mainPulled = true }
+        } catch {
+            if f == dbFiles[0] {
+                throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription)
+            }
+        }
+    }
+    guard mainPulled else { return RegisteredPaths(paths: [], pendingSlots: []) }
+
+    let dbPath = tmp.appendingPathComponent(dbFiles[0]).path
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    // Outer left join — we want rows where base_location_id > 0 even if
+    // item_extra.location hasn't been populated yet (post-sync binding lag,
+    // observed during the re-upload diagnostic). For those we report just
+    // the slot dir in pendingSlots and skip the path entry.
+    proc.arguments = [
+        "-readonly", "-separator", "\t", dbPath,
+        """
+        SELECT COALESCE(bl.path, ''), COALESCE(e.location, '')
+        FROM item i
+        LEFT JOIN base_location bl ON bl.base_location_id = i.base_location_id
+        LEFT JOIN item_extra e ON e.item_pid = i.item_pid
+        WHERE i.base_location_id > 0;
+        """
+    ]
+    let out = Pipe()
+    proc.standardOutput = out
+    proc.standardError = FileHandle.nullDevice
+    do {
+        try proc.run()
+        proc.waitUntilExit()
+    } catch {
+        throw DeviceLibraryQueryError.queryFailed(error.localizedDescription)
+    }
+    guard proc.terminationStatus == 0 else {
+        throw DeviceLibraryQueryError.queryFailed("sqlite3 exit \(proc.terminationStatus)")
+    }
+
+    let raw = out.fileHandleForReading.readDataToEndOfFile()
+    guard let text = String(data: raw, encoding: .utf8) else {
+        return RegisteredPaths(paths: [], pendingSlots: [])
+    }
+
+    var paths = Set<String>()
+    var pendingSlots = Set<String>()
+    for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+        let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2 else { continue }
+        let basePath = String(parts[0])
+        let filename = String(parts[1])
+        guard basePath.hasPrefix("iTunes_Control/Music/") else { continue }
+        let slot = basePath.split(separator: "/").last.map(String.init) ?? ""
+        if filename.isEmpty {
+            if !slot.isEmpty { pendingSlots.insert(slot) }
+        } else {
+            paths.insert("/\(basePath)/\(filename)")
+        }
+    }
+    return RegisteredPaths(paths: paths, pendingSlots: pendingSlots)
+}

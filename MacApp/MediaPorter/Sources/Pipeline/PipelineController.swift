@@ -1966,6 +1966,21 @@ public class PipelineController {
         }.value) ?? []
     }
 
+    /// Snapshot of which `/iTunes_Control/Music/Fxx/<name>` paths the device's
+    /// medialibraryd considers registered. Used by the cleanup flow to keep
+    /// active library content and only delete true orphans. Empty result on
+    /// any failure — the caller falls back to showing 'cancel' rather than
+    /// risk deleting registered content blindly.
+    public func loadRegisteredPaths() async -> RegisteredPaths {
+        guard let device = deviceInfo else {
+            return RegisteredPaths(paths: [], pendingSlots: [])
+        }
+        let handle = device
+        return (try? await Task.detached {
+            try loadDeviceRegisteredPaths(device: handle)
+        }.value) ?? RegisteredPaths(paths: [], pendingSlots: [])
+    }
+
     /// Delete the given absolute device paths. Returns the number successfully removed.
     /// Refreshes device free-space after.
     @discardableResult
