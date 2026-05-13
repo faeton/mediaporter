@@ -253,6 +253,27 @@ class ATCSession {
             "operations": operations,
         ]
 
+        // Identity dump for re-upload binding diagnosis. We log the tuple
+        // medialibraryd uses to match insert_track against existing rows
+        // (show + season + episode) plus per-file randoms (assetID, device
+        // path, artwork cache ids). When a previously-deleted episode
+        // doesn't bind, this is the data we need to compare across runs.
+        for f in files {
+            let item = f.item
+            var parts: [String] = [
+                "asset=\(f.assetID)",
+                "path=\(f.devicePath)",
+                "title=\(item.title)",
+            ]
+            if item.isTVShow {
+                parts.append("show=\(item.tvShowName ?? "")")
+                if let s = item.seasonNumber { parts.append("s=\(s)") }
+                if let e = item.episodeNumber { parts.append("e=\(e)") }
+                if let id = item.episodeSortID { parts.append("ep_sort=\(id)") }
+            }
+            DebugLog.write("atc.plist.identity", parts.joined(separator: " "))
+        }
+
         return try! PropertyListSerialization.data(
             fromPropertyList: plist,
             format: .binary,
@@ -299,6 +320,7 @@ class ATCSession {
         log("  >> SendPowerAssertion")
         check("SendPowerAssertion", ATH.sendPowerAssertion(conn!, kCFBooleanTrue))
         log("  >> MetadataSyncFinished (anchor=\"\(anchor)\")")
+        DebugLog.write("atc.MetadataSyncFinished", "anchor=\(anchor)")
         check("MetadataSyncFinished", ATH.sendMetadataSyncFinished(
             conn!,
             ["Keybag": 1, "Media": 1] as NSDictionary as CFDictionary,
@@ -321,6 +343,7 @@ class ATCSession {
                 gotManifest = true
                 if verbose, let m = msg { CFShow(m as CFTypeRef) }
                 if let m = msg {
+                    dumpManifest(m)
                     staleIDs = extractStaleAssets(manifestMsg: m, ourIDs: ourIDs)
                     if !staleIDs.isEmpty {
                         log("  Manifest contains \(staleIDs.count) stale pending asset(s)")
@@ -465,6 +488,7 @@ class ATCSession {
         log("  >> SendPowerAssertion")
         check("SendPowerAssertion", ATH.sendPowerAssertion(conn!, kCFBooleanTrue))
         log("  >> MetadataSyncFinished (anchor=\"\(anchor)\")")
+        DebugLog.write("atc.MetadataSyncFinished", "anchor=\(anchor)")
         check("MetadataSyncFinished", ATH.sendMetadataSyncFinished(
             conn!,
             ["Keybag": 1, "Media": 1] as NSDictionary as CFDictionary,
@@ -486,6 +510,7 @@ class ATCSession {
             if name == "AssetManifest" {
                 gotManifest = true
                 if let m = msg {
+                    dumpManifest(m)
                     staleIDs = extractStaleAssets(manifestMsg: m, ourIDs: ourIDs)
                 }
                 break
@@ -500,6 +525,7 @@ class ATCSession {
         if !staleIDs.isEmpty {
             progress?("Clearing \(staleIDs.count) stale pending asset(s) from prior syncs…")
             log("  Clearing \(staleIDs.count) stale pending asset(s)...")
+            DebugLog.write("atc.FileError.stale", "count=\(staleIDs.count) ids=\(staleIDs.joined(separator: ","))")
             for sid in staleIDs {
                 check("FileError", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileError" as CFString, [
                     "AssetID": sid,
@@ -731,6 +757,38 @@ class ATCSession {
 
     private func log(_ msg: String) {
         if verbose { print(msg) }
+    }
+
+    /// Diagnostic-only dump of every AssetManifest entry medialibraryd
+    /// reported. Used to debug re-upload binding: when a previously-deleted
+    /// episode silently fails to land, we need to know what the device
+    /// thought was already present at the moment we hit FinishedSyncingMetadata.
+    /// Writes to DebugLog under tag "atc.manifest".
+    private func dumpManifest(_ manifestMsg: UnsafeMutableRawPointer) {
+        guard let manifestRaw = ATH.messageParam(manifestMsg, "AssetManifest" as CFString) else {
+            DebugLog.write("atc.manifest", "(no AssetManifest param)")
+            return
+        }
+        let manifest = Unmanaged<CFDictionary>.fromOpaque(manifestRaw).takeUnretainedValue()
+        let mediaKey = Unmanaged.passUnretained("Media" as CFString).toOpaque()
+        guard let mediaRaw = CFDictionaryGetValue(manifest, mediaKey) else {
+            DebugLog.write("atc.manifest", "(no Media key)")
+            return
+        }
+        let mediaArray = Unmanaged<CFArray>.fromOpaque(mediaRaw).takeUnretainedValue()
+        let count = CFArrayGetCount(mediaArray)
+        DebugLog.write("atc.manifest", "count=\(count)")
+        for i in 0..<count {
+            guard let itemRaw = CFArrayGetValueAtIndex(mediaArray, i) else { continue }
+            let itemDict = Unmanaged<CFDictionary>.fromOpaque(itemRaw).takeUnretainedValue()
+            let nsDict = itemDict as NSDictionary
+            let keys = (nsDict.allKeys as? [String]) ?? []
+            let pairs = keys.sorted().map { k -> String in
+                let v = nsDict[k]
+                return "\(k)=\(v ?? "nil")"
+            }
+            DebugLog.write("atc.manifest[\(i)]", pairs.joined(separator: " "))
+        }
     }
 
     private func extractStaleAssets(manifestMsg: UnsafeMutableRawPointer, ourIDs: Set<String>) -> [String] {
