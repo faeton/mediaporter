@@ -96,7 +96,14 @@ public extension ClusterSelection {
                 sel.burnInSubLang = normLang(info.externalSubtitles[i].language)
             }
         case .none:
-            sel.burnInSubLang = nil
+            // A cluster-extras burn-in target (deferred to post-mux) lives
+            // here. Carry its language so siblings can re-resolve against
+            // their own mediaInfo / extras during apply.
+            if let pending = job.pendingBurnInExtraLang {
+                sel.burnInSubLang = normLang(pending)
+            } else {
+                sel.burnInSubLang = nil
+            }
         }
         return sel
     }
@@ -167,26 +174,64 @@ public extension ClusterSelection {
 
         job.maxResolution = maxResolution
 
+        // Burn-in resolution. Try embedded, then sidecar, then cluster-extras.
+        // The cluster-extras path can't be resolved to an `.embedded(idx)` yet
+        // — the matching sub stream doesn't exist until the cluster-extras
+        // mux pass embeds it. We stash the target language in
+        // `pendingBurnInExtraLang`; runTranscodeStep rewrites it after the
+        // post-mux re-probe.
+        //
+        // When multiple subs in `extras` share a language (AniLibria + AniDub
+        // both rus), prefer one the user already included — otherwise the
+        // first user-clicked label could be silently swapped for an alphabetical
+        // peer on auto-include.
+        let extraSubMatch: SubTrack? = {
+            guard let target = burnInSubLang, let extras = extras,
+                  let key = episodeKey(for: job) else { return nil }
+            if let s = extras.subs.first(where: {
+                includedSubLabels.contains($0.label)
+                    && normLang($0.lang) == target
+                    && $0.episodes[key] != nil
+            }) { return s }
+            return extras.subs.first(where: {
+                normLang($0.lang) == target && $0.episodes[key] != nil
+            })
+        }()
+
         if let target = burnInSubLang {
             if let embIdx = info.subtitleStreams.firstIndex(where: { normLang($0.language) == target }),
                isTextSubtitle(info.subtitleStreams[embIdx].codecName) || info.subtitleStreams[embIdx].codecName == "mov_text" {
                 job.burnInSubtitle = .embedded(embIdx)
+                job.pendingBurnInExtraLang = nil
             } else if let extIdx = info.externalSubtitles.firstIndex(where: { normLang($0.language) == target }) {
                 job.burnInSubtitle = .external(extIdx)
+                job.pendingBurnInExtraLang = nil
+            } else if extraSubMatch != nil {
+                // Defer to post-mux. burnInSubtitle stays nil; the post-mux
+                // hook resolves by language against the new MediaInfo.
+                job.burnInSubtitle = nil
+                job.pendingBurnInExtraLang = target
             } else {
                 job.burnInSubtitle = nil
+                job.pendingBurnInExtraLang = nil
             }
         } else {
             job.burnInSubtitle = nil
+            job.pendingBurnInExtraLang = nil
         }
 
         // External tracks (#11c-e). Resolve the cluster's includedDubStudios
         // / includedSubLabels against this episode's (season, episode) key,
         // mark the selected default audio studio. Episodes missing from a
         // studio's set are silently skipped — common for orphan dubs.
+        //
+        // When the burn-in target points at a cluster-extras sub, the sub is
+        // auto-included regardless of `includedSubLabels` — otherwise the
+        // mux pass wouldn't embed it and the post-mux burn-in lookup would
+        // find nothing.
         if let extras = extras,
            let key = episodeKey(for: job),
-           (!includedDubStudios.isEmpty || !includedSubLabels.isEmpty) {
+           (!includedDubStudios.isEmpty || !includedSubLabels.isEmpty || extraSubMatch != nil) {
             var refs: [ExternalTrackRef] = []
             for d in extras.dubs where includedDubStudios.contains(d.label) {
                 guard let url = d.episodes[key] else { continue }
@@ -195,7 +240,9 @@ public extension ClusterSelection {
                     forced: false, isDefault: defaultAudioStudio == d.label
                 ))
             }
-            for s in extras.subs where includedSubLabels.contains(s.label) {
+            var subLabelsToInclude = includedSubLabels
+            if let forced = extraSubMatch { subLabelsToInclude.insert(forced.label) }
+            for s in extras.subs where subLabelsToInclude.contains(s.label) {
                 guard let url = s.episodes[key] else { continue }
                 refs.append(ExternalTrackRef(
                     kind: .sub, path: url, label: s.label, lang: s.lang,

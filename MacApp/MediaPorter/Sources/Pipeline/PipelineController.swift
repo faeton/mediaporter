@@ -562,9 +562,42 @@ public class PipelineController {
     /// existing one), then resolve. Used by multi-select "Set show…".
     public func reclusterJobs(jobIDs: [UUID], showName: String, year: Int?) async {
         let clusterID = TVShowCluster.key(showName: showName, year: year)
+
+        // Snapshot the old cluster IDs of the affected jobs BEFORE we mutate
+        // them — we need the per-job before/after pair to migrate
+        // clusterExtras / clusterSelections to the new key. Without this, the
+        // header section and any propagated audio/sub intent disappear for
+        // any job the user reassigns via "Set show…".
+        let movedFrom: [String: String] = Dictionary(
+            uniqueKeysWithValues: jobs
+                .filter { jobIDs.contains($0.id) }
+                .compactMap { j -> (String, String)? in
+                    guard let old = j.clusterID, old != clusterID else { return nil }
+                    return (old, clusterID)
+                }
+        )
+
         for j in jobs where jobIDs.contains(j.id) {
             j.clusterID = clusterID
         }
+
+        // Carry forward extras + selections under the new key. If multiple
+        // distinct old clusters merged into this one, last-write-wins on the
+        // dict copy — same trade-off as Dictionary uniquing above.
+        for (oldKey, newKey) in movedFrom where oldKey != newKey {
+            if let extras = clusterExtras[oldKey], clusterExtras[newKey] == nil {
+                clusterExtras[newKey] = extras
+            }
+            if let sel = clusterSelections[oldKey], clusterSelections[newKey] == nil {
+                clusterSelections[newKey] = sel
+            }
+            // Drop the old entry only if no remaining job still references it.
+            if !jobs.contains(where: { $0.clusterID == oldKey }) {
+                clusterExtras[oldKey] = nil
+                clusterSelections[oldKey] = nil
+            }
+        }
+
         // Force a fresh resolution for this cluster so the picker re-runs.
         tvShowResolutions[clusterID] = nil
         _ = await resolveCluster(clusterID: clusterID, query: showName, parsedYear: year)
@@ -1111,6 +1144,23 @@ public class PipelineController {
                     // The mux step embedded the extras; transcode pass
                     // should not also pull them in as sidecars.
                     job.externalTracksToMux = []
+
+                    // Resolve a deferred cluster-extras burn-in target now
+                    // that the matching sub is embedded. Mirrors the path in
+                    // runTranscodeStep — keep these two in sync.
+                    if let target = job.pendingBurnInExtraLang {
+                        let norm = target.lowercased()
+                        if let idx = newInfo.subtitleStreams.firstIndex(where: {
+                            let lang = ($0.language ?? "und").lowercased()
+                            let isText = isTextSubtitle($0.codecName) || $0.codecName == "mov_text"
+                            return isText && lang == norm
+                        }) {
+                            job.burnInSubtitle = .embedded(idx)
+                        } else {
+                            job.burnInSubtitle = nil
+                        }
+                        job.pendingBurnInExtraLang = nil
+                    }
                 } catch {
                     job.status = .failed
                     job.error = "External mux: \(error.localizedDescription)"
@@ -1744,6 +1794,27 @@ public class PipelineController {
                     isTextSubtitle(s.codecName) || s.codecName == "mov_text" ? idx : nil
                 }
                 job.externalTracksToMux = []
+
+                // Resolve a deferred cluster-extras burn-in now that the
+                // matching sub is embedded in the intermediate. Match by
+                // ISO-639 language; ignore bitmap subs (libass can't burn
+                // them and our cluster-extras pipeline only produces SRT).
+                if let target = job.pendingBurnInExtraLang {
+                    let norm = target.lowercased()
+                    if let idx = newInfo.subtitleStreams.firstIndex(where: {
+                        let lang = ($0.language ?? "und").lowercased()
+                        let isText = isTextSubtitle($0.codecName) || $0.codecName == "mov_text"
+                        return isText && lang == norm
+                    }) {
+                        job.burnInSubtitle = .embedded(idx)
+                    } else {
+                        // Mux either didn't include this language or the sub
+                        // didn't survive the conversion. Drop the burn-in
+                        // silently rather than failing the whole file.
+                        job.burnInSubtitle = nil
+                    }
+                    job.pendingBurnInExtraLang = nil
+                }
             } catch {
                 job.status = .failed
                 job.error = "External mux: \(error.localizedDescription)"

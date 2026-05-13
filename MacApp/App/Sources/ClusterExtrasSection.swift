@@ -144,6 +144,7 @@ struct ClusterExtrasSection: View {
                 .foregroundStyle(theme.textDim)
             ForEach(subs) { s in
                 let on = current.includedSubLabels.contains(s.label)
+                let isBurning = current.burnInSubLang?.lowercased() == s.lang.lowercased()
                 HStack(spacing: 8) {
                     Toggle("", isOn: Binding(
                         get: { on },
@@ -169,6 +170,21 @@ struct ClusterExtrasSection: View {
                         .font(.system(size: 10))
                         .foregroundStyle(theme.textFaint)
                     Spacer(minLength: 6)
+                    Button {
+                        toggleBurn(s)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: isBurning ? "flame.fill" : "flame")
+                                .font(.system(size: 10))
+                            Text("Burn in")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundStyle(isBurning ? accent.solid : theme.textFaint)
+                    }
+                    .buttonStyle(.plain)
+                    .help(isBurning
+                        ? "Burning this subtitle into the video for every episode that has it"
+                        : "Burn this subtitle into the video. Auto-includes the track in the mux and forces a transcode pass.")
                 }
             }
         }
@@ -197,7 +213,31 @@ struct ClusterExtrasSection: View {
         var sel = pipeline.clusterSelections[clusterID] ?? ClusterSelection()
         if sel.includedSubLabels.contains(s.label) {
             sel.includedSubLabels.remove(s.label)
+            // Removing the only matching-language sub also clears the burn-in
+            // pointing at that language — otherwise apply() would re-add the
+            // sub via the auto-include rule and the user's "untick" would be
+            // effectively ignored.
+            if sel.burnInSubLang?.lowercased() == s.lang.lowercased() {
+                sel.burnInSubLang = nil
+            }
         } else {
+            sel.includedSubLabels.insert(s.label)
+        }
+        commit(sel)
+    }
+
+    /// Toggle burn-in for this sub's language at cluster level. Auto-includes
+    /// the sub in the mux when turning on — otherwise the sub wouldn't be
+    /// embedded post-mux and the burn-in lookup would find nothing. Clicking
+    /// the same language again clears burn-in but keeps the include checkbox
+    /// (so the user doesn't lose their explicit include via an off click).
+    private func toggleBurn(_ s: SubTrack) {
+        var sel = pipeline.clusterSelections[clusterID] ?? ClusterSelection()
+        let key = s.lang.lowercased()
+        if sel.burnInSubLang?.lowercased() == key {
+            sel.burnInSubLang = nil
+        } else {
+            sel.burnInSubLang = s.lang.lowercased()
             sel.includedSubLabels.insert(s.label)
         }
         commit(sel)

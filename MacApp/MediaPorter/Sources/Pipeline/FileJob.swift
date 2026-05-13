@@ -74,6 +74,15 @@ public class FileJob: Identifiable {
     /// selection. Empty for files without extras or with no extras selected.
     public var externalTracksToMux: [ExternalTrackRef] = []
 
+    /// Burn-in target whose source lives in cluster-extras (not yet embedded
+    /// in this file's `mediaInfo`). Pre-mux we cannot resolve it to an
+    /// `.embedded(idx)` because the matching subtitle stream doesn't exist
+    /// yet — the cluster-extras mux pass will add it. After mux, the post-mux
+    /// re-probe finds a subtitle stream with this language and `burnInSubtitle`
+    /// is rewritten to `.embedded(idx)`. ISO-639 normalized; nil = no
+    /// deferred burn-in.
+    public var pendingBurnInExtraLang: String?
+
     // User selections (populated after analysis)
     public var selectedAudio: [Int] = []          // indices into audioStreams
     public var selectedSubtitles: [Int] = []      // indices into subtitleStreams
@@ -100,6 +109,13 @@ public class FileJob: Identifiable {
     /// this off, because that track won't be mapped into the output.
     public var needsReencode: Bool {
         guard let d = decision, let info = mediaInfo else { return false }
+        // Burn-in needs a video filter — copy can't apply filters, so ffmpeg
+        // forces a video re-encode (Transcoder.swift). Without surfacing it
+        // here, a sibling that picked up a propagated burn-in but otherwise
+        // has a compatible video stream would be marked `needsWork = false`,
+        // the pipeline would skip ffmpeg, and the burn-in selection would be
+        // silently dropped on upload.
+        if burnInSubtitle != nil || pendingBurnInExtraLang != nil { return true }
         if maxResolution.wouldDownscale(from: info.videoStreams.first?.height) { return true }
         for v in info.videoStreams where d.streamActions[v.index] == "transcode" { return true }
         for idx in selectedAudio where idx < info.audioStreams.count {
@@ -148,8 +164,14 @@ public class FileJob: Identifiable {
     /// True if the video stream itself is being re-encoded — i.e. the ffmpeg
     /// command already has `-c:v hevc_videotoolbox/libx265` with a video filter
     /// chain. Burn-in is "free" only in this case.
+    ///
+    /// Burn-in itself also forces a video re-encode (Transcoder treats
+    /// `burnIn != nil` as `action = "transcode"`), so we report true whenever
+    /// burn-in is set — otherwise the burn-in UI chip disappears on siblings
+    /// that received a propagated burn-in but would otherwise just copy.
     public var videoBeingReencoded: Bool {
         guard let d = decision, let info = mediaInfo else { return false }
+        if burnInSubtitle != nil || pendingBurnInExtraLang != nil { return true }
         if maxResolution.wouldDownscale(from: info.videoStreams.first?.height) { return true }
         for v in info.videoStreams where d.streamActions[v.index] == "transcode" { return true }
         return false
