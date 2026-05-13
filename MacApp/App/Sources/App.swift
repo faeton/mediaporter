@@ -103,6 +103,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         AppIcon.install()
+        // Reap any ffmpeg children left running from a previous hard-kill
+        // before we start dispatching new transcodes that would compete with
+        // them for disk + CPU.
+        ZombieSweep.sweep()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
