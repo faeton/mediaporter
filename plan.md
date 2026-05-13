@@ -148,116 +148,154 @@ feels dead). Code: `Sources/Sync/GateTest.swift`,
 
 ## P2 — UX polish
 
-### 11. External audio/sub track muxing (anime release layout)
-*Land Python first per CLAUDE.md, port to Swift after.*
+### 11. Cluster-scoped selection — internal bulk-apply + external track muxing ✅ 2026-05-11
+*Swift-first. CLI/Python will catch up later.*
 
-**Problem.** Scene anime releases ship as bare MKV (JP audio + EN sub) with
-sibling folders of `.mka` dub tracks and `.srt/.ass` sub tracks, one folder per
-studio, filenames matching the video 1:1. Reference layout
-(`~/Downloads/Jujutsu.Kaisen.Season3.WEB-DL.1080p`):
-```
-[BudLightSubs] Jujutsu Kaisen S3 - 01 [1080p].mkv
-…
-RUS Sound/AniLiberty/[BudLightSubs] Jujutsu Kaisen S3 - 01 [1080p].mka
-RUS Sound/RedHeadSound/…  (5 more studios)
-RUS Subs/CafeSubs/…
-RUS Subs/Crunchyroll/…
-RUS Subs/Crunchyroll/Надписи/   (typesetting / forced)
-```
-Today the Python pipeline and MacApp see only the bare MKV — JP-only audio
-reaches the device, all 6 dubs ignored.
+Shipped: `MacApp/MediaPorter/Sources/Pipeline/ClusterSelection.swift`,
+`MacApp/MediaPorter/Sources/Metadata/ExternalTrackScanner.swift`,
+`MacApp/MediaPorter/Sources/Transcode/ExternalMux.swift`,
+`MacApp/App/Sources/ClusterExtrasSection.swift`. Bulk-apply popover in
+`FileRowView`; mux pre-stage in `PipelineController.transcodeAll`.
 
-**Decisions taken (2026-05-10 review).**
-- Selection scoped per **cluster** (TMDb show+season), persisted under
-  `clusterID`. User picks once for the whole season, applies to every episode.
-- Track ↔ episode matching by parsed **S/E numbers** via `FilenameParser`, not
-  by basename. Robust to studio renames.
-- ASS subtitles converted to `mov_text` at mux time (style loss accepted —
-  TV.app on iOS has no ASS renderer). SRT in as-is. Hardsub deferred.
-- One mux step **before** the existing transcode stage: produces an
-  intermediate multi-audio MKV in temp, then `Transcoder` runs unchanged. The
-  AC3-switcher rule (CLAUDE.md #10) catches AC3 dub tracks naturally — they
-  hit `transcode AC3 → AAC` like any internal AC3.
+**Two problems, one model.**
+1. Drop 12 episodes × 5 audio + 6 sub tracks. User wants only RU audio + RU sub.
+   Today: ~100 per-row clicks.
+2. Scene anime releases ship as bare MKV (JP audio + EN sub) with sibling folders
+   of `.mka` dubs and `.srt/.ass` subs. Today only the bare MKV is seen — all
+   dubs ignored. Reference layout (`~/Downloads/Jujutsu.Kaisen.Season3.WEB-DL.1080p`):
+   ```
+   [BudLightSubs] Jujutsu Kaisen S3 - 01 [1080p].mkv
+   RUS Sound/AniLiberty/[BudLightSubs] Jujutsu Kaisen S3 - 01 [1080p].mka
+   RUS Sound/RedHeadSound/…       (5 more studios)
+   RUS Subs/Crunchyroll/…
+   RUS Subs/Crunchyroll/Надписи/   (typesetting / forced)
+   ```
+
+Both reduce to: **user picks once per cluster, applies to every episode**.
+Build a shared `ClusterSelection` layer and both #11-internal and #11-external
+fall out of it.
+
+**Core abstraction: `ClusterSelection`.**
+
+Keyed by `clusterID` (already on `FileJob`). Holds **intent**, not concrete
+stream indices:
+
+```swift
+struct ClusterSelection {
+    // Internal-stream intent (resolved against each FileJob.mediaInfo)
+    var audio: AudioIntent = .all     // .all | .langs(Set<String>) | .codecs(...) | .explicit(...)
+    var subs: SubIntent = .all
+    var maxResolution: ResolutionLimit = .original
+    var burnInSubLang: String?        // resolved per-episode at transcode time
+
+    // External-track intent (resolved against ReleaseExtras per episode)
+    var includedDubStudios: Set<String> = []
+    var defaultAudioStudio: String?   // single "default" disposition
+    var includedSubLabels: Set<String> = []
+}
+```
+
+A **resolver** at analyze time computes per-job concrete `selectedAudio`,
+`selectedSubtitles`, `selectedExternalSubs`, `maxResolution`, `burnInSubtitle`,
+plus an `externalTracksToMux: [ExtraTrackRef]` field, by intersecting intent
+with what that episode actually has.
+
+Matching rules (apply to both bulk-apply and external):
+- Internal audio/sub: match by `(language, codec_name)` — indices drift between
+  episodes, lang+codec is stable. If target episode lacks a match, skip silently
+  for that episode.
+- External: match by `(s, e)` from `FilenameParser`. Orphans (E08 in dubs,
+  missing in video) → log + drop.
+- Scalars (resolution, burn-in lang) propagate directly.
 
 **Phases.**
 
-#### 11a. Python: detector + data model
-- New module `src/mediaporter/extras.py`:
-  - `scan_release(source_dir: Path, episodes: list[ParsedFile]) -> ReleaseExtras`
-  - Walks `source_dir` and one level of siblings. Identifies dub folders
-    (`.mka/.ac3/.eac3/.flac/.aac` files matching parsed S/E of any episode)
-    and sub folders (`.srt/.ass/.vtt`). Folder name → studio label.
-  - Heuristic for language: parent path contains "RUS" / "ENG" / locale code
-    → tag accordingly; else fall back to ffprobe `language` metadata; else
-    `und`.
-  - Returns `ReleaseExtras { dubs: [DubStudio{label, lang, episodes: dict[(s,e)→Path]}],
-    subs: [SubTrack{label, lang, forced: bool, episodes: dict[(s,e)→Path]}] }`.
-  - "Forced" inferred from folder name (`Надписи`, `Signs`, `Forced`) or
-    track name in ffprobe.
-- Unit tests with a fixture that mirrors the JJK layout (empty 1-byte stub
-  files are enough — detector doesn't read content yet).
-- Edge: orphan dub episode (E08 in dubs, missing in main video) → log + drop,
-  do **not** fabricate a video entry.
+#### 11a. ClusterSelection store + resolver
+- New `MacApp/MediaPorter/Sources/Pipeline/ClusterSelection.swift`: the struct
+  above + a store `var clusterSelections: [String: ClusterSelection] = [:]`
+  on `PipelineController`.
+- New `ClusterSelectionResolver.resolve(job:, selection:, extras:) -> JobSelection`
+  pure function. Called at end of `analyzeOne` (before today's
+  `setDefaultStreamSelection` heuristic). Today's heuristic stays as the
+  *seed* when no `ClusterSelection` exists yet for that cluster.
+- `FileJob.selectedAudio/Subtitles/…` continue to exist (UI binds to them);
+  resolver writes them. UI change on a single row → write back to
+  `clusterSelections[clusterID]` as `.explicit(langs+codecs of current
+  selection)` and re-resolve all sibling jobs.
+- Persistence: cluster selection lives in-memory only for v1. Per-cluster
+  preferences across launches deferred (state-surface cost not yet justified).
 
-#### 11b. Python: CLI selection + mux step
-- Extend `mediaporter sync` with `--include-dub LABEL` (repeatable),
-  `--default-dub LABEL`, `--include-sub LABEL`. Without flags, behavior
-  unchanged (pure backwards compat).
-- Add stage between `analyze` and `transcode` in `pipeline.py`:
-  `mux_external_tracks(video, extras, selection) -> Path` →
-  intermediate MKV in temp.
+#### 11b. UI — bulk-apply popover for internal streams
+- When the user toggles audio/sub/resolution/burn-in on a row that has
+  `clusterID` ≠ nil AND ≥ 2 sibling jobs in the cluster: anchored popover
+  near the changed control:
+  > Apply to all 12 episodes of *Jujutsu Kaisen S3*? ☑ Apply  · Just this one
+- Auto-dismiss after 5 s if user keeps clicking. For one-off files (movies,
+  single episodes) the popover never appears.
+- Settings toggle "Always apply within show" for power users.
+
+#### 11c. External-track scanner
+- `MacApp/MediaPorter/Sources/Metadata/ExternalTrackScanner.swift`:
+  `scanRelease(sourceDir: URL, episodes: [ParsedFile]) -> ReleaseExtras`.
+- Walks source dir + one level of siblings. Identifies dub files
+  (`.mka/.ac3/.eac3/.flac/.aac`) and sub files (`.srt/.ass/.vtt`) matching
+  parsed `(s, e)` of any episode in the drop. Folder name → studio label.
+  Flat layout (no folders, dub file next to video) → label "external" or
+  the filename language tag.
+- Language heuristic: parent path contains `RUS`/`ENG`/locale code → tag;
+  else ffprobe `language` metadata; else `und`.
+- Forced inferred from folder name (`Надписи`, `Signs`, `Forced`) or ffprobe
+  track name.
+- Returns `ReleaseExtras { dubs: [DubStudio{label, lang, episodes: [(s,e):Path]}],
+  subs: [SubTrack{label, lang, forced, episodes: [(s,e):Path]}] }`.
+- Stored once per cluster (`clusterExtras: [String: ReleaseExtras]`).
+
+#### 11d. UI — cluster header for external tracks
+- New section in cluster header (next to TMDb poster/title in
+  `DeviceColumnView`). Collapsed by default; expands when extras detected:
+  ```
+  Доп. аудио:  ☐ AniLiberty  ☑ RedHeadSound  ☐ StudioBand
+  По умолчанию: ◉ RedHeadSound
+  Доп. сабы:    ☑ Crunchyroll  ☑ Crunchyroll/Надписи (forced)
+  ```
+- Counter chip on each episode row: "+2 audio, +1 sub".
+- Same popover pattern as 11b — but for external it's *always* cluster-wide
+  (no "just this one" option, by design).
+
+#### 11e. Pipeline integration — mux step
+- New stage `MuxExternalTracks` in `PipelineController` between analyze and
+  transcode, runs only when `job.externalTracksToMux` non-empty.
 - ffmpeg invocation:
   - `-i video.mkv -i dub1.mka -i dub2.mka -i sub1.srt -i sub2.ass`
   - Map: `-map 0:v -map 0:a:0 -map 1:a:0 -map 2:a:0 -map 3:s? -map 4:s?`
-    (keep original audio as track 0; appended dubs follow).
   - Per-track metadata: `-metadata:s:a:N title=<studio> language=<lang>`.
-  - Disposition: exactly one `default` on the audio track flagged as
-    "default" in selection; everything else `0`. (CLAUDE.md #10.)
-  - Subtitles: ASS pre-pass `ffmpeg -i in.ass out.srt` (drops styling) before
-    main mux. mov_text codec assignment happens in `Transcoder`, not here —
-    keep mux step codec-copy for speed.
-- ffprobe each external `.mka` ahead of mux; if AC3, hand `Transcoder` a hint
-  to recode that specific track index → AAC. Existing rule covers it once
-  flagged.
-
-#### 11c. Python: validate on JJK
-- Run end-to-end with 2 dubs + 1 sub selected. Verify on iPad:
-  - Audio switcher shows JP + 2 RU studios with correct labels.
-  - Subtitle switcher shows the selected RU sub.
-  - Episode 8 absent from video is reported as skipped, not crash.
-  - No regression on a normal single-audio MKV (selection empty path).
-
-#### 11d. Swift port: scanner + state
-- `MacApp/MediaPorter/Sources/Metadata/ExternalTrackScanner.swift` mirrors
-  `extras.py`. Returns `ReleaseExtras` struct.
-- Persist selection in a new `ClusterPreferences` store keyed by `clusterID`
-  (same key TMDb cache uses). Survives app relaunch.
-
-#### 11e. Swift port: UI
-- New view section in the cluster header (where TMDb poster/title sit in
-  `DeviceColumnView`) — collapsed by default, expands when extras detected:
-  ```
-  Доп. аудио:  ☐ AniLiberty  ☑ RedHeadSound  ☐ StudioBand  ☐ TVShows
-                ☐ Дубляжная   ☐ ForceMedia
-  По умолчанию: ◉ RedHeadSound
-  Доп. сабы:    ☑ Crunchyroll  ☐ CafeSubs  ☑ Crunchyroll/Надписи (forced)
-  ```
-- Counter chip on each episode row: "+2 audio, +1 sub" so user sees what
-  will be muxed without expanding the section.
-
-#### 11f. Swift port: pipeline integration
-- New stage `MuxExternalTracks` in `PipelineController` between analyze and
-  transcode. Same ffmpeg semantics as 11b.
+  - Disposition: exactly one `default` audio (CLAUDE.md #10); rest `0`.
+  - ASS pre-pass `ffmpeg -i in.ass out.srt` (drops styling — TV.app has no
+    ASS renderer; hardsub deferred).
+  - Mux step is codec-copy. ffprobe each external `.mka` ahead of mux; if
+    AC3, hand `Transcoder` a hint to recode that specific track → AAC
+    (CLAUDE.md #10 covers it once flagged).
 - Status enum gains `.muxing` between `.analyzed` and `.transcoding`.
 - Cleanup: intermediate MKV deleted after `Transcoder` consumes it (or on
   cancel, via `ActiveProcesses`).
 
+#### 11f. Validate on real drops
+- Bulk-apply: drop a 12-episode pack with 5 audio + 6 sub each; deselect
+  4 audio + 4 subs on episode 1; confirm popover → click "Apply"; verify
+  episodes 2-12 reflect the change; verify lang+codec matching (don't accept
+  index-based propagation).
+- External: drop JJK S3. 2 dubs + 1 sub selected. iPad audio switcher shows
+  JP + 2 RU studios with correct labels; subtitle switcher shows selected
+  RU sub; episode 8 missing from video reported skipped, no crash.
+- Regression: a normal single-audio MKV (no extras, no cluster) still syncs
+  unchanged.
+
 **Out of scope (defer, link back here when pulled).**
+- Cluster preferences persisted across launches.
 - Hardsub mode for ASS (separate ffmpeg path; breaks HEVC copy).
-- Auto-selecting "best" dub (subjective; let the user click).
+- Auto-selecting "best" dub (subjective).
 - Downloading missing tracks from external sources.
-- Per-episode override of cluster selection (one user, one season — overkill
-  unless someone asks).
+- Bulk-apply across different clusters in one drop.
 
 ### 12. Recommendation rework
 - Banner today (`DeviceColumnView.swift::recommendationCard`) makes a flat
@@ -279,6 +317,7 @@ reaches the device, all 6 dubs ignored.
   Swift exit. SIGKILL/crash leaves orphan ffmpeg children writing to temp.
 - On launch, find ffmpeg processes whose CWD is our temp dir and whose parent
   PID is gone; terminate.
+
 
 ---
 

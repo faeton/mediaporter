@@ -283,9 +283,21 @@ func runRecover() {
     print("Device: \(device.displayName) (\(device.udid.prefix(16))...)")
 
     let report: OrphanRecoveryReport
-    do {
-        report = try recoverOrphansEndToEnd(device: device)
-    } catch {
+    let sema = DispatchSemaphore(value: 0)
+    var reportResult: Result<OrphanRecoveryReport, Error>!
+    Task {
+        do {
+            let r = try await recoverOrphansEndToEnd(device: device)
+            reportResult = .success(r)
+        } catch {
+            reportResult = .failure(error)
+        }
+        sema.signal()
+    }
+    sema.wait()
+    switch reportResult! {
+    case .success(let r): report = r
+    case .failure(let error):
         FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
         exit(1)
     }

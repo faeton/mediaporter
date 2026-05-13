@@ -17,7 +17,7 @@ public enum CodecSets {
 
 // MARK: - Resolution Limit
 
-public enum ResolutionLimit: String, CaseIterable, Identifiable, Comparable {
+public enum ResolutionLimit: String, CaseIterable, Identifiable, Comparable, Sendable {
     case tiny = "360p"
     case sd = "480p"
     case hd = "720p"

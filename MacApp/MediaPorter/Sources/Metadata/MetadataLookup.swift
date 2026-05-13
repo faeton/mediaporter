@@ -106,6 +106,30 @@ public enum MetadataLookup {
         return await lookupMovie(parsed: parsed, apiKey: apiKey)
     }
 
+    /// Direct TV lookup that bypasses filename parsing. Use when the user has
+    /// explicitly chosen TV in the Edit-title sheet — otherwise `lookup(path:)`
+    /// routes by filename shape (e.g. `o04.mkv` parses as movie and ignores TV
+    /// overrides entirely, which silently yields a fallback movie result).
+    public static func lookupTVDirect(
+        showName: String,
+        season: Int,
+        episode: Int,
+        year: Int?,
+        apiKey: String?,
+        sourceURL: URL? = nil,
+        duration: TimeInterval? = nil
+    ) async -> ResolvedMetadata? {
+        let parsed = ParsedFilename(
+            title: showName, year: year, season: season,
+            episode: episode, mediaType: .tvShow
+        )
+        return await lookupTV(
+            parsed: parsed, showOverride: showName,
+            seasonOverride: season, episodeOverride: episode,
+            apiKey: apiKey, sourceURL: sourceURL, duration: duration
+        )
+    }
+
     private static func lookupMovie(parsed: ParsedFilename, apiKey: String?) async -> ResolvedMetadata {
         guard let apiKey, !apiKey.isEmpty else {
             return .movie(fallbackMovie(parsed: parsed))

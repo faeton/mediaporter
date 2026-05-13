@@ -56,8 +56,8 @@ public enum OrphanRecoveryError: LocalizedError {
 /// .m4v files, scans the device's `/iTunes_Control/Music/F*/` for orphan
 /// bytes, matches by exact byte size, and runs the standard register call.
 /// No re-upload — purely reuses bytes already on the device.
-public func recoverOrphansEndToEnd(device: DeviceInfo) throws -> OrphanRecoveryReport {
-    let candidates = OrphanRecovery.scanLocalCandidates()
+public func recoverOrphansEndToEnd(device: DeviceInfo) async throws -> OrphanRecoveryReport {
+    let candidates = await OrphanRecovery.scanLocalCandidates()
     let deviceFiles: [DeviceMediaFile]
     do {
         deviceFiles = try DeviceMaintenance.scanStagingMedia(device: device)
@@ -105,18 +105,20 @@ public func recoverOrphansEndToEnd(device: DeviceInfo) throws -> OrphanRecoveryR
 
 enum OrphanRecovery {
     /// Walk the tempdir for .m4v files left by previous pipeline runs.
-    static func scanLocalCandidates() -> [OrphanCandidate] {
+    static func scanLocalCandidates() async -> [OrphanCandidate] {
         let tmp = FileManager.default.temporaryDirectory
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: tmp, includingPropertiesForKeys: [.fileSizeKey]
         ) else { return [] }
 
-        return entries.compactMap { url in
-            guard url.pathExtension.lowercased() == "m4v" else { return nil }
+        var out: [OrphanCandidate] = []
+        for url in entries {
+            guard url.pathExtension.lowercased() == "m4v" else { continue }
             let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-            guard let size = attrs?[.size] as? Int64, size > 0 else { return nil }
-            return probe(url: url, size: size)
+            guard let size = attrs?[.size] as? Int64, size > 0 else { continue }
+            if let c = await probe(url: url, size: size) { out.append(c) }
         }
+        return out
     }
 
     /// Read TV/movie metadata from a tagged .m4v.
@@ -131,7 +133,7 @@ enum OrphanRecovery {
     /// AVFoundation reads MP4 atoms directly by their 4-char identifier
     /// (`tvsh`, `tvsn`, `tves`, `tven`), which is what AtomicParsley/iTunes
     /// actually stored. No translation layer to fail.
-    private static func probe(url: URL, size: Int64) -> OrphanCandidate? {
+    private static func probe(url: URL, size: Int64) async -> OrphanCandidate? {
         let asset = AVURLAsset(url: url)
 
         var title: String?
@@ -144,7 +146,14 @@ enum OrphanRecovery {
 
         // Walk all metadata items. Match by both `key` (4-char OSType code,
         // e.g. "tvsh") and `commonKey`/`identifier` for portability.
-        let items = asset.metadata + asset.commonMetadata
+        let items: [AVMetadataItem]
+        do {
+            async let meta = asset.load(.metadata)
+            async let common = asset.load(.commonMetadata)
+            items = try await meta + common
+        } catch {
+            return nil
+        }
         for item in items {
             // OSType-encoded key, e.g. "tves" for TV episode number.
             let key4: String? = {
@@ -160,21 +169,23 @@ enum OrphanRecovery {
                 return item.key as? String
             }()
             let ident = item.identifier?.rawValue ?? ""
+            let strVal = try? await item.load(.stringValue)
+            let numVal = try? await item.load(.numberValue)
 
             switch (key4 ?? "", ident) {
             case ("tvsh", _), (_, "itsk/tvsh"), (_, "com.apple.iTunes.tvsh"):
-                show = item.stringValue ?? show
+                show = strVal ?? show
             case ("tvsn", _), (_, "itsk/tvsn"):
-                season = (item.numberValue?.intValue) ?? Int(item.stringValue ?? "") ?? season
+                season = numVal?.intValue ?? Int(strVal ?? "") ?? season
             case ("tves", _), (_, "itsk/tves"):
-                episode = (item.numberValue?.intValue) ?? Int(item.stringValue ?? "") ?? episode
+                episode = numVal?.intValue ?? Int(strVal ?? "") ?? episode
             case ("tven", _), (_, "itsk/tven"):
-                episodeID = item.stringValue ?? episodeID
+                episodeID = strVal ?? episodeID
             case ("\u{00A9}nam", _), (_, "itsk/©nam"), (_, "common/title"):
-                title = item.stringValue ?? title
+                title = strVal ?? title
             default:
                 // commonKey "title" catches the iTunes "©nam" atom too.
-                if item.commonKey?.rawValue == "title" { title = item.stringValue ?? title }
+                if item.commonKey?.rawValue == "title" { title = strVal ?? title }
             }
         }
 
@@ -184,16 +195,26 @@ enum OrphanRecovery {
         }
 
         // Duration via AVAsset (CMTime) — more reliable than parsing ffprobe.
-        let durSec = CMTimeGetSeconds(asset.duration)
+        let durSec: Double
+        let tracks: [AVAssetTrack]
+        do {
+            durSec = try await CMTimeGetSeconds(asset.load(.duration))
+            tracks = try await asset.load(.tracks)
+        } catch {
+            return nil
+        }
         let durationMs = durSec.isFinite ? Int(durSec * 1000) : 0
 
         // Stream characteristics.
-        for track in asset.tracks {
+        for track in tracks {
             if track.mediaType == .video {
-                let dim = track.naturalSize.applying(track.preferredTransform)
-                height = max(height, Int(abs(dim.height)))
+                if let size = try? await track.load(.naturalSize),
+                   let xform = try? await track.load(.preferredTransform) {
+                    let dim = size.applying(xform)
+                    height = max(height, Int(abs(dim.height)))
+                }
             } else if track.mediaType == .audio {
-                if let descs = track.formatDescriptions as? [CMFormatDescription],
+                if let descs = try? await track.load(.formatDescriptions),
                    let f = descs.first,
                    let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(f)?.pointee {
                     channels = max(channels, Int(asbd.mChannelsPerFrame))

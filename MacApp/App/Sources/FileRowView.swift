@@ -16,8 +16,29 @@ struct FileRowView: View {
     @State private var isEditingTitle = false
     @State private var editedTitle = ""
     @State private var editedYear = ""
+    @State private var editedKind: EditMediaKind = .movie
+    @State private var editedSeason: Int = 1
+    @State private var editedEpisode: Int = 1
     @State private var retryTMDb = true
     @State private var isRetryingLookup = false
+
+    /// Anchor for the "Apply selection to all N episodes of <show>?" popover
+    /// (#11b). Set by `didChangeClusterSelection()` after any audio / sub /
+    /// resolution / burn-in toggle that lands on a clustered file with ≥ 1
+    /// sibling. Non-nil ⇒ popover shown; cleared on user choice or 5 s timer.
+    @State private var clusterApplyPending: ClusterApplyPrompt?
+    @State private var clusterApplyDismissTask: Task<Void, Never>?
+
+    /// When true, every per-row change propagates to siblings without
+    /// surfacing the popover. Power-user setting.
+    @AppStorage("alwaysApplyWithinShow") private var alwaysApplyWithinShow: Bool = false
+
+    private struct ClusterApplyPrompt: Identifiable, Equatable {
+        let id = UUID()
+        let clusterID: String
+        let siblingCount: Int
+        let showLabel: String
+    }
 
     /// Cluster picker presentation — shown for TV files instead of EditTitleSheet.
     /// `id == clusterID`, so a non-nil value drives `.sheet(item:)`.
@@ -42,6 +63,44 @@ struct FileRowView: View {
                 .fill(isExpanded ? theme.rowSelected : Color.clear)
         )
         .animation(.easeInOut(duration: 0.15), value: isExpanded)
+        .popover(item: $clusterApplyPending, attachmentAnchor: .point(.bottom)) { prompt in
+            clusterApplyPopover(prompt: prompt)
+        }
+    }
+
+    private func clusterApplyPopover(prompt: ClusterApplyPrompt) -> some View {
+        let n = prompt.siblingCount
+        let plural = n == 1 ? "episode" : "episodes"
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Apply selection to all \(n) other \(plural) of *\(prompt.showLabel)*?")
+                .font(.system(size: 13))
+                .foregroundStyle(theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 320, alignment: .leading)
+            HStack(spacing: 8) {
+                Button("Apply to all") {
+                    pipeline.captureClusterSelection(from: job, propagate: true)
+                    clusterApplyDismissTask?.cancel()
+                    clusterApplyPending = nil
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                Button("Just this one") {
+                    pipeline.captureClusterSelection(from: job, propagate: false)
+                    clusterApplyDismissTask?.cancel()
+                    clusterApplyPending = nil
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Spacer()
+                Toggle("Always", isOn: $alwaysApplyWithinShow)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .help("Always propagate per-row changes to every episode in the same show without asking.")
+            }
+        }
+        .padding(12)
+        .frame(width: 360)
     }
 
     // MARK: - Header
@@ -160,6 +219,15 @@ struct FileRowView: View {
                     .background(theme.chipSkip, in: RoundedRectangle(cornerRadius: 3))
                     .foregroundStyle(theme.chipSkipText)
             }
+            if let extrasLabel = externalTracksLabel {
+                MetaDot(theme: theme)
+                Text(extrasLabel)
+                    .font(.system(size: 10, weight: .semibold))
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(accent.soft, in: RoundedRectangle(cornerRadius: 3))
+                    .foregroundStyle(accent.solid)
+                    .help("External tracks queued for muxing. Cluster choices live in the extras section at the top of the list.")
+            }
             if job.duplicateOnDevice == true {
                 MetaDot(theme: theme)
                 Button {
@@ -193,7 +261,7 @@ struct FileRowView: View {
 
     private var isActive: Bool {
         switch job.status {
-        case .analyzing, .transcoding, .tagging, .syncing: return true
+        case .analyzing, .muxing, .transcoding, .tagging, .syncing: return true
         default: return false
         }
     }
@@ -246,7 +314,8 @@ struct FileRowView: View {
                         .help("Transcode this file and tag it, but don't send it to the device.")
                     }
                 }
-                ResolutionPicker(job: job, theme: theme, accent: accent)
+                ResolutionPicker(job: job, theme: theme, accent: accent,
+                                 onChange: didChangeClusterSelection)
                 if job.maxResolution != .original, let srcH = job.mediaInfo?.videoStreams.first?.height {
                     let target = job.maxResolution.maxHeight ?? srcH
                     if target < srcH {
@@ -566,6 +635,19 @@ struct FileRowView: View {
                         .foregroundStyle(Color(red: 0.19, green: 0.82, blue: 0.35))
                     Text("TMDb matched · poster and metadata attached")
                         .font(.system(size: 12)).foregroundStyle(theme.text)
+                    Button { openEditTitle() } label: {
+                        Text("Wrong match?")
+                            .font(.system(size: 11))
+                            .padding(.horizontal, 8).padding(.vertical, 2)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .strokeBorder(theme.divider, lineWidth: 1)
+                            )
+                            .foregroundStyle(theme.textDim)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Search TMDb again with a different title")
                 } else {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: 11, weight: .regular))
@@ -593,11 +675,20 @@ struct FileRowView: View {
                 accent: accent,
                 initialTitle: editedTitle,
                 initialYear: editedYear,
+                initialKind: editedKind,
+                initialSeason: editedSeason,
+                initialEpisode: editedEpisode,
                 hasAPIKey: !pipeline.tmdbAPIKey.isEmpty,
                 retryTMDb: $retryTMDb,
                 isLoading: $isRetryingLookup,
-                onSave: { newTitle, newYear, shouldRetry in
-                    Task { await saveEditedTitle(newTitle, year: newYear, retry: shouldRetry) }
+                onSave: { newTitle, newYear, newKind, newSeason, newEpisode, shouldRetry in
+                    Task {
+                        await saveEditedTitle(
+                            newTitle, year: newYear, kind: newKind,
+                            season: newSeason, episode: newEpisode,
+                            retry: shouldRetry
+                        )
+                    }
                 },
                 onCancel: { isEditingTitle = false }
             )
@@ -645,44 +736,63 @@ struct FileRowView: View {
             return
         }
 
+        // Seed S/E from the filename so a movie-misdetected episode comes
+        // pre-filled with what the user almost certainly wants.
+        let parsed = parseSeasonEpisode(from: job.fileName)
         switch job.metadata {
         case .movie(let m):
             editedTitle = m.title
             editedYear = m.year.map(String.init) ?? ""
+            editedKind = .movie
+            editedSeason = parsed.season ?? 1
+            editedEpisode = parsed.episode ?? 1
         case .tvEpisode(let e):
             editedTitle = e.showName
             editedYear = e.year.map(String.init) ?? ""
+            editedKind = .tv
+            editedSeason = e.season
+            editedEpisode = e.episode
         case .none:
             editedTitle = job.fileName
                 .replacingOccurrences(of: "." + (job.inputURL.pathExtension), with: "")
             editedYear = ""
+            editedKind = (parsed.season != nil || parsed.episode != nil) ? .tv : .movie
+            editedSeason = parsed.season ?? 1
+            editedEpisode = parsed.episode ?? 1
         }
         retryTMDb = !pipeline.tmdbAPIKey.isEmpty
         isEditingTitle = true
     }
 
-    private func saveEditedTitle(_ newTitle: String, year: String, retry: Bool) async {
+    private func saveEditedTitle(
+        _ newTitle: String, year: String, kind: EditMediaKind,
+        season: Int, episode: Int, retry: Bool
+    ) async {
         let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let yearInt = Int(year.trimmingCharacters(in: .whitespaces))
 
-        // 1. Optionally re-query TMDb with the edited title as hint.
+        // 1. Optionally re-query TMDb with the edited title + kind as hints.
+        //    Routing is now driven by the user-selected Movie/TV picker, not
+        //    by the current metadata case — so a movie-misdetected episode
+        //    can be corrected by toggling to TV in the sheet.
         if retry, !pipeline.tmdbAPIKey.isEmpty {
             isRetryingLookup = true
             let resolved: ResolvedMetadata?
-            switch job.metadata {
-            case .tvEpisode(let e):
-                resolved = await MetadataLookup.lookup(
-                    path: job.inputURL,
-                    showOverride: trimmed,
-                    seasonOverride: e.season,
-                    episodeOverride: e.episode,
-                    apiKey: pipeline.tmdbAPIKey
+            switch kind {
+            case .tv:
+                // Direct route — bypasses filename-shape detection so the
+                // user's explicit TV choice wins even when the filename
+                // looks like a movie (e.g. `o04.mkv`).
+                resolved = await MetadataLookup.lookupTVDirect(
+                    showName: trimmed,
+                    season: season,
+                    episode: episode,
+                    year: yearInt,
+                    apiKey: pipeline.tmdbAPIKey,
+                    sourceURL: job.inputURL
                 )
-            default:
-                // For movies / unknown: pass title + year directly so the filename
-                // parser's quirks (regex edge cases, noise in the original name)
-                // can't swallow the user's explicit hint.
+            case .movie:
                 resolved = await MetadataLookup.lookupMovieDirect(
                     title: trimmed,
                     year: yearInt,
@@ -698,25 +808,43 @@ struct FileRowView: View {
             // fall through to local edit if lookup returned nil
         }
 
-        // 2. Local edit only — update the existing metadata and regenerate fallback poster.
+        // 2. Local edit only — overwrite metadata of the chosen kind and
+        //    regenerate fallback poster. Switching kind (movie ↔ TV) here
+        //    replaces the metadata case, not just mutates the existing one.
         let poster = PosterGenerator.generate(title: trimmed, year: yearInt)
-        switch job.metadata {
-        case .tvEpisode(var e):
+        switch kind {
+        case .tv:
+            // Preserve season/episode IDs from existing TV metadata when
+            // present, otherwise build from the form values.
+            var existing: EpisodeMetadata?
+            if case .tvEpisode(let ep) = job.metadata { existing = ep }
+            let epID = String(format: "S%02dE%02d", season, episode)
+            var e = existing ?? EpisodeMetadata(
+                showName: trimmed, season: season, episode: episode,
+                episodeTitle: trimmed, episodeID: epID, year: yearInt,
+                genre: nil, overview: nil, longOverview: nil, network: nil,
+                posterURL: nil, posterData: nil,
+                showPosterURL: nil, showPosterData: poster,
+                tmdbShowID: nil
+            )
             e.showName = trimmed
+            e.season = season
+            e.episode = episode
             if let y = yearInt { e.year = y }
             e.showPosterData = poster
             job.metadata = .tvEpisode(e)
-        case .movie(var m):
+        case .movie:
+            var existing: MovieMetadata?
+            if case .movie(let m) = job.metadata { existing = m }
+            var m = existing ?? MovieMetadata(
+                title: trimmed, year: yearInt, genre: nil, overview: nil,
+                longOverview: nil, director: nil, posterURL: nil,
+                posterData: poster, tmdbID: nil
+            )
             m.title = trimmed
             if yearInt != nil { m.year = yearInt }
             m.posterData = poster
             job.metadata = .movie(m)
-        case .none:
-            job.metadata = .movie(MovieMetadata(
-                title: trimmed, year: yearInt, genre: nil, overview: nil,
-                longOverview: nil, director: nil, posterURL: nil,
-                posterData: poster, tmdbID: nil
-            ))
         }
         isEditingTitle = false
     }
@@ -727,6 +855,7 @@ struct FileRowView: View {
         } else {
             job.selectedAudio = (job.selectedAudio + [i]).sorted()
         }
+        didChangeClusterSelection()
     }
     private func toggleSubtitle(_ i: Int) {
         if let idx = job.selectedSubtitles.firstIndex(of: i) {
@@ -734,6 +863,7 @@ struct FileRowView: View {
         } else {
             job.selectedSubtitles = (job.selectedSubtitles + [i]).sorted()
         }
+        didChangeClusterSelection()
     }
     private func toggleExternal(_ i: Int) {
         if let idx = job.selectedExternalSubs.firstIndex(of: i) {
@@ -741,6 +871,7 @@ struct FileRowView: View {
         } else {
             job.selectedExternalSubs = (job.selectedExternalSubs + [i]).sorted()
         }
+        didChangeClusterSelection()
     }
 
     /// Mutually-exclusive burn-in selector. Tapping the currently-burned track
@@ -751,6 +882,57 @@ struct FileRowView: View {
         } else {
             job.burnInSubtitle = target
         }
+        didChangeClusterSelection()
+    }
+
+    /// Called after every per-row selection change (audio / sub / external /
+    /// resolution / burn-in) that could be propagated cluster-wide. Either:
+    /// - "Always apply" setting on ⇒ silently propagate to every sibling.
+    /// - Cluster has ≥ 1 sibling ⇒ surface the popover ("Apply to all?" /
+    ///   "Just this one"), auto-dismiss after 5 s.
+    /// - No siblings (movie / one-off) ⇒ nothing.
+    private func didChangeClusterSelection() {
+        guard let cid = job.clusterID else { return }
+        let siblings = pipeline.clusterSiblingCount(of: job)
+        guard siblings > 0 else { return }
+
+        if alwaysApplyWithinShow {
+            pipeline.captureClusterSelection(from: job, propagate: true)
+            return
+        }
+
+        let label = clusterShowLabel(for: cid)
+        clusterApplyPending = ClusterApplyPrompt(
+            clusterID: cid, siblingCount: siblings, showLabel: label
+        )
+        clusterApplyDismissTask?.cancel()
+        clusterApplyDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if !Task.isCancelled { clusterApplyPending = nil }
+        }
+    }
+
+    /// Counter chip text "+N audio, +M sub" for the meta row, nil when this
+    /// job has no externals queued (#11d).
+    private var externalTracksLabel: String? {
+        let refs = job.externalTracksToMux
+        guard !refs.isEmpty else { return nil }
+        let dubN = refs.lazy.filter { $0.kind == .dub }.count
+        let subN = refs.lazy.filter { $0.kind == .sub }.count
+        var parts: [String] = []
+        if dubN > 0 { parts.append("+\(dubN) audio") }
+        if subN > 0 { parts.append("+\(subN) sub") }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    /// Show-name (with year) for the popover header. Falls back to the
+    /// parsed title on the current job if the cluster has no resolution yet.
+    private func clusterShowLabel(for clusterID: String) -> String {
+        if let r = pipeline.tvShowResolutions[clusterID] {
+            return r.showName
+        }
+        if case .tvEpisode(let e) = job.metadata { return e.showName }
+        return job.fileName
     }
 
     private func channelsLabel(_ ch: Int) -> String {
@@ -839,6 +1021,7 @@ private struct StatusDot: View {
         case .pending: return theme.textFaint
         case .analyzing: return accent.solid
         case .analyzed: return theme.textDim
+        case .muxing: return Color(hex: 0xFF9F0A)
         case .transcoding: return Color(hex: 0xFF9F0A)
         case .tagging: return Color(hex: 0xBF5AF2)
         case .ready: return Color(red: 0.19, green: 0.82, blue: 0.35)
@@ -856,6 +1039,7 @@ private struct StatusDot: View {
         case .pending: return "Queued"
         case .analyzing: return "Analyzing"
         case .analyzed: return "Ready for options"
+        case .muxing: return "Muxing extras"
         case .transcoding: return "Transcoding"
         case .tagging: return "Tagging"
         case .ready: return "Ready to send"
@@ -1225,6 +1409,7 @@ private struct ResolutionPicker: View {
     let job: FileJob
     let theme: Theme
     let accent: AccentKey
+    var onChange: (() -> Void)? = nil
     @Environment(PipelineController.self) private var pipeline
 
     var body: some View {
@@ -1247,6 +1432,7 @@ private struct ResolutionPicker: View {
                 let isRec = opt.0 == recommended
                 Button {
                     job.maxResolution = opt.0
+                    onChange?()
                 } label: {
                     VStack(spacing: 2) {
                         HStack(spacing: 6) {
@@ -1308,19 +1494,32 @@ private struct ResolutionPicker: View {
 
 // MARK: - Edit Title sheet
 
+enum EditMediaKind: String, CaseIterable, Identifiable {
+    case movie, tv
+    var id: String { rawValue }
+    var label: String { self == .movie ? "Movie" : "TV show" }
+}
+
 private struct EditTitleSheet: View {
     let theme: Theme
     let accent: AccentKey
     let initialTitle: String
     let initialYear: String
+    let initialKind: EditMediaKind
+    let initialSeason: Int
+    let initialEpisode: Int
     let hasAPIKey: Bool
     @Binding var retryTMDb: Bool
     @Binding var isLoading: Bool
-    let onSave: (_ title: String, _ year: String, _ retryTMDb: Bool) -> Void
+    let onSave: (_ title: String, _ year: String, _ kind: EditMediaKind,
+                 _ season: Int, _ episode: Int, _ retryTMDb: Bool) -> Void
     let onCancel: () -> Void
 
     @State private var title: String = ""
     @State private var year: String = ""
+    @State private var kind: EditMediaKind = .movie
+    @State private var seasonText: String = "1"
+    @State private var episodeText: String = "1"
     @FocusState private var titleFocused: Bool
 
     var body: some View {
@@ -1333,12 +1532,39 @@ private struct EditTitleSheet: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            Picker("Type", selection: $kind) {
+                ForEach(EditMediaKind.allCases) { k in
+                    Text(k.label).tag(k)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
             VStack(alignment: .leading, spacing: 6) {
-                Text("Title").font(.system(size: 11)).foregroundStyle(.secondary)
-                TextField("Title", text: $title, prompt: Text("Movie or show name"))
+                Text(kind == .tv ? "Show name" : "Title")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                TextField("Title", text: $title, prompt: Text(kind == .tv ? "Show name" : "Movie name"))
                     .textFieldStyle(.roundedBorder)
                     .focused($titleFocused)
                     .onSubmit(performSave)
+            }
+
+            if kind == .tv {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Season").font(.system(size: 11)).foregroundStyle(.secondary)
+                        TextField("S", text: $seasonText)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Episode").font(.system(size: 11)).foregroundStyle(.secondary)
+                        TextField("E", text: $episodeText)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                    }
+                    Spacer()
+                }
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -1381,11 +1607,16 @@ private struct EditTitleSheet: View {
         .onAppear {
             title = initialTitle
             year = initialYear
+            kind = initialKind
+            seasonText = String(initialSeason)
+            episodeText = String(initialEpisode)
             DispatchQueue.main.async { titleFocused = true }
         }
     }
 
     private func performSave() {
-        onSave(title, year, retryTMDb)
+        let s = Int(seasonText.trimmingCharacters(in: .whitespaces)) ?? 1
+        let e = Int(episodeText.trimmingCharacters(in: .whitespaces)) ?? 1
+        onSave(title, year, kind, s, e, retryTMDb)
     }
 }

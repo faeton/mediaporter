@@ -50,6 +50,18 @@ public class PipelineController {
     /// resolved show lands in `tvShowResolutions`.
     private var clusterResolveTasks: [String: Task<ResolvedShow, Never>] = [:]
 
+    /// Cluster-scoped user intent (#11a). Keyed by `FileJob.clusterID`. Set
+    /// when the user opts to propagate a per-row change to all siblings, and
+    /// read by `analyzeOne` so a freshly analyzed sibling adopts the cluster's
+    /// established selection. In-memory only — not persisted across launches.
+    public var clusterSelections: [String: ClusterSelection] = [:]
+
+    /// External-track scan result per cluster (#11c). Populated once per
+    /// `analyzeAll` run by walking each unique source directory present in
+    /// the drop. Consumed by the cluster-header UI (11d) and the mux stage
+    /// (11e). Empty when no dub / sub files were found alongside the videos.
+    public var clusterExtras: [String: ReleaseExtras] = [:]
+
     /// Snapshot of the device's MediaLibrary used for duplicate detection
     /// (#10b). Loaded once per analyzeAll run when a device is connected,
     /// cleared after sync completes (rows we just added would otherwise
@@ -513,6 +525,32 @@ public class PipelineController {
         pendingShowPicks.removeAll { $0.id == clusterID }
     }
 
+    /// Snapshot the user's current per-row selection on `job` as cluster
+    /// intent, store under `job.clusterID`, optionally propagate to every
+    /// sibling in the same cluster (#11a). The 11b popover calls this with
+    /// `propagate: true` when the user clicks "Apply to all"; with
+    /// `propagate: false` it only stores, so freshly analyzed siblings
+    /// adopt the intent but already-analyzed ones stay untouched.
+    public func captureClusterSelection(from job: FileJob, propagate: Bool) {
+        guard let cid = job.clusterID else { return }
+        let sel = ClusterSelection.capture(from: job)
+        clusterSelections[cid] = sel
+        if propagate {
+            let extras = clusterExtras[cid]
+            for sibling in jobs where sibling.clusterID == cid && sibling.id != job.id && sibling.mediaInfo != nil {
+                sel.apply(to: sibling, extras: extras)
+            }
+        }
+    }
+
+    /// How many sibling jobs share `job`'s cluster (excluding `job` itself).
+    /// UI uses this to decide whether to show the "apply to all" popover —
+    /// zero siblings ⇒ no popover (movies, one-offs).
+    public func clusterSiblingCount(of job: FileJob) -> Int {
+        guard let cid = job.clusterID else { return 0 }
+        return jobs.filter { $0.clusterID == cid && $0.id != job.id }.count
+    }
+
     /// Bulk action: assign a clusterID to a set of jobs (overwriting any
     /// existing one), then resolve. Used by multi-select "Set show…".
     public func reclusterJobs(jobIDs: [UUID], showName: String, year: Int?) async {
@@ -667,20 +705,22 @@ public class PipelineController {
     /// the current queue. Cheap (AVAsset metadata read, no subprocess).
     public func refreshLeftovers() {
         let known = Set(jobs.compactMap { $0.outputURL?.standardizedFileURL })
-        let candidates = OrphanRecovery.scanLocalCandidates()
-        leftoverTranscodes = candidates
-            .filter { !known.contains($0.localURL.standardizedFileURL) }
-            .map { c in
-                let label: String?
-                if c.isTVShow, let show = c.showName, let s = c.season, let e = c.episode {
-                    label = String(format: "%@ · S%02dE%02d", show, s, e)
-                } else {
-                    label = nil
+        Task { @MainActor in
+            let candidates = await OrphanRecovery.scanLocalCandidates()
+            self.leftoverTranscodes = candidates
+                .filter { !known.contains($0.localURL.standardizedFileURL) }
+                .map { c in
+                    let label: String?
+                    if c.isTVShow, let show = c.showName, let s = c.season, let e = c.episode {
+                        label = String(format: "%@ · S%02dE%02d", show, s, e)
+                    } else {
+                        label = nil
+                    }
+                    return LeftoverTranscode(
+                        url: c.localURL, size: c.size, title: c.title, showLabel: label
+                    )
                 }
-                return LeftoverTranscode(
-                    url: c.localURL, size: c.size, title: c.title, showLabel: label
-                )
-            }
+        }
     }
 
     /// Throw away leftover .m4v files. Used by the banner's Discard action.
@@ -723,7 +763,7 @@ public class PipelineController {
         // Pull tags + size from every leftover .m4v in /tmp. Doesn't depend on
         // the in-memory FileJobs queue — the m4v files were tagged before
         // upload, so they carry full TMDb metadata themselves.
-        let candidates = OrphanRecovery.scanLocalCandidates()
+        let candidates = await OrphanRecovery.scanLocalCandidates()
 
         overallStatus = "Scanning device for uploaded files..."
         let deviceFiles: [DeviceMediaFile]
@@ -816,6 +856,35 @@ public class PipelineController {
             NSLog("OpenSubtitles: enabled for languages %@", langs.joined(separator: ","))
         } else if !openSubtitlesAPIKey.isEmpty {
             NSLog("OpenSubtitles: API key set but username/password/languages missing — skipping auto-fetch. Fill them in Settings → Subtitles.")
+        }
+
+        // Scan each source directory present in the drop for external
+        // audio / sub tracks (#11c). Group pending jobs by parent dir, parse
+        // their filenames once, hand the list to the scanner. Store per
+        // cluster — multiple clusters under one dir each see only their own
+        // matching episodes. We re-scan every analyze run so dropping a new
+        // episode of an existing show picks up newly added dub files.
+        let pendingByDir = Dictionary(grouping: jobs.filter { $0.status == .pending }) {
+            $0.inputURL.deletingLastPathComponent().standardizedFileURL
+        }
+        for (dir, jobsInDir) in pendingByDir {
+            let parsedFiles = jobsInDir.map { FilenameParser.parse($0.fileName) }
+            let extras = ExternalTrackScanner.scanRelease(sourceDir: dir, episodes: parsedFiles)
+            guard !extras.isEmpty else { continue }
+            // Map clusters that live in this dir (parse-time only; the
+            // resolver runs again post-TMDb so cluster IDs are stable).
+            let dirClusters = Set(parsedFiles.compactMap { p -> String? in
+                guard p.season != nil, p.episode != nil else { return nil }
+                return TVShowCluster.key(showName: p.title, year: p.year)
+            })
+            for cid in dirClusters {
+                clusterExtras[cid] = extras
+            }
+            if !dirClusters.isEmpty {
+                NSLog("ExternalTrackScanner: %@ → %d dub(s), %d sub(s) for cluster(s) %@",
+                      dir.lastPathComponent, extras.dubs.count, extras.subs.count,
+                      dirClusters.sorted().joined(separator: ","))
+            }
         }
 
         // Refresh the device-library snapshot for duplicate detection
@@ -952,6 +1021,25 @@ public class PipelineController {
 
             job.selectedExternalSubs = Array(0..<info.externalSubtitles.count)
 
+            // 11a: when the cluster already has a stored intent (another
+            // sibling was edited and the user opted to propagate), apply
+            // it now — overwrites the per-row defaults seeded above.
+            // Without stored intent, only the external-track resolution
+            // runs (cluster extras may exist before the user touches the
+            // checkboxes) so the seed defaults for audio / subs /
+            // resolution stay in place.
+            if let cid = job.clusterID {
+                if let sel = clusterSelections[cid] {
+                    sel.apply(to: job, extras: clusterExtras[cid])
+                } else if let extras = clusterExtras[cid] {
+                    // Only the external-track side runs — seeds for audio,
+                    // subs, resolution stand. (Empty cluster selection ⇒
+                    // includedDubStudios/SubLabels empty ⇒ no externals
+                    // muxed until the user picks some in the UI.)
+                    ClusterSelection().applyExternals(to: job, extras: extras)
+                }
+            }
+
             // Duplicate check (#10b). Compute the same title SyncItem will
             // use, then look it up in the device snapshot by (title,
             // durationMs ±2 s). Off by default — no snapshot → nil.
@@ -982,6 +1070,49 @@ public class PipelineController {
         isRunning = true
 
         for (i, job) in toProcess.enumerated() {
+            // 11e pre-mux: combine the source video with selected external
+            // dubs / subs into an intermediate MKV in temp, then re-probe
+            // so the existing transcode pipeline sees the new tracks as if
+            // they were embedded all along.
+            var muxIntermediate: URL? = nil
+            if !job.externalTracksToMux.isEmpty {
+                job.status = .muxing
+                overallStatus = "Muxing extras: \(job.fileName)..."
+                let intermediate = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("mp-mux-\(UUID().uuidString).mkv")
+                do {
+                    try await ExternalMux.mux(
+                        sourceVideo: job.inputURL,
+                        extras: job.externalTracksToMux,
+                        outputPath: intermediate
+                    )
+                    var newInfo = try await probeFile(url: intermediate)
+                    scanExternalSubtitles(mediaInfo: &newInfo)
+                    let newDecision = evaluateCompatibility(mediaInfo: newInfo)
+                    job.mediaInfo = newInfo
+                    job.decision = newDecision
+                    muxIntermediate = intermediate
+                    // Keep every audio (originals + dubs); text-only subs.
+                    job.selectedAudio = Array(0..<newInfo.audioStreams.count)
+                    job.selectedSubtitles = newInfo.subtitleStreams.enumerated().compactMap { idx, s in
+                        isTextSubtitle(s.codecName) || s.codecName == "mov_text" ? idx : nil
+                    }
+                    // The mux step embedded the extras; transcode pass
+                    // should not also pull them in as sidecars.
+                    job.externalTracksToMux = []
+                } catch {
+                    job.status = .failed
+                    job.error = "External mux: \(error.localizedDescription)"
+                    overallProgress = Double(i + 1) / Double(toProcess.count)
+                    continue
+                }
+            }
+            // Delete the mux intermediate (if any) after this job leaves
+            // the transcode stage; the .m4v output is what gets synced.
+            defer {
+                if let u = muxIntermediate { try? FileManager.default.removeItem(at: u) }
+            }
+
             if job.needsWork {
                 job.status = .transcoding
                 job.progress = 0
@@ -1074,12 +1205,14 @@ public class PipelineController {
             return self.buildSyncItem(for: job, fileURL: fileURL)
         }
 
-        // Build a map from SyncItem title to job for progress updates.
-        // Must use the SyncItem's title (episode title for TV) — using
+        // Build a map from SyncItem title to job UUID for progress updates.
+        // Sendable (UUID) so the closure can capture without warnings; we
+        // resolve back to the FileJob on the main thread where mutation is
+        // safe. Must use the SyncItem's title (episode title for TV) — using
         // ResolvedMetadata.title would collide all 25 episodes onto the
         // show name and only one row would tick.
-        let jobsByTitle: [String: FileJob] = Dictionary(
-            zip(items, readyJobs).map { ($0.title, $1) },
+        let jobIDByTitle: [String: UUID] = Dictionary(
+            zip(items, readyJobs).map { ($0.title, $1.id) },
             uniquingKeysWith: { $1 }
         )
 
@@ -1095,8 +1228,9 @@ public class PipelineController {
                         DispatchQueue.main.async {
                             self.overallStatus = "Uploading: \(title)"
                             self.overallProgress = pct
-                            // Update per-file progress
-                            if let job = jobsByTitle[title] {
+                            // Resolve job on main where FileJob access is safe.
+                            if let id = jobIDByTitle[title],
+                               let job = self.jobs.first(where: { $0.id == id }) {
                                 job.progress = pct
                             }
                         }

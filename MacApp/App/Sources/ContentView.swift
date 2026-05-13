@@ -15,6 +15,23 @@ struct ContentView: View {
     private var theme: Theme { Theme(dark: tweaks.dark) }
     private var showEmpty: Bool { pipeline.jobs.isEmpty }
 
+    /// Clusters with detected external tracks, ordered by show name for
+    /// stable display. Used by ContentView to render one extras section
+    /// per cluster above the file list (#11d).
+    private var clusterExtrasOrdered: [(String, ReleaseExtras)] {
+        pipeline.clusterExtras
+            .filter { entry in
+                guard !entry.value.isEmpty else { return false }
+                return pipeline.jobs.contains { $0.clusterID == entry.key }
+            }
+            .sorted { a, b in
+                let an = pipeline.tvShowResolutions[a.key]?.showName ?? a.key
+                let bn = pipeline.tvShowResolutions[b.key]?.showName ?? b.key
+                return an.localizedCaseInsensitiveCompare(bn) == .orderedAscending
+            }
+            .map { ($0.key, $0.value) }
+    }
+
     /// "iPad" / "iPhone" / "iPod" / "device" — keeps drop-zone copy honest
     /// when an iPhone is plugged in instead of an iPad.
     private var deviceClassLabel: String {
@@ -104,6 +121,12 @@ struct ContentView: View {
                         } else {
                             ScrollView {
                                 LazyVStack(spacing: 4) {
+                                    ForEach(clusterExtrasOrdered, id: \.0) { cid, extras in
+                                        ClusterExtrasSection(
+                                            clusterID: cid, extras: extras,
+                                            theme: theme, accent: tweaks.accent
+                                        )
+                                    }
                                     ForEach(pipeline.jobs) { job in
                                         FileRowView(
                                             job: job,

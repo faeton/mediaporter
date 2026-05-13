@@ -17,6 +17,10 @@ public enum JobStatus: String {
     case pending
     case analyzing
     case analyzed
+    /// External audio/sub tracks are being muxed into an intermediate MKV
+    /// before the main transcode pass (#11e). Short pre-stage; only seen
+    /// when the job has non-empty `externalTracksToMux`.
+    case muxing
     case transcoding
     case tagging
     case ready
@@ -63,6 +67,12 @@ public class FileJob: Identifiable {
     /// pipeline syncs the file even though a match exists on the device
     /// (creates a duplicate row — same caveat as before #10b).
     public var syncDespiteDuplicate: Bool = false
+
+    /// External audio / sub tracks that should be muxed into this episode
+    /// before transcode (#11e). Resolved by `ClusterSelection.apply` against
+    /// the cluster's `ReleaseExtras` (#11c) and the current cluster
+    /// selection. Empty for files without extras or with no extras selected.
+    public var externalTracksToMux: [ExternalTrackRef] = []
 
     // User selections (populated after analysis)
     public var selectedAudio: [Int] = []          // indices into audioStreams

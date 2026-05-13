@@ -16,6 +16,13 @@ struct ParsedFilename {
     let mediaType: MediaType
 }
 
+/// Public seam for the App target — extract just (season, episode) from a
+/// filename. Hides the internal `ParsedFilename` type.
+public func parseSeasonEpisode(from filename: String) -> (season: Int?, episode: Int?) {
+    let p = FilenameParser.parse(filename)
+    return (p.season, p.episode)
+}
+
 enum FilenameParser {
     // TV: "Show.Name.S01E02", "Show Name - S01E02", "Show - S1 - E01", "Show S01.E02".
     // The separators between S## and E## are optional + greedy because real-world

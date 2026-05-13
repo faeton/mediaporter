@@ -2,7 +2,7 @@
 
 CLI + macOS app for transferring video to iOS devices' TV app. Smart transcoding, ATC protocol sync.
 
-**Status**: end-to-end sync working. Python (`src/mediaporter/`) is the reference; Swift MacApp (`MacApp/MediaPorter/`) is at parity. Land fixes in Python first, port to Swift after validation.
+**Status**: end-to-end sync working. Swift MacApp (`MacApp/MediaPorter/`) is now the primary target — new features land there first. Python (`src/mediaporter/`) is the historical reference and lags behind; CLI parity will be revisited later.
 
 ## Critical rules
 
