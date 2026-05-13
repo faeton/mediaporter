@@ -47,6 +47,26 @@ const howToLd = {
     </div>
   </section>
 
+  <section class="section setup-section">
+    <div class="container">
+      <article class="build-note">
+        <div>
+          <span class="md-tag accent">{t.setupBuildsTag}</span>
+          <h2>{t.setupBuildsTitle}</h2>
+          <p class="muted">{t.setupBuildsBody}</p>
+        </div>
+        <div class="build-grid">
+          {t.setupBuilds.map((build) => (
+            <div class="build-card">
+              <h3>{build.title}</h3>
+              <p>{build.body}</p>
+            </div>
+          ))}
+        </div>
+      </article>
+    </div>
+  </section>
+
   <section class="section">
     <div class="container">
       <article class="card setup-card">
@@ -99,7 +119,7 @@ const howToLd = {
 </Base>
 
 <style>
-  .setup-hero { padding-top: var(--sp-12); }
+  .setup-hero { padding-top: var(--sp-12); padding-bottom: var(--sp-8); }
   .setup-hero h1 { margin-top: var(--sp-4); max-width: 24ch; }
   .lede {
     margin-top: var(--sp-6);
@@ -127,6 +147,40 @@ const howToLd = {
     left: 0;
     color: var(--accent);
     font-family: var(--font-mono);
+  }
+
+  .setup-section { padding-block: var(--sp-8); }
+  .build-note {
+    display: grid;
+    grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+    gap: var(--sp-6);
+    align-items: stretch;
+    padding: var(--sp-6);
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+    border-radius: var(--r-sm);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.035), transparent 48px),
+      color-mix(in srgb, var(--surface) 78%, var(--bg));
+  }
+  .build-note h2 { margin: var(--sp-3) 0 var(--sp-3); }
+  .build-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--sp-3);
+  }
+  .build-card {
+    padding: var(--sp-4);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    background: var(--code-bg);
+  }
+  .build-card h3 { font-size: 1.1rem; margin-bottom: var(--sp-2); }
+  .build-card p { color: var(--text-2); margin: 0; }
+  @media (max-width: 820px) {
+    .build-note { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 560px) {
+    .build-grid { grid-template-columns: 1fr; }
   }
 
   .setup-card { padding: var(--sp-8); display: flex; flex-direction: column; gap: var(--sp-4); }

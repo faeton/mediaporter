@@ -17,7 +17,10 @@ interface Props {
 const { locale = DEFAULT_LOCALE } = Astro.props;
 const t = STRINGS[locale];
 
-const path = Astro.url.pathname.replace(/\/$/, "") || "/";
+const path = Astro.url.pathname
+  .replace(/\.html$/, "")
+  .replace(/\/index$/, "/")
+  .replace(/\/$/, "") || "/";
 const basePath = stripLocale(path);
 
 const links: { href: string; label: string }[] = [
@@ -80,8 +83,15 @@ const links: { href: string; label: string }[] = [
     justify-content: space-between;
     padding-block: var(--sp-3);
     gap: var(--sp-4);
+    width: min(1320px, 100% - var(--sp-8));
   }
-  .brand { display: inline-flex; align-items: center; gap: var(--sp-3); color: var(--text); }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-3);
+    color: var(--text);
+    flex: 0 0 auto;
+  }
   .wordmark {
     font-family: var(--font-display);
     font-weight: 700;
@@ -96,6 +106,12 @@ const links: { href: string; label: string }[] = [
     font-size: 0.9rem;
     margin-left: 2px;
   }
+  nav {
+    flex: 1 1 auto;
+    display: flex;
+    justify-content: center;
+    min-width: 0;
+  }
   nav ul { display: flex; gap: var(--sp-6); list-style: none; padding: 0; margin: 0; }
   .nav-link {
     color: var(--text-2);
@@ -109,6 +125,7 @@ const links: { href: string; label: string }[] = [
     gap: var(--sp-2);
     font-family: var(--font-mono);
     font-size: 0.8125rem;
+    flex: 0 0 auto;
   }
   .lang {
     color: var(--text-3);
@@ -124,12 +141,42 @@ const links: { href: string; label: string }[] = [
   }
 
   @media (max-width: 760px) {
-    .row { flex-wrap: wrap; }
-    nav { order: 3; width: 100%; }
-    .lang-switch { order: 2; }
+    .site-header { position: static; }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr;
+      width: min(100% - var(--sp-6), 1120px);
+      padding-block: var(--sp-4);
+      gap: var(--sp-4);
+    }
+    .brand { gap: var(--sp-2); }
+    .brand svg { width: 24px; height: 24px; }
+    .wordmark { font-size: 1.05rem; }
+    .lang-switch {
+      order: 2;
+      gap: var(--sp-2);
+      overflow-x: auto;
+      padding-bottom: 2px;
+      scrollbar-width: none;
+    }
+    .lang-switch::-webkit-scrollbar { display: none; }
+    .lang { white-space: nowrap; padding: 4px 8px; }
+    nav {
+      order: 3;
+      width: 100%;
+      justify-content: flex-start;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    nav::-webkit-scrollbar { display: none; }
+    nav ul {
+      gap: var(--sp-4);
+      flex-wrap: nowrap;
+      min-width: max-content;
+    }
   }
   @media (max-width: 560px) {
-    nav ul { gap: var(--sp-4); flex-wrap: wrap; }
+    nav ul { gap: var(--sp-4); }
     .wordmark .tld { display: none; }
   }
 </style>

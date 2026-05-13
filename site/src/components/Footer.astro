@@ -37,6 +37,11 @@ const year = new Date().getFullYear();
     </div>
     <div class="base">
       <span class="md-comment">// {t.footerRights.replace("{year}", String(year))}</span>
+      <span class="credits">
+        App by <a href="https://ivan.md" rel="noopener">ivan.md</a>
+        <span aria-hidden="true">·</span>
+        <a href="https://github.com/faeton/mediaporter" rel="noopener">GitHub</a>
+      </span>
     </div>
   </div>
 </footer>
@@ -64,5 +69,29 @@ const year = new Date().getFullYear();
   ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
   ul a { color: var(--text-2); }
   ul a:hover { color: var(--text); }
-  .base { margin-top: var(--sp-12); padding-top: var(--sp-6); border-top: 1px solid var(--border); }
+  .base {
+    margin-top: var(--sp-12);
+    padding-top: var(--sp-6);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-4);
+    flex-wrap: wrap;
+  }
+  .credits {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    color: var(--text-3);
+    font-family: var(--font-mono);
+    font-size: var(--fs-code);
+  }
+  .credits a {
+    color: var(--text-2);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--accent) 34%, transparent);
+    text-underline-offset: 3px;
+  }
+  .credits a:hover { color: var(--text); text-decoration-color: var(--accent); }
 </style>

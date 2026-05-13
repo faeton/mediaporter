@@ -17,8 +17,9 @@ body {
   min-height: 100vh;
   /* Subtle ambient gradient — pink at top-right, fading */
   background-image:
+    linear-gradient(180deg, rgba(255,255,255,0.025), transparent 360px),
     radial-gradient(1200px 600px at 90% -10%, rgba(236, 72, 153, 0.10), transparent 60%),
-    radial-gradient(900px 500px at -10% 110%, rgba(190, 24, 93, 0.08), transparent 55%);
+    radial-gradient(900px 500px at -10% 110%, rgba(52, 211, 153, 0.055), transparent 55%);
   background-attachment: fixed;
 }
 
@@ -49,10 +50,11 @@ code, kbd, pre, samp { font-family: var(--font-mono); font-size: var(--fs-code);
 
 /* Layout */
 .container { width: min(1120px, 100% - var(--sp-8)); margin-inline: auto; }
-.section   { padding-block: var(--sp-24); }
+.section   { padding-block: var(--sp-20, 80px); }
 @media (max-width: 720px) {
   :root { --fs-h1: 2.5rem; --fs-h2: 1.75rem; }
-  .section { padding-block: var(--sp-16); }
+  .container { width: min(100% - var(--sp-6), 1120px); }
+  .section { padding-block: var(--sp-12); }
 }
 
 /* Buttons */
@@ -67,6 +69,7 @@ code, kbd, pre, samp { font-family: var(--font-mono); font-size: var(--fs-code);
   font-size: 0.9375rem;
   border: 1px solid transparent;
   cursor: pointer;
+  min-height: 46px;
   transition: transform var(--dur-fast) var(--ease),
               background var(--dur-fast) var(--ease),
               border-color var(--dur-fast) var(--ease);
@@ -99,7 +102,7 @@ code, kbd, pre, samp { font-family: var(--font-mono); font-size: var(--fs-code);
 .code {
   background: var(--code-bg);
   border: 1px solid var(--border);
-  border-radius: var(--r-md);
+  border-radius: var(--r-sm);
   padding: var(--sp-4) var(--sp-6);
   overflow-x: auto;
   font-family: var(--font-mono);
@@ -112,10 +115,13 @@ code, kbd, pre, samp { font-family: var(--font-mono); font-size: var(--fs-code);
 
 /* Card */
 .card {
-  background: var(--surface);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.035), transparent 44px),
+    var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-sm);
   padding: var(--sp-6);
+  box-shadow: 0 18px 45px -40px rgba(0, 0, 0, 0.8);
   transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
 }
 .card:hover { border-color: color-mix(in srgb, var(--accent) 30%, var(--border)); }

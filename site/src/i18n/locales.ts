@@ -118,6 +118,10 @@ export type Strings = {
   setupHeading: string;
   setupLede: string;
   setupIntroBullets: string[];
+  setupBuildsTag: string;
+  setupBuildsTitle: string;
+  setupBuildsBody: string;
+  setupBuilds: { title: string; body: string }[];
   setupTmdbTag: string;
   setupTmdbTitle: string;
   setupTmdbWhat: string;
@@ -330,6 +334,20 @@ const en: Strings = {
     "Why your own keys: a single shared key bundled in the app would get extracted from the binary in minutes, then rate-limited or revoked — breaking the app for everyone. Per-user keys keep MediaPorter working long-term.",
     "What if you skip them: the app still syncs your files. TMDb missing → generated fallback posters and minimal metadata. OpenSubtitles missing → only the subtitles already embedded in your files are used.",
     "Privacy: keys stay on your Mac. MediaPorter talks directly to TMDb and OpenSubtitles from your machine — nothing routes through us.",
+  ],
+  setupBuildsTag: "builds",
+  setupBuildsTitle: "Choose the right download build.",
+  setupBuildsBody:
+    "MediaPorter is distributed in two macOS builds. The app behavior is the same; the difference is how ffmpeg is provided for files that need remuxing or audio conversion.",
+  setupBuilds: [
+    {
+      title: "Bundled ffmpeg",
+      body: "Includes ffmpeg inside the app bundle. This is the simplest option and does not require Homebrew or any command-line setup.",
+    },
+    {
+      title: "System ffmpeg",
+      body: "Smaller download. Install ffmpeg yourself, for example with `brew install ffmpeg`, or make any compatible ffmpeg binary available in your PATH.",
+    },
   ],
   setupTmdbTag: "tmdb",
   setupTmdbTitle: "TMDb — posters & metadata",
@@ -558,6 +576,20 @@ const ru: Strings = {
     "Если пропустить: приложение всё равно зальёт файлы на устройство. Без TMDb — будет сгенерированный фоллбэк-постер и минимум метаданных. Без OpenSubtitles — только субтитры, уже встроенные в файл.",
     "Приватность: ключи хранятся у вас на Mac. MediaPorter ходит в TMDb и OpenSubtitles напрямую с вашей машины — ничего не идёт через нас.",
   ],
+  setupBuildsTag: "билды",
+  setupBuildsTitle: "Выберите подходящую сборку.",
+  setupBuildsBody:
+    "MediaPorter распространяется в двух macOS-сборках. Поведение приложения одинаковое; отличается только то, откуда берётся ffmpeg для ремультиплексирования и конвертации аудио.",
+  setupBuilds: [
+    {
+      title: "ffmpeg внутри приложения",
+      body: "ffmpeg уже лежит в .app. Это самый простой вариант: Homebrew и настройка командной строки не нужны.",
+    },
+    {
+      title: "Системный ffmpeg",
+      body: "Скачивание меньше. Установите ffmpeg сами, например через `brew install ffmpeg`, или положите совместимый бинарник ffmpeg в PATH.",
+    },
+  ],
   setupTmdbTag: "tmdb",
   setupTmdbTitle: "TMDb — постеры и метаданные",
   setupTmdbWhat:
@@ -783,6 +815,20 @@ const zh: Strings = {
     "为什么用自己的密钥：把共享密钥打包进应用，几天内就会被从二进制中提取，紧接着触发限流或被吊销 —— 所有人都用不了。每个用户用自己的密钥，MediaPorter 才能长期可用。",
     "如果跳过：应用仍可同步文件。没有 TMDb —— 使用回退海报和最少元数据。没有 OpenSubtitles —— 只用文件中已内嵌的字幕。",
     "隐私：密钥保存在你的 Mac 上。MediaPorter 直接从你的电脑访问 TMDb 与 OpenSubtitles，不经过我们的服务器。",
+  ],
+  setupBuildsTag: "构建",
+  setupBuildsTitle: "选择合适的下载版本。",
+  setupBuildsBody:
+    "MediaPorter 提供两个 macOS 构建。应用行为相同；区别只在于需要重封装或音频转换时 ffmpeg 从哪里来。",
+  setupBuilds: [
+    {
+      title: "内置 ffmpeg",
+      body: "ffmpeg 已包含在 app 包内。这是最简单的选择，不需要 Homebrew，也不需要命令行设置。",
+    },
+    {
+      title: "系统 ffmpeg",
+      body: "下载体积更小。请自行安装 ffmpeg，例如 `brew install ffmpeg`，或让任何兼容的 ffmpeg 二进制出现在 PATH 中。",
+    },
   ],
   setupTmdbTag: "tmdb",
   setupTmdbTitle: "TMDb —— 海报与元数据",
@@ -1010,6 +1056,20 @@ const ko: Strings = {
     "왜 본인 키가 필요한가: 공용 키를 앱에 내장하면 며칠 안에 바이너리에서 추출되고, 곧 속도 제한이나 차단으로 이어져 모두가 사용할 수 없게 됩니다. 사용자별 키만이 MediaPorter를 장기적으로 동작하게 하는 방법입니다.",
     "키 없이 사용한다면: 파일 동기화는 여전히 됩니다. TMDb 없음 — 생성된 폴백 포스터와 최소한의 메타데이터. OpenSubtitles 없음 — 파일에 이미 포함된 자막만 사용.",
     "개인정보: 키는 Mac에 보관됩니다. MediaPorter는 사용자 컴퓨터에서 직접 TMDb와 OpenSubtitles에 접속합니다 — 저희 서버를 거치지 않습니다.",
+  ],
+  setupBuildsTag: "빌드",
+  setupBuildsTitle: "맞는 다운로드 빌드를 선택하세요.",
+  setupBuildsBody:
+    "MediaPorter는 두 가지 macOS 빌드로 배포됩니다. 앱 동작은 같고, 리먹스나 오디오 변환에 필요한 ffmpeg를 어디서 가져오는지만 다릅니다.",
+  setupBuilds: [
+    {
+      title: "ffmpeg 포함 빌드",
+      body: "ffmpeg가 앱 번들 안에 포함되어 있습니다. 가장 간단한 선택이며 Homebrew나 명령줄 설정이 필요 없습니다.",
+    },
+    {
+      title: "시스템 ffmpeg 빌드",
+      body: "다운로드 크기가 더 작습니다. `brew install ffmpeg` 등으로 직접 설치하거나, 호환되는 ffmpeg 바이너리가 PATH에 있도록 설정하세요.",
+    },
   ],
   setupTmdbTag: "tmdb",
   setupTmdbTitle: "TMDb — 포스터·메타데이터",

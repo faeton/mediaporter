@@ -65,7 +65,7 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
   </section>
 
   <!-- FEATURES -->
-  <section class="section" id="features">
+  <section class="section band" id="features">
     <div class="container">
       <header class="section-head">
         <span class="md-tag">## features</span>
@@ -108,7 +108,7 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
   </section>
 
   <!-- SETUP CALLOUT -->
-  <section class="section" id="setup">
+  <section class="section compact" id="setup">
     <div class="container">
       <div class="card setup-callout">
         <span class="md-tag accent">{t.setupCalloutEyebrow}</span>
@@ -122,7 +122,7 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
   </section>
 
   <!-- ANIME CALLOUT -->
-  <section class="section" id="anime">
+  <section class="section compact" id="anime">
     <div class="container">
       <div class="card anime-callout">
         <span class="md-tag accent">{t.animeCalloutEyebrow}</span>
@@ -136,7 +136,7 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
   </section>
 
   <!-- MORE GUIDES -->
-  <section class="section" id="guides">
+  <section class="section band" id="guides">
     <div class="container">
       <header class="section-head">
         <span class="md-tag">{t.moreGuidesEyebrow}</span>
@@ -176,7 +176,7 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
   </section>
 
   <!-- DOWNLOAD -->
-  <section class="section download" id="download">
+  <section class="section compact download" id="download">
     <div class="container">
       <div class="card download-card">
         <span class="md-tag accent">{t.downloadEyebrow}</span>
@@ -195,18 +195,29 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
 </Base>
 
 <style>
-  .hero { padding-top: var(--sp-16); }
+  .hero { padding-top: var(--sp-16); padding-bottom: var(--sp-12); }
   .hero-grid {
     display: grid;
-    grid-template-columns: 1.2fr 1fr;
-    gap: var(--sp-16);
+    grid-template-columns: minmax(0, 1.05fr) minmax(340px, 0.75fr);
+    gap: clamp(var(--sp-8), 6vw, var(--sp-16));
     align-items: center;
   }
   @media (max-width: 880px) {
-    .hero-grid { grid-template-columns: 1fr; gap: var(--sp-12); }
-    .hero-mark { order: -1; display: flex; justify-content: center; }
+    .hero {
+      padding-top: var(--sp-10);
+      padding-bottom: var(--sp-10);
+    }
+    .hero-grid {
+      grid-template-columns: 1fr;
+      gap: var(--sp-8);
+    }
+    .hero-mark {
+      display: flex;
+      justify-content: center;
+      margin-top: var(--sp-2);
+    }
   }
-  .hero-copy h1 { margin-top: var(--sp-4); }
+  .hero-copy h1 { margin-top: var(--sp-4); max-width: 13ch; }
   .hero-copy h1 .accent { color: var(--accent); }
   .hero-copy h1 .muted { color: var(--text-2); font-weight: 600; }
   .lede {
@@ -224,9 +235,9 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
 
   .hero-mark { display: flex; flex-direction: column; align-items: center; gap: var(--sp-4); }
   .mark-frame {
-    width: 360px; max-width: 100%;
+    width: min(360px, 100%);
     aspect-ratio: 1;
-    border-radius: var(--r-lg);
+    border-radius: var(--r-sm);
     background:
       radial-gradient(120% 120% at 30% 20%, rgba(236, 72, 153, 0.18), transparent 55%),
       var(--surface);
@@ -239,10 +250,20 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
   .caption { margin: 0; }
 
   .code-strip { margin-top: var(--sp-12); }
+  .code-strip .code {
+    border-color: color-mix(in srgb, var(--accent) 18%, var(--border));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+  }
+
+  .band {
+    border-block: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    background: color-mix(in srgb, var(--surface) 30%, transparent);
+  }
+  .compact { padding-block: var(--sp-12); }
 
   .section-head {
     display: flex; flex-direction: column; gap: var(--sp-3);
-    margin-bottom: var(--sp-12); max-width: 64ch;
+    margin-bottom: var(--sp-8); max-width: 64ch;
   }
   .muted { color: var(--text-2); }
 
@@ -253,17 +274,28 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
   }
   @media (max-width: 880px) { .feature-grid { grid-template-columns: 1fr 1fr; } }
   @media (max-width: 560px) { .feature-grid { grid-template-columns: 1fr; } }
+  .feature { min-height: 100%; }
   .feature h3 { margin-block: var(--sp-3) var(--sp-2); }
   .feature p { color: var(--text-2); }
 
   .how-grid {
     display: grid;
     grid-template-columns: 1fr 1.4fr;
-    gap: var(--sp-16);
+    gap: clamp(var(--sp-8), 7vw, var(--sp-16));
+    align-items: start;
   }
   @media (max-width: 880px) { .how-grid { grid-template-columns: 1fr; gap: var(--sp-8); } }
-  .how-steps { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--sp-6); }
-  .how-steps li { display: grid; grid-template-columns: auto 1fr; gap: var(--sp-6); align-items: start; }
+  .how-steps { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--sp-4); }
+  .how-steps li {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: var(--sp-4);
+    align-items: start;
+    padding: var(--sp-4);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    background: color-mix(in srgb, var(--surface) 62%, transparent);
+  }
   .how-steps .step {
     font-family: var(--font-mono);
     font-size: 0.9rem;
@@ -308,17 +340,20 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
     border-radius: 999px;
   }
 
-  .setup-callout { padding-block: var(--sp-10); text-align: center; }
+  .setup-callout { padding: var(--sp-10) var(--sp-8); text-align: center; }
   .setup-callout h2 { margin-block: var(--sp-3) var(--sp-4); max-width: 28ch; margin-inline: auto; }
   .setup-callout .muted { max-width: 60ch; margin-inline: auto; }
-  .setup-callout .cta-row { justify-content: center; }
+  .setup-callout .cta-row { justify-content: center; margin-bottom: var(--sp-1); }
+  .setup-callout .btn { min-width: min(100%, 360px); justify-content: center; }
 
-  .anime-callout { text-align: center; padding-block: var(--sp-12); }
+  .anime-callout { text-align: center; padding: var(--sp-10) var(--sp-8); }
   .anime-callout h2 { margin-block: var(--sp-3) var(--sp-4); }
   .anime-callout .muted { max-width: 60ch; margin-inline: auto; }
-  .anime-callout .cta-row { justify-content: center; }
+  .anime-callout .cta-row { justify-content: center; margin-bottom: var(--sp-1); }
+  .anime-callout .btn { min-width: min(100%, 360px); justify-content: center; }
 
-  .faq-list { display: flex; flex-direction: column; gap: var(--sp-3); }
+  .faq-list { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
+  @media (max-width: 760px) { .faq-list { grid-template-columns: 1fr; } }
   .faq-item {
     border: 1px solid var(--border);
     border-radius: var(--r-sm);
@@ -344,7 +379,7 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
   .faq-item[open] summary::after { content: "−"; }
   .faq-item p { color: var(--text-2); margin-top: var(--sp-3); }
 
-  .download-card { text-align: center; padding-block: var(--sp-12); }
+  .download-card { text-align: center; padding-block: var(--sp-10); }
   .download-card h2 { margin-block: var(--sp-3) var(--sp-4); }
   .download-card .muted { max-width: 52ch; margin-inline: auto; }
   .email-form {
@@ -366,5 +401,76 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+
+  @media (min-width: 881px) {
+    .hero-copy h1 {
+      font-size: clamp(3.35rem, 5vw, 5rem);
+    }
+  }
+
+  @media (max-width: 720px) {
+    .hero-copy h1 {
+      max-width: 100%;
+      font-size: clamp(2.85rem, 13vw, 4rem);
+      line-height: 1.02;
+      overflow-wrap: normal;
+    }
+    :global(html[lang="ru"]) .hero-copy h1 {
+      font-size: clamp(2.45rem, 10.8vw, 3.35rem);
+      line-height: 1.04;
+    }
+    :global(html[lang="zh-CN"]) .hero-copy h1,
+    :global(html[lang="ko"]) .hero-copy h1 {
+      font-size: clamp(2.55rem, 11.5vw, 3.5rem);
+      line-height: 1.06;
+    }
+    .lede {
+      margin-top: var(--sp-5, 20px);
+      font-size: 1.05rem;
+    }
+    .cta-row {
+      margin-top: var(--sp-6);
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .cta-row .btn {
+      justify-content: center;
+      width: 100%;
+    }
+    .setup-callout,
+    .anime-callout,
+    .download-card {
+      padding: var(--sp-6);
+    }
+    .setup-callout h2,
+    .anime-callout h2,
+    .download-card h2 {
+      font-size: clamp(1.75rem, 8vw, 2.25rem);
+    }
+    .setup-callout .muted,
+    .anime-callout .muted,
+    .download-card .muted {
+      font-size: 1rem;
+      line-height: 1.55;
+    }
+    .hero-copy .md-comment {
+      margin-top: var(--sp-3);
+      font-size: 0.85rem;
+    }
+    .mark-frame {
+      width: min(100%, 300px);
+    }
+    .caption {
+      font-size: 0.85rem;
+    }
+    .code-strip {
+      margin-top: var(--sp-8);
+    }
+    .code-strip .code {
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: var(--sp-4);
+    }
   }
 </style>
