@@ -18,6 +18,12 @@ struct SettingsView: View {
     @State private var osKeySource: TMDbKeySource = .none
     @State private var osSavedFlash: Bool = false
 
+    /// Mirrors the same `@AppStorage` key used by `FileRowView` for the
+    /// cluster-propagation popover. Surfaced here so the user can turn
+    /// "Always" off after enabling it once — otherwise the popover never
+    /// resurfaces and there is no other place to flip it back.
+    @AppStorage("alwaysApplyWithinShow") private var alwaysApplyWithinShow: Bool = false
+
     var body: some View {
         TabView {
             appearanceTab
@@ -116,6 +122,19 @@ struct SettingsView: View {
                 Text("Transcode").font(.system(size: 13, weight: .semibold))
             } footer: {
                 Text("VideoToolbox uses Apple's hardware HEVC encoder — 5–10× faster, slightly larger files at the same quality. libx265 is the reference software encoder — slower, smaller files, more consistent quality. VideoToolbox is the right default on Apple Silicon.\n\nThe 4K-output toggle keeps originals instead of dropping to the device's panel resolution — flip it on when you mostly watch via AirPlay/HDMI to a TV.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+            }
+
+            Section {
+                Toggle("Always propagate per-episode changes to the whole show",
+                       isOn: $alwaysApplyWithinShow)
+                    .toggleStyle(.switch)
+            } header: {
+                Text("TV shows").font(.system(size: 13, weight: .semibold))
+            } footer: {
+                Text("When on, changes to audio / subtitles / resolution / burn-in on one episode propagate to every other episode of the same show without asking. When off, you get an \"Apply to all?\" popover the first time you toggle something on a clustered episode.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
