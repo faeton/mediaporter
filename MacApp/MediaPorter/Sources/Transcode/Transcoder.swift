@@ -18,7 +18,12 @@ enum TranscodeError: LocalizedError {
 
 /// Thread-safe registry of running ffmpeg processes so we can cancel them all on Ctrl+C or
 /// user-initiated cancel. Mirrors transcode.py's _active_procs set + cancel_all().
-private final class ActiveProcesses: @unchecked Sendable {
+///
+/// Module-internal (not file-private) so `ExternalMux` and `convertAssToSrt`
+/// can hook their own ffmpeg subprocesses into the same kill switch. Without
+/// that, `Transcoder.cancelAll()` only reaches the main transcode pass and a
+/// mid-mux cancel leaks the mux ffmpeg as a zombie (CLAUDE.md #12).
+final class ActiveProcesses: @unchecked Sendable {
     static let shared = ActiveProcesses()
     private let lock = NSLock()
     private var procs: Set<ObjectIdentifier> = []
@@ -324,6 +329,24 @@ public enum Transcoder {
 
         // Audio codec — per-track copy vs transcode (AC3 is NOT compatible; forced to AAC).
         // Mixed codecs (e.g. aac+eac3) are fine and play correctly in the TV app.
+        //
+        // Default disposition: pick the FIRST selected stream marked `default`
+        // in the input. Falls back to outIdx 0 if none is marked — the mp4
+        // muxer forces a default if none is set anyway, and multiple defaults
+        // break the switcher entirely (CLAUDE.md #10).
+        //
+        // This preserves the choice made by the cluster-extras mux pre-pass
+        // (ExternalMux sets `default` on the user-picked dub) — without this
+        // hand-off the dub-as-default radio in ClusterExtrasSection would be
+        // cosmetic and the original audio would always end up as default.
+        let defaultOutIdx: Int = {
+            for (outIdx, audioIdx) in audioIndices.enumerated() {
+                guard audioIdx < mediaInfo.audioStreams.count else { continue }
+                if mediaInfo.audioStreams[audioIdx].isDefault { return outIdx }
+            }
+            return 0
+        }()
+
         for (outIdx, audioIdx) in audioIndices.enumerated() {
             guard audioIdx < audioActions.count else { continue }
             let aa = audioActions[audioIdx]
@@ -351,9 +374,7 @@ public enum Transcoder {
                 cmd += ["-metadata:s:a:\(outIdx)", "handler_name=\(title)"]
             }
 
-            // Disposition: pin track 0 as the only default — the mp4 muxer forces
-            // a default if none is set, and multiple defaults break the switcher entirely.
-            cmd += ["-disposition:a:\(outIdx)", outIdx == 0 ? "default" : "0"]
+            cmd += ["-disposition:a:\(outIdx)", outIdx == defaultOutIdx ? "default" : "0"]
         }
 
         // Subtitle codec

@@ -163,6 +163,8 @@ public enum ExternalMux {
         proc.standardOutput = FileHandle.nullDevice
         proc.standardInput = FileHandle.nullDevice
 
+        ActiveProcesses.shared.add(proc)
+        defer { ActiveProcesses.shared.remove(proc) }
         try proc.run()
         proc.waitUntilExit()
         guard proc.terminationStatus == 0 else {
@@ -180,6 +182,8 @@ public enum ExternalMux {
         proc.standardError = errPipe
         proc.standardOutput = FileHandle.nullDevice
         proc.standardInput = FileHandle.nullDevice
+        ActiveProcesses.shared.add(proc)
+        defer { ActiveProcesses.shared.remove(proc) }
         try proc.run()
         proc.waitUntilExit()
         guard proc.terminationStatus == 0 else {
