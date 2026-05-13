@@ -43,6 +43,23 @@ struct MediaPorterApp: App {
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1200, height: 780)
         .commands {
+            CommandGroup(replacing: .help) {
+                Button("MediaPorter Documentation") {
+                    if let url = URL(string: "https://porter.md") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                Divider()
+                Button("Report a Bug…") {
+                    reportBug(pipeline: pipeline)
+                }
+                Button("Reveal Debug Log in Finder") {
+                    revealDebugLog()
+                }
+                Button("Copy Diagnostic Info") {
+                    copyDiagnosticInfo(pipeline: pipeline)
+                }
+            }
             CommandMenu("Device") {
                 Button(pipeline.hasPendingRegistration
                        ? "Retry Registration (\(pipeline.pendingRegistrationCount) files)"

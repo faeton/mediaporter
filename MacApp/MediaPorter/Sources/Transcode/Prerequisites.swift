@@ -20,4 +20,12 @@ public enum Prerequisites {
     public static var ffmpegAvailable: Bool {
         FFmpegLocator.ffmpeg != nil && FFmpegLocator.ffprobe != nil
     }
+
+    /// Resolved absolute path to ffmpeg, or nil if not findable. Used by the
+    /// Help → Copy Diagnostic Info / Report a Bug actions to surface where
+    /// the binary came from (bundled / brew / not found).
+    public static var ffmpegPath: String? { FFmpegLocator.ffmpeg?.path }
+
+    /// Resolved absolute path to ffprobe, or nil if not findable.
+    public static var ffprobePath: String? { FFmpegLocator.ffprobe?.path }
 }
