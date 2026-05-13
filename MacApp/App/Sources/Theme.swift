@@ -169,3 +169,13 @@ func fmtDuration(_ sec: Double) -> String {
     if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
     return String(format: "%d:%02d", m, s)
 }
+
+/// Format an overall bitrate in bits/sec for display next to file size.
+/// Picks Mbps for anything ≥ 1 Mbit/s (which is essentially every video we
+/// touch), kbps otherwise.
+func fmtBitrate(_ bitsPerSec: Int) -> String {
+    if bitsPerSec >= 1_000_000 {
+        return String(format: "%.1f Mbps", Double(bitsPerSec) / 1_000_000.0)
+    }
+    return "\(bitsPerSec / 1000) kbps"
+}

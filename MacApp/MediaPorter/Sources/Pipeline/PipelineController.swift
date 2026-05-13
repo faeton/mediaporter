@@ -35,6 +35,10 @@ public class PipelineController {
     // Settings
     public var qualityPreset: QualityPreset = .balanced
     public var hwAccel = true
+    /// User AirPlays/casts the device to a 4K screen, so the on-device-panel
+    /// downscale recommendation is wrong for them. Drives the banner copy
+    /// and skips the auto-downscale in `runAnalyze`.
+    public var airplayTo4K = false
     public var tmdbAPIKey: String = ""
 
     /// Resolved show identity per cluster (`FileJob.clusterID`). Each entry is
@@ -957,7 +961,11 @@ public class PipelineController {
             job.decision = decision
 
             let srcHeight = info.videoStreams.first?.height ?? 0
-            if let device = DeviceMonitor.shared.currentDevice {
+            if airplayTo4K {
+                // User outputs to a 4K display via AirPlay/HDMI — the device
+                // panel resolution is irrelevant. Keep originals.
+                job.maxResolution = .original
+            } else if let device = DeviceMonitor.shared.currentDevice {
                 let suggestion = device.suggestedResolution
                 job.maxResolution = suggestion.wouldDownscale(from: srcHeight) ? suggestion : .original
             } else if srcHeight > 1920 {

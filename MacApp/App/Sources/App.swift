@@ -36,6 +36,7 @@ struct MediaPorterApp: App {
                     pipeline.openSubtitlesPassword = ConfigLoader.openSubtitlesPassword() ?? ""
                     pipeline.openSubtitlesLanguages = ConfigLoader.openSubtitlesLanguages()
                     pipeline.hwAccel = ConfigLoader.hwAccelEnabled()
+                    pipeline.airplayTo4K = ConfigLoader.airplayTo4K()
                 }
         }
         .windowStyle(.hiddenTitleBar)

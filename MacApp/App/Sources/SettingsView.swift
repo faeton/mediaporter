@@ -101,10 +101,21 @@ struct SettingsView: View {
                     .labelsHidden()
                     .frame(maxWidth: 280)
                 }
+
+                LabeledContent("Output") {
+                    Toggle("I AirPlay or cast to a 4K display", isOn: Binding(
+                        get: { pipe.airplayTo4K },
+                        set: { newValue in
+                            pipe.airplayTo4K = newValue
+                            ConfigLoader.saveAirplayTo4K(newValue)
+                        }
+                    ))
+                    .toggleStyle(.switch)
+                }
             } header: {
                 Text("Transcode").font(.system(size: 13, weight: .semibold))
             } footer: {
-                Text("VideoToolbox uses Apple's hardware HEVC encoder — 5–10× faster, slightly larger files at the same quality. libx265 is the reference software encoder — slower, smaller files, more consistent quality. VideoToolbox is the right default on Apple Silicon.")
+                Text("VideoToolbox uses Apple's hardware HEVC encoder — 5–10× faster, slightly larger files at the same quality. libx265 is the reference software encoder — slower, smaller files, more consistent quality. VideoToolbox is the right default on Apple Silicon.\n\nThe 4K-output toggle keeps originals instead of dropping to the device's panel resolution — flip it on when you mostly watch via AirPlay/HDMI to a TV.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)

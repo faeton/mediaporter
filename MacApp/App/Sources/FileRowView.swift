@@ -211,6 +211,14 @@ struct FileRowView: View {
             Text(fmtSizeMB(job.fileSizeMB))
                 .font(.system(size: 11))
                 .foregroundStyle(theme.textDim)
+            // Source bitrate — the real "why is this 1080p file so huge"
+            // signal. Hidden when ffprobe didn't surface a number.
+            if let br = job.mediaInfo?.bitRate, br > 0 {
+                MetaDot(theme: theme)
+                Text(fmtBitrate(br))
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textDim)
+            }
             if !tmdbMatched {
                 MetaDot(theme: theme)
                 Text("no TMDb match")

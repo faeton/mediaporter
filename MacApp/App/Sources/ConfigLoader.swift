@@ -15,6 +15,7 @@ enum ConfigLoader {
     static let osPasswordDefaultsKey = "openSubtitlesPassword"
     static let osLanguagesDefaultsKey = "openSubtitlesLanguages"
     static let hwAccelDefaultsKey = "transcodeHwAccel"
+    static let airplayTo4KDefaultsKey = "outputAirplayTo4K"
 
     /// Whether to use Apple VideoToolbox hardware encoding. Defaults to true
     /// (preserved unless the user has explicitly disabled it in Settings).
@@ -25,6 +26,17 @@ enum ConfigLoader {
 
     static func saveHwAccel(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: hwAccelDefaultsKey)
+    }
+
+    /// User AirPlay/HDMIs the device to a 4K display. Inverts the downscale
+    /// recommendation: keep originals instead of dropping to the device's
+    /// native panel resolution. Off by default.
+    static func airplayTo4K() -> Bool {
+        UserDefaults.standard.bool(forKey: airplayTo4KDefaultsKey)
+    }
+
+    static func saveAirplayTo4K(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: airplayTo4KDefaultsKey)
     }
 
     /// Best-effort TMDb API key discovery. Returns nil if nothing is found.

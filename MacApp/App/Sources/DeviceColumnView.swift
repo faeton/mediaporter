@@ -187,7 +187,7 @@ struct DeviceColumnView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .tracking(0.3)
                 .foregroundStyle(accent.solid)
-            Text("\(recommendedLabel(info.suggestedResolution)) is the sweet spot for this \(info.deviceClass.isEmpty ? "device" : info.deviceClass)'s display. Anything bigger wastes space with no visible gain.")
+            Text(recommendationCopy(info: info))
                 .font(.system(size: 12))
                 .foregroundStyle(theme.text)
                 .lineSpacing(1)
@@ -199,6 +199,30 @@ struct DeviceColumnView: View {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(accent.ring, lineWidth: 1)
         )
+    }
+
+    /// Three modes, in order of priority:
+    /// - AirPlay/4K: user said the device panel size is irrelevant. Keep originals.
+    /// - Tight storage: incoming bytes > 50% of device free. Push downscale harder.
+    /// - Plenty of room: standard sweet-spot copy + nudge toward the Settings toggle.
+    private func recommendationCopy(info: DeviceInfo) -> String {
+        let deviceLabel = info.deviceClass.isEmpty ? "device" : info.deviceClass
+        let recLabel = recommendedLabel(info.suggestedResolution)
+
+        if pipeline.airplayTo4K {
+            return "Keeping originals — you AirPlay/cast to a 4K display, so the \(deviceLabel)'s panel size doesn't constrain quality. Heavy files just need the disk space."
+        }
+
+        let incomingBytes = jobs
+            .filter { ![.synced, .failed].contains($0.status) }
+            .reduce(0) { $0 + Int64($1.fileSizeMB) * 1024 * 1024 }
+        if let free = pipeline.deviceFreeBytes,
+           incomingBytes > 0,
+           incomingBytes > free / 2 {
+            return "Library is tight against free space (\(ByteFormat.short(free)) left). Downscaling to \(recLabel) for this \(deviceLabel)'s screen frees a lot of room with no visible loss."
+        }
+
+        return "\(recLabel) is the sweet spot for this \(deviceLabel)'s display. AirPlaying to a 4K TV instead? Flip the toggle in Settings → Appearance to keep originals."
     }
 
     private func recommendedLabel(_ r: ResolutionLimit) -> String {
