@@ -4,19 +4,20 @@ Transfer video files to iPhone and iPad over USB — no iTunes, no Finder, no cl
 
 An open-source alternative to iTunes/Finder video sync. Push any video from your Mac to your iOS device with automatic transcoding, metadata lookup, and native TV app integration.
 
+## Two implementations
+
+- **`MacApp/`** — Swift / SwiftUI desktop app. **This is the shipping target.** Drag-and-drop, smart transcoding, OpenSubtitles fetch, TV-series detection, device cleanup. Distributed signed and notarized from [porter.md](https://porter.md).
+- **`python-reference/`** — the original Python CLI that proved the ATC protocol. Frozen reference for protocol details. Functional but no longer the active focus.
+
+If you want to use the app, get it from porter.md. If you want to read the code to understand how iOS media sync actually works, both implementations are here and the wire-level docs live in `research/docs/`.
+
 ## What it does
 
-```bash
-mediaporter movie.mkv
-```
-
-That's it. mediaporter handles the entire pipeline:
-
-1. **Analyze** — probes video streams, checks iPad codec compatibility
+1. **Analyze** — probes video streams, checks iOS codec compatibility
 2. **Metadata** — looks up title, year, and poster art from TMDb
-3. **Transcode** — converts to Apple-compatible format if needed (HEVC/H.264 via ffmpeg)
-4. **Tag** — writes MP4 metadata atoms (title, artwork, HD flag, stik type)
-5. **Sync** — transfers to device over USB using native ATC protocol
+3. **Transcode** — converts to Apple-compatible format if needed (HEVC/H.264 via ffmpeg, with VideoToolbox hardware acceleration)
+4. **Tag** — writes MP4 metadata atoms (title, artwork, HD flag, stik type, TV-episode fields)
+5. **Sync** — transfers to device over USB using the native ATC protocol
 
 Videos appear in the TV app immediately — movies in the Movies tab, TV episodes grouped by show and season.
 
@@ -24,87 +25,15 @@ Videos appear in the TV app immediately — movies in the Movies tab, TV episode
 
 - **Any format in, TV app out** — MKV, AVI, MP4, HEVC, H.264, VP9, multi-audio, subtitles
 - **Smart transcoding** — only re-encodes incompatible streams; copies the rest as-is
-- **Hardware acceleration** — Apple VideoToolbox for fast HEVC encoding on Mac
-- **Pipelined transcode + upload** — each file streams to the device as soon as its transcode finishes, overlapping with ongoing transcodes of other files. No waiting for the whole batch
-- **Surgical audio re-encoding** — AAC and EAC3 tracks copy through bit-perfect; only AC3 tracks are transcoded to AAC (the iPad TV app silently drops AC3 from the audio-language switcher). Mixed `aac + eac3` files pass through untouched
-- **Parallel transcoding** — process multiple files simultaneously with `-j N`, saturating all cores
-- **Disk space preflight** — checks Mac temp and device free space before any ffmpeg runs. Fail fast, not mid-transcode
-- **Run summary** — wall-clock totals, peak and average transfer speed, Mac + device free-space deltas at the end of every run
+- **Hardware acceleration** — Apple VideoToolbox for fast HEVC encoding
+- **Pipelined transcode + upload** — each file streams to the device as soon as its transcode finishes, overlapping with ongoing transcodes of other files
+- **Surgical audio re-encoding** — AAC and EAC3 tracks copy through bit-perfect; only AC3 tracks are transcoded to AAC (the iPad TV app silently drops AC3 from its audio-language switcher)
+- **Parallel transcoding** — multiple files at once, saturating all cores
+- **Disk space preflight** — checks Mac temp and device free space before any ffmpeg runs
 - **Movies and TV shows** — automatic detection, TMDb metadata, season/episode grouping
 - **Poster artwork** — downloaded from TMDb and displayed in the TV app; auto-generated fallback posters when no match is found
-- **Interactive audio selection** — choose which dub/translation per language when multiple exist
-- **Interactive subtitle selection** — checkbox picker for which subtitle tracks to embed
-- **Interactive metadata correction** — manually enter title/year when filenames are unrecognizable
-- **Interactive drag-and-drop mode** — just run `mediaporter` with no args, drop a file on the terminal, press enter
-- **Multiple audio & subtitle tracks** — iPad audio language switcher and CC subtitle support
-- **Rich device info** — `mediaporter devices` shows model name (e.g., "iPad Pro 12.9\" (3rd gen)"), iOS version, native display resolution, and recommended transcode target
 - **Direct USB transfer** — no Wi-Fi, no cloud, no Apple ID required
 - **No iTunes or Finder needed** — uses the native ATC sync protocol directly
-- **CLI-first** — scriptable, no GUI needed
-
-## Requirements
-
-- macOS (uses Apple private frameworks via ctypes)
-- Python 3.11+
-- ffmpeg (`brew install ffmpeg`)
-- iOS device connected via USB
-
-## Quick start
-
-```bash
-git clone https://github.com/user/mediaporter.git
-cd mediaporter
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-Then:
-
-```bash
-# Transfer a movie
-mediaporter movie.mkv
-
-# Transfer multiple files with parallel transcoding
-mediaporter movie1.mkv movie2.mkv -j 2
-
-# Analyze without transferring
-mediaporter probe movie.mkv
-
-# Check connected devices
-mediaporter devices
-
-# Save locally without syncing
-mediaporter movie.mkv -o output.m4v
-
-# Skip interactive prompts
-mediaporter movie.mkv -y
-
-# Dry run (show plan, don't execute)
-mediaporter movie.mkv --dry-run
-```
-
-## Usage
-
-```
-mediaporter [OPTIONS] [FILES]...
-
-Options:
-  -y, --yes          Skip confirmation prompts
-  -q, --quality      Encoding quality: fast, balanced (default), quality
-  -j, --jobs N       Parallel transcode workers
-  --hw / --no-hw     VideoToolbox hardware encoding (default: on)
-  --no-metadata      Skip TMDb metadata lookup
-  --tmdb-key KEY     TMDb API key (or set TMDB_API_KEY env var)
-  --dry-run          Show plan without executing
-  -o, --output PATH  Save M4V locally instead of syncing to device
-  -v, --verbose      Verbose output
-  --version          Show version
-
-Commands:
-  probe    Analyze a video file's streams and iPad compatibility
-  devices  List connected iOS devices
-```
 
 ## How it works
 
@@ -121,11 +50,7 @@ This eliminates the main failure mode of traditional sync tools where metadata g
 
 ### Pipelined transcode + upload
 
-When multiple files are queued, mediaporter runs transcoding and uploading in parallel:
-
-- Parallel ffmpeg workers handle transcoding (`-j N` or auto).
-- A dedicated uploader thread streams each file to the device over AFC the moment its transcode finishes — no waiting for the whole batch.
-- A single short ATC session at the very end registers every file at once.
+When multiple files are queued, transcoding and uploading run in parallel. Parallel ffmpeg workers handle the encode; a dedicated uploader streams each finished file to the device over AFC immediately. A single short ATC session registers everything at the end.
 
 On a USB-C iPad Pro, file transfers hit ~150–180 MB/s (1.2–1.5 Gbps), so the upload phase typically finishes well inside the transcode phase for parallel runs.
 
@@ -139,22 +64,6 @@ On a USB-C iPad Pro, file transfers hit ~150–180 MB/s (1.2–1.5 Gbps), so the
 
 The result is a native media library entry — videos appear in the TV app with correct `media_type=2048`, artwork, and full playback functionality. No jailbreak, no third-party apps on the device.
 
-## Roadmap
-
-- **macOS native app** — shipped under `MacApp/` (SwiftUI). Drag-and-drop, inline per-row transcode settings, OpenSubtitles auto-fetch, device cleanup menu
-- **Batch TV series sync** — drag a season folder, auto-detect episodes
-- **AssetManifest-based orphan detection** — the current MacApp cleanup purges everything under `/iTunes_Control/Music/F*/`; cross-referencing with the device's registered asset list would let it keep legitimately-synced content
-
-## Interactive workflow
-
-When you run `mediaporter` on a file with multiple audio or subtitle tracks, it offers interactive selection:
-
-**Audio selection** — when multiple dubs exist for the same language (e.g., three Russian translations), you pick one per language with arrow keys. Single-track languages are auto-included.
-
-**Subtitle selection** — checkbox picker showing all embeddable subtitle tracks (internal + external). Toggle with space, confirm with enter.
-
-**Metadata correction** — if the filename can't be matched on TMDb (e.g., `xz-puzzl3.mkv`), you're prompted to enter the correct title and year. If still no poster is found, a fallback poster is auto-generated.
-
 ## Research and documentation
 
 This project includes extensive protocol research and reverse engineering documentation:
@@ -167,6 +76,19 @@ This project includes extensive protocol research and reverse engineering docume
 | [Trace Analysis](research/docs/TRACE_ANALYSIS.md) | Protocol trace analysis from LLDB sessions |
 | [Media Library DB](research/docs/MEDIA_LIBRARY_DB.md) | MediaLibrary.sqlitedb schema analysis |
 | [Architecture](research/docs/ARCHITECTURE.md) | Module overview and technical decisions |
+| [History](research/docs/HISTORY.md) | Chronological findings log |
+
+## Repository layout
+
+```
+MacApp/                  Swift / SwiftUI app — primary shipping target
+python-reference/        Original Python CLI — frozen reference
+research/                Protocol docs (shared)
+scripts/cig/             CIG signing engine: source + compiled arm64 dylib (shared)
+traces/                  Captured protocol traces (gitignored, local)
+site/                    porter.md (Astro)
+brand/                   Brand assets
+```
 
 ## Interoperability notice
 

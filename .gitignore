@@ -14,10 +14,11 @@ test_fixtures/
 .env
 .DS_Store
 traces/
-scripts/test_*.py
+python-reference/scripts/test_*.py
 *.sqlitedb
 .venv/
 .claude/
+raw/
 
 # site/ (Astro + Cloudflare Pages)
 site/node_modules/

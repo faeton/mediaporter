@@ -1,8 +1,8 @@
 # mediaporter
 
-CLI + macOS app for transferring video to iOS devices' TV app. Smart transcoding, ATC protocol sync.
+macOS app for transferring video to iOS devices' TV app. Smart transcoding, ATC protocol sync.
 
-**Status**: end-to-end sync working. Swift MacApp (`MacApp/MediaPorter/`) is now the primary target — new features land there first. Python (`src/mediaporter/`) is the historical reference and lags behind; CLI parity will be revisited later.
+**Status**: end-to-end sync working. The shipping target is the Swift MacApp (`MacApp/MediaPorter/`); new features land there. The Python reference under `python-reference/` is frozen — kept for protocol-level reference, not maintained in lockstep. Distribution: signed + notarized via Developer ID, hosted on porter.md.
 
 ## Critical rules
 
@@ -40,21 +40,35 @@ Wire detail and message dictionaries: `research/docs/ATC_SYNC_FLOW.md`, `researc
 
 ## Design priorities
 
-- **Avoid sudo/root.** Tunnel currently needs `sudo pymobiledevice3 remote start-tunnel` once. Prefer any path that removes this (e.g. `lockdown start-tunnel` on iOS 17.4+, `remoted` reuse).
+- **No admin prompts ever.** The Swift app `dlopen`s Apple's own `MobileDevice.framework` (and `AirTrafficHost.framework`), which talks to the system `remoted`/`usbmuxd` daemons — no sudo, no helper install, no `SMAppService` auth dialog. The `sudo pymobiledevice3 remote start-tunnel` step only applies to the Python reference, which reimplements the tunnel in userspace and therefore needs root to create `utun`. The shipping app does not have this requirement.
+- **Notarization-friendly framework loading.** Private frameworks are `dlopen`-ed at runtime, not linked. See `MacApp/MediaPorter/Sources/Sync/Frameworks.swift`. Linking would fail App Store review; `dlopen` passes notarization (notarization is a malware scan, not API review).
 
 ## Dev setup
 
+Swift MacApp (primary):
+
 ```bash
-source .venv/bin/activate
-pip install -e ".[dev]"        # Python 3.11+, brew install ffmpeg
-mediaporter devices             # verify tunnel + connection
+cd MacApp
+swift build                 # or open the SwiftPM workspace in Xcode
+.build/debug/MediaPorter    # run the app
 ```
 
-Swift MacApp: `cd MacApp && swift build` (or open the SwiftPM workspace).
+Requires `ffmpeg` for now (`brew install ffmpeg`) — release builds will bundle it inside the `.app`.
+
+Python reference (frozen):
+
+```bash
+cd python-reference
+pip install -e ".[dev]"
+mediaporter devices
+```
+
+Python path needs `sudo pymobiledevice3 remote start-tunnel` once per boot (see above).
 
 ## Next steps
 
-1. **Interleave registration with uploads** — current pipeline does `upload×N → register×1`. medialibraryd commits the whole batch on terminal `SyncFinished`, ~30s/file, all visible as a long "finalizing" dead phase in the UI. Plan: open ATC session before uploads, receive `AssetManifest`, send each file's `FileBegin`/`FileComplete` the moment its AFC upload finishes. medialibraryd processes per-file instead of in a burst. Touch points: split `MacApp/MediaPorter/Sources/Sync/SyncEngine.swift::registerUploadedFiles` into open/per-file/close; rework `PipelineController.runPipelined` to start the session before the upload loop. Port to Python after Swift validation. Gating check: send one `FileComplete`, sleep 60 s, query `MediaLibrary.sqlitedb` — if the row isn't there, medialibraryd still buffers until terminal `SyncFinished` and the gain disappears.
+1. **Signing + notarization pipeline** — set up `MacApp/Signing/Info.plist`, `MediaPorter.entitlements` (hardened runtime, `disable-library-validation` for `libcig.dylib`), `MacApp/scripts/build-app.sh` to assemble the `.app` bundle around SwiftPM output, `release.sh` to sign nested binaries + outer app, submit to `notarytool` (keychain profile: `porter-notarization`), staple, build DMG. First target: arm64-only. x86_64 build added later (needs `libcig.dylib` recompiled from `yinyajiang/go-tunes` Go source for `darwin/amd64`, separate notarization).
+2. **Interleave registration with uploads** — current pipeline does `upload×N → register×1`. medialibraryd commits the whole batch on terminal `SyncFinished`, ~30s/file, all visible as a long "finalizing" dead phase in the UI. Plan: open ATC session before uploads, receive `AssetManifest`, send each file's `FileBegin`/`FileComplete` the moment its AFC upload finishes. medialibraryd processes per-file instead of in a burst. Touch points: split `MacApp/MediaPorter/Sources/Sync/SyncEngine.swift::registerUploadedFiles` into open/per-file/close; rework `PipelineController.runPipelined` to start the session before the upload loop. Gating check: send one `FileComplete`, sleep 60 s, query `MediaLibrary.sqlitedb` — if the row isn't there, medialibraryd still buffers until terminal `SyncFinished` and the gain disappears.
 2. **Orphan detection via AssetManifest** — current cleanup purges everything under `/iTunes_Control/Music/F*/`. Cross-reference `AssetManifest` paths to keep registered content and remove only true orphans.
 3. **Recommendation rework** — banner today (`MacApp/App/Sources/DeviceColumnView.swift::recommendationCard`) makes a flat "1080p is the sweet spot for this device's display" claim that misleads users who AirPlay/HDMI to a 4K TV and ignores the storage axis. Plan:
    - Keep the on-device-display framing as the default copy.
@@ -67,10 +81,13 @@ Swift MacApp: `cd MacApp && swift build` (or open the SwiftPM workspace).
 
 ## Where things live
 
-- `src/mediaporter/` — Python reference (`sync/atc.py`, `sync/__init__.py`, `pipeline.py`, `transcode.py`, `metadata.py`, `probe.py`)
-- `MacApp/MediaPorter/` — Swift port (Sources mirror Python module names)
-- `scripts/atc_nodeps_sync.py` — zero-dep proof of working sync (ctypes + Apple frameworks)
-- `scripts/cig/libcig.dylib` — compiled CIG engine from go-tunes (arm64)
-- `traces/grappa.bin` — replayable 84-byte Grappa blob
+- `MacApp/MediaPorter/` — Swift core (shipping target). Modules: `Sync/` (ATC + AFC + framework loading), `Pipeline/`, `Transcode/`, `Analysis/`, `Metadata/`, `Tagger/`
+- `MacApp/App/Sources/` — SwiftUI app target
+- `MacApp/MediaPorter/Resources/libcig.dylib` — arm64 CIG engine bundled into the Swift app
+- `MacApp/MediaPorter/Resources/grappa.bin` — replayable 84-byte Grappa blob bundled into the Swift app
+- `python-reference/` — frozen Python implementation (`src/mediaporter/`, `tests/`, `scripts/`, `pyproject.toml`). Kept for protocol reference, not maintained in lockstep
+- `scripts/cig/` — CIG source (`cig.cpp`, `cig.h`, `cig_wrapper.cpp`) + compiled `libcig.dylib` (arm64). Shared by both implementations
 - `research/docs/` — protocol analysis, trace findings, dated history (`HISTORY.md`)
-- `research/docs/HISTORY.md` — chronological findings log (formerly inline here)
+- `research/docs/HISTORY.md` — chronological findings log
+- `site/` — porter.md (Astro)
+- `brand/` — brand assets
