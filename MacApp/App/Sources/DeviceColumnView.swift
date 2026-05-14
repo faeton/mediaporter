@@ -261,6 +261,11 @@ struct DeviceColumnView: View {
 
 /// Compact menu shown only when ≥2 devices are attached. Lets the user override
 /// the auto-pick (iPad preferred). Sticky until the chosen device disconnects.
+///
+/// Multi-device behaviour today: Mediaporter syncs to one target at a time.
+/// The other attached devices sit idle until the user re-picks. The header
+/// row in the menu makes that explicit so a user with e.g. two iPads + an
+/// iPhone doesn't wonder why "Send" only fans out to one.
 private struct DevicePickerMenu: View {
     let theme: Theme
     let accent: AccentKey
@@ -268,6 +273,8 @@ private struct DevicePickerMenu: View {
 
     var body: some View {
         Menu {
+            Text("Sync target — other devices stay idle")
+            Divider()
             Button {
                 pipeline.selectDevice(udid: nil)
             } label: {
