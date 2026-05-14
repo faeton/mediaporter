@@ -1,6 +1,7 @@
 // Right column — iPad silhouette + storage bar + connection pill.
 
 import SwiftUI
+import AppKit
 import MediaPorterCore
 
 struct DeviceColumnView: View {
@@ -36,9 +37,10 @@ struct DeviceColumnView: View {
                 Spacer()
             }
             .padding(.top, 14)
-            .padding(.bottom, 6)
+            .padding(.bottom, 2)
 
             if pipeline.isDeviceConnected, let info = pipeline.deviceInfo {
+                HStack { Spacer(); ConnectionPillView(theme: theme, productType: info.productType, udid: info.udid); Spacer() }
                 deviceBlock(info: info)
                 if canSendNow { sendButton }
             } else {
@@ -139,7 +141,7 @@ struct DeviceColumnView: View {
                 deviceTotal: pipeline.deviceTotalBytes
             )
 
-            connectionCard
+            statusCard
 
             recommendationCard(info: info)
 
@@ -171,27 +173,19 @@ struct DeviceColumnView: View {
         .padding(.vertical, 20)
     }
 
-    private var connectionCard: some View {
-        HStack(spacing: 8) {
-            ZStack {
-                Circle()
-                    .fill(Color(red: 0.19, green: 0.82, blue: 0.35).opacity(0.18))
-                Image(systemName: "cable.connector")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color(red: 0.19, green: 0.82, blue: 0.35))
-            }
-            .frame(width: 26, height: 26)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("USB-C · Apple TV app")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(theme.text)
-                Text(pipelineStatusText)
-                    .font(.system(size: 10))
-                    .foregroundStyle(theme.textDim)
-            }
-            Spacer()
+    private var statusCard: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("STATUS")
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.3)
+                .foregroundStyle(theme.textDim)
+            Text(pipelineStatusText)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(theme.text)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
+        .padding(EdgeInsets(top: 11, leading: 12, bottom: 11, trailing: 12))
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.panel, in: RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
@@ -586,24 +580,9 @@ struct DeviceSilhouette: View {
                 .blur(radius: 3)
                 .offset(y: -4)
 
-            if connected {
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(Color(red: 0.19, green: 0.82, blue: 0.35))
-                        .frame(width: 5, height: 5)
-                    Text("CONNECTED")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.19, green: 0.82, blue: 0.35))
-                }
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .background(
-                    Capsule().fill(Color(red: 0.19, green: 0.82, blue: 0.35).opacity(0.15))
-                )
-                .overlay(
-                    Capsule().strokeBorder(Color(red: 0.19, green: 0.82, blue: 0.35).opacity(0.3), lineWidth: 0.5)
-                )
-                .offset(y: -4)
-            }
+            // CONNECTED pill removed — the lit silhouette already signals
+            // connection, and the connection card below restates speed +
+            // destination. Frees ~28pt of vertical space.
         }
     }
 
@@ -657,5 +636,132 @@ struct DeviceSilhouette: View {
         case .none:
             EmptyView()
         }
+    }
+}
+
+// MARK: - Connection pill with USB-speed hint
+//
+// Sits directly under the device silhouette where the old "CONNECTED"
+// pill was, but extended to "CONNECTED over USB-C 2.0 (slow)". The
+// "(slow)" suffix shows only when the cable is the bottleneck — the
+// dashed underline cues the hover tooltip explaining why.
+
+private struct ConnectionPillView: View {
+    let theme: Theme
+    let productType: String
+    let udid: String
+    @State private var negotiatedMbps: Int?
+
+    private let green = Color(red: 0.19, green: 0.82, blue: 0.35)
+
+    var body: some View {
+        let capability = usbMaxCapabilityMbps(productType: productType)
+        let negotiated = negotiatedMbps ?? 0
+        let bottlenecked = negotiated > 0 && negotiated < capability && capability > 480
+
+        HStack(spacing: 4) {
+            Circle()
+                .fill(green)
+                .frame(width: 5, height: 5)
+            Text("CONNECTED")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(green)
+                .fixedSize()
+            if let suffix = usbSuffix {
+                Text("over")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(green.opacity(0.7))
+                    .fixedSize()
+                Text(suffix)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(green)
+                    .fixedSize()
+                if bottlenecked {
+                    SlowHint(theme: theme, tooltip: hintTooltip(capability: capability))
+                        .fixedSize()
+                }
+            }
+        }
+        .lineLimit(1)
+        .padding(.horizontal, 10).padding(.vertical, 4)
+        .background(Capsule().fill(green.opacity(0.15)))
+        .overlay(Capsule().strokeBorder(green.opacity(0.3), lineWidth: 0.5))
+        .fixedSize()
+        .task(id: udid) {
+            negotiatedMbps = await Task.detached {
+                queryUSBNegotiatedSpeedMbps(serial: udid)
+            }.value
+        }
+    }
+
+    private var usbSuffix: String? {
+        guard let mbps = negotiatedMbps, mbps > 0 else { return nil }
+        switch mbps {
+        case 480: return "USB-C 2.0"
+        case 5000: return "USB-C 3.0"
+        case 10000: return "USB-C 3.1"
+        case 20000: return "USB-C 3.2"
+        case 40000: return "Thunderbolt"
+        default: return nil
+        }
+    }
+
+    private func hintTooltip(capability: Int) -> String {
+        let cap: String = {
+            switch capability {
+            case 5000:  return "USB-C 3.0 (5 Gbps)"
+            case 10000: return "USB-C 3.1 (10 Gbps)"
+            case 20000: return "USB-C 3.2 (20 Gbps)"
+            case 40000: return "Thunderbolt / USB 4"
+            default:    return "a faster connection"
+            }
+        }()
+        return """
+        Your cable is limiting transfers to USB 2 speed (~60 MB/s).
+
+        This \(deviceClassWord) supports \(cap) — a better USB-C cable would transfer up to 20× faster.
+        """
+    }
+
+    private var deviceClassWord: String {
+        productType.lowercased().hasPrefix("iphone") ? "iPhone" : "iPad"
+    }
+}
+
+/// Amber turtle marks a bottlenecked connection. Click toggles a popover
+/// with the explanation (macOS's `.help()` tooltip has a multi-second
+/// delay that feels broken); hover still works as a fallback.
+private struct SlowHint: View {
+    let theme: Theme
+    let tooltip: String
+    @State private var showPopover = false
+
+    private let amber = Color(red: 0.96, green: 0.62, blue: 0.04)
+
+    var body: some View {
+        Image(systemName: "tortoise.fill")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(amber)
+            .padding(.horizontal, 2)
+            .contentShape(Rectangle())
+            .help(tooltip)
+            .onTapGesture { showPopover.toggle() }
+            .onHover { hovering in
+                if hovering { NSCursor.pointingHand.set() }
+                else { NSCursor.arrow.set() }
+            }
+            .popover(isPresented: $showPopover, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(tooltip)
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(nil)
+                        .lineSpacing(3)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(width: 260, alignment: .leading)
+                .padding(EdgeInsets(top: 12, leading: 14, bottom: 12, trailing: 14))
+            }
     }
 }
