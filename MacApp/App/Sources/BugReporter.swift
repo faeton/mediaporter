@@ -1,16 +1,24 @@
 // Help-menu bug reporting and diagnostics.
 //
-// Three actions wired from the Help menu in App.swift:
-//   1. Report a Bug…           — opens Mail with pre-filled diagnostics + log attachment
-//   2. Reveal Debug Log in Finder — selects /tmp/mediaporter-debug.log
-//   3. Copy Diagnostic Info     — version/OS/device/ffmpeg paths to pasteboard
+// Five actions wired from the Help menu in App.swift:
+//   1. Send Diagnostic…         — opens a sheet that posts to the self-hosted
+//                                 Bugsink instance (with optional screenshot +
+//                                 log tail). Falls back to mail.app if no DSN.
+//   2. Report a Bug via Mail…   — opens Mail with pre-filled diagnostics +
+//                                 log attachment. Kept for users who don't
+//                                 want their reports going to the dev's
+//                                 server, or as a fallback when offline.
+//   3. Reveal Debug Log in Finder — selects /tmp/mediaporter-debug.log
+//   4. Stream Log in Terminal… — opens Terminal running `log stream` filtered to
+//                                 the md.porter.MediaPorter OSLog subsystem
+//   5. Copy Diagnostic Info     — version/OS/device/ffmpeg paths to pasteboard
 //
-// Everything goes through the user (no auto-upload, no telemetry endpoint).
-// If we later want crash capture, Sentry-cocoa goes on top of this without
-// replacing it.
+// Nothing auto-uploads. Send Diagnostic only fires when the user clicks Send
+// inside the sheet.
 
 import AppKit
 import Foundation
+import SwiftUI
 import MediaPorterCore
 
 private let debugLogPath = "/tmp/mediaporter-debug.log"
@@ -54,6 +62,53 @@ func diagnosticInfoString(pipeline: PipelineController) -> String {
     ffmpeg:  \(ffmpeg)
     ffprobe: \(ffprobe)
     """
+}
+
+/// Help → Send Diagnostic… — primary entry point. If Bugsink is configured,
+/// present the SwiftUI sheet so the user can attach a screenshot + log tail.
+/// If not configured (DSN missing), fall through to the mail.app reporter so
+/// the menu item never silently no-ops.
+@MainActor
+func sendDiagnostic(pipeline: PipelineController) {
+    guard BugsinkClient.isConfigured else {
+        reportBug(pipeline: pipeline)
+        return
+    }
+    presentDiagnosticSheet(pipeline: pipeline)
+}
+
+/// Strong references to in-flight sheet windows. NSApp's `beginSheet`
+/// retains the window for its lifetime, but we also keep a reference until
+/// the user closes the sheet so the SwiftUI state stays alive.
+@MainActor
+private var liveDiagnosticWindows: [NSWindow] = []
+
+@MainActor
+private func presentDiagnosticSheet(pipeline: PipelineController) {
+    let host = NSHostingController(rootView: AnyView(EmptyView())) // replaced below
+    let window = NSWindow(contentViewController: host)
+    window.styleMask = [.titled, .closable]
+    window.title = "Send Diagnostic"
+    window.isMovableByWindowBackground = false
+
+    let sheet = SendDiagnosticSheet(pipeline: pipeline) {
+        liveDiagnosticWindows.removeAll { $0 === window }
+        if let parent = window.sheetParent {
+            parent.endSheet(window)
+        } else {
+            window.close()
+        }
+    }
+    host.rootView = AnyView(sheet)
+    host.view.setFrameSize(host.view.fittingSize)
+    window.setContentSize(host.view.fittingSize)
+
+    liveDiagnosticWindows.append(window)
+    if let main = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
+        main.beginSheet(window) { _ in }
+    } else {
+        window.makeKeyAndOrderFront(nil)
+    }
 }
 
 /// Open Mail with a pre-filled bug report. Attaches the debug log file if it
@@ -121,6 +176,39 @@ func revealDebugLog() {
         will appear here after the first sync or error.
         """
         alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+}
+
+/// Open Terminal with a live `log stream` filtered to our OSLog subsystem.
+/// Faster + lower-friction than the alternatives (`log collect` snapshot →
+/// Console.app needs the user to type the filter manually; Console.app has
+/// no documented URL scheme for pre-filtering). `--style compact` is the
+/// readable variant; users who want JSON can edit the command in Terminal.
+@MainActor
+func streamLogInTerminal() {
+    let predicate = "subsystem == \"\(DebugLog.subsystem)\""
+    // Escape backslashes + double quotes so the command survives being
+    // embedded inside the AppleScript string literal below.
+    let escaped = "log stream --predicate '\(predicate)' --info --style compact"
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+    let script = """
+    tell application "Terminal"
+        activate
+        do script "\(escaped)"
+    end tell
+    """
+    var error: NSDictionary?
+    if let s = NSAppleScript(source: script) {
+        s.executeAndReturnError(&error)
+    }
+    if let error {
+        let alert = NSAlert()
+        alert.messageText = "Couldn't open Terminal"
+        alert.informativeText = "AppleScript error: \(error[NSAppleScript.errorMessage] ?? "unknown")"
+        alert.alertStyle = .warning
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }

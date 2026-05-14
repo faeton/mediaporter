@@ -24,6 +24,11 @@ struct SettingsView: View {
     /// resurfaces and there is no other place to flip it back.
     @AppStorage("alwaysApplyWithinShow") private var alwaysApplyWithinShow: Bool = false
 
+    // Privacy / diagnostics tab
+    @State private var bugsinkDSN: String = ""
+    @State private var heartbeatOptIn: Bool = false
+    @State private var privacyFlash: Bool = false
+
     var body: some View {
         TabView {
             appearanceTab
@@ -34,6 +39,9 @@ struct SettingsView: View {
 
             subtitlesTab
                 .tabItem { Label("Subtitles", systemImage: "captions.bubble") }
+
+            privacyTab
+                .tabItem { Label("Privacy", systemImage: "shield") }
         }
         .frame(width: 500, height: 420)
         .onAppear {
@@ -44,7 +52,79 @@ struct SettingsView: View {
             osPassword = ConfigLoader.openSubtitlesPassword() ?? ""
             osLanguages = ConfigLoader.openSubtitlesLanguages()
             osKeySource = ConfigLoader.openSubtitlesSource()
+            bugsinkDSN = ConfigLoader.bugsinkDSN() ?? ""
+            heartbeatOptIn = ConfigLoader.heartbeatOptIn()
         }
+    }
+
+    private var privacyTab: some View {
+        Form {
+            Section {
+                Toggle("Send anonymous weekly heartbeat", isOn: $heartbeatOptIn)
+                    .onChange(of: heartbeatOptIn) { _, new in
+                        ConfigLoader.saveHeartbeatOptIn(new)
+                    }
+                Text("Once a week, Mediaporter sends app version, macOS version, and connected device class. No filenames, no UDIDs, no usage events. Lets the developer see active-install counts without per-action telemetry.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Heartbeat")
+            }
+
+            Section {
+                Text("Help → Send Diagnostic posts to the diagnostic endpoint below. Sentry DSN format: `https://<key>@<host>/<project_id>`. Leave blank to disable in-app reporting (the menu item falls back to Mail).")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextField("DSN", text: $bugsinkDSN, prompt: Text("https://…@bugs.porter.md/1"))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                HStack {
+                    Button("Save") {
+                        ConfigLoader.saveBugsinkDSN(bugsinkDSN)
+                        let info = Bundle.main.infoDictionary ?? [:]
+                        let v = info["CFBundleShortVersionString"] as? String ?? "dev"
+                        let b = info["CFBundleVersion"] as? String ?? "0"
+                        BugsinkClient.configure(
+                            dsn: ConfigLoader.bugsinkDSN(),
+                            release: "mediaporter@\(v)+\(b)",
+                            environment: "production"
+                        )
+                        privacyFlash = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { privacyFlash = false }
+                    }
+                    if privacyFlash {
+                        Text("Saved.").foregroundStyle(.green).font(.system(size: 11))
+                    }
+                    Spacer()
+                    Button("Send test event") {
+                        Task {
+                            do {
+                                let id = try await BugsinkClient.send(
+                                    message: "Test event from Settings",
+                                    level: .info,
+                                    tags: ["origin": "settings.test"]
+                                )
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(id, forType: .string)
+                                privacyFlash = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { privacyFlash = false }
+                            } catch {
+                                let a = NSAlert()
+                                a.messageText = "Test send failed"
+                                a.informativeText = error.localizedDescription
+                                a.runModal()
+                            }
+                        }
+                    }
+                    .disabled(bugsinkDSN.isEmpty)
+                }
+            } header: {
+                Text("Diagnostic endpoint")
+            }
+        }
+        .formStyle(.grouped)
     }
 
     // MARK: - Appearance tab

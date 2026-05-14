@@ -38,6 +38,7 @@ struct MediaPorterApp: App {
                     pipeline.openSubtitlesLanguages = ConfigLoader.openSubtitlesLanguages()
                     pipeline.hwAccel = ConfigLoader.hwAccelEnabled()
                     pipeline.airplayTo4K = ConfigLoader.airplayTo4K()
+                    configureDiagnostics()
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -52,11 +53,18 @@ struct MediaPorterApp: App {
                     }
                 }
                 Divider()
-                Button("Report a Bug…") {
+                Button("Send Diagnostic…") {
+                    sendDiagnostic(pipeline: pipeline)
+                }
+                .keyboardShortcut("D", modifiers: [.command, .shift, .option])
+                Button("Report a Bug via Mail…") {
                     reportBug(pipeline: pipeline)
                 }
                 Button("Reveal Debug Log in Finder") {
                     revealDebugLog()
+                }
+                Button("Stream Log in Terminal…") {
+                    streamLogInTerminal()
                 }
                 Button("Copy Diagnostic Info") {
                     copyDiagnosticInfo(pipeline: pipeline)
@@ -151,6 +159,70 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Quit Anyway")
         let response = alert.runModal()
         return response == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
+    }
+}
+
+/// Initialize the Bugsink diagnostic client with the current build's release
+/// tag + the DSN from ConfigLoader. Called once at app launch. If no DSN is
+/// configured, the client logs a notice and Send Diagnostic falls back to
+/// "open mail.app" so the feature isn't silently dead.
+@MainActor
+private func configureDiagnostics() {
+    let info = Bundle.main.infoDictionary ?? [:]
+    let v = info["CFBundleShortVersionString"] as? String ?? "dev"
+    let b = info["CFBundleVersion"] as? String ?? "0"
+    let release = "mediaporter@\(v)+\(b)"
+    #if DEBUG
+    let env = "dev"
+    #else
+    let env = "production"
+    #endif
+    BugsinkClient.configure(
+        dsn: ConfigLoader.bugsinkDSN(),
+        release: release,
+        environment: env
+    )
+    maybeSendHeartbeat()
+}
+
+/// Send a weekly anonymized heartbeat if the user has opted in. No-op when
+/// last-sent is < 7 days ago, when the user is opted out, or when no DSN is
+/// configured. Payload contains only app/OS/device-class — no UDIDs, no
+/// filenames, no event counts.
+@MainActor
+private func maybeSendHeartbeat() {
+    guard ConfigLoader.heartbeatOptIn(), BugsinkClient.isConfigured else { return }
+    let key = "heartbeatLastSent"
+    let now = Date()
+    let last = UserDefaults.standard.object(forKey: key) as? Date
+    if let last, now.timeIntervalSince(last) < 7 * 24 * 3600 { return }
+
+    let osVer = ProcessInfo.processInfo.operatingSystemVersionString
+    var sysinfo = utsname()
+    uname(&sysinfo)
+    let arch = withUnsafePointer(to: &sysinfo.machine) {
+        $0.withMemoryRebound(to: CChar.self, capacity: Int(_SYS_NAMELEN)) { String(cString: $0) }
+    }
+    let tags: [String: String] = [
+        "type": "heartbeat",
+        "os_version": osVer,
+        "arch": arch,
+        "ffmpeg_source": Prerequisites.ffmpegSource.label,
+        "locale": Locale.current.identifier,
+    ]
+    Task {
+        do {
+            _ = try await BugsinkClient.send(
+                message: "heartbeat",
+                level: .info,
+                tags: tags
+            )
+            UserDefaults.standard.set(now, forKey: key)
+        } catch {
+            // Silent — heartbeat is best-effort; failures don't matter.
+            // The DebugLog.error inside BugsinkClient.send already captured
+            // the reason, so log-stream users can still see it.
+        }
     }
 }
 

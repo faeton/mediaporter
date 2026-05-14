@@ -13,6 +13,11 @@ struct ContentView: View {
     @State private var isDroppingList = false
     @State private var isDroppingDevice = false
 
+    // First-launch welcome — single sheet, dismiss-once. The flag flips on
+    // dismiss so the next launch goes straight to the drop zone.
+    @AppStorage("welcomeShown") private var welcomeShown: Bool = false
+    @State private var showWelcome: Bool = false
+
     private var theme: Theme { Theme(dark: tweaks.effectiveDark(systemColorScheme: systemColorScheme)) }
     private var showEmpty: Bool { pipeline.jobs.isEmpty }
 
@@ -55,7 +60,26 @@ struct ContentView: View {
     /// Continue from analyzed → transcode → sync (for jobs already analyzed).
     /// Uses the pipelined runner so upload of file N overlaps transcode of file N+1.
     private func continueToSync() {
-        guard !pipeline.isRunning else { return }
+        // Log every click — when "Send doesn't do anything" reports come in,
+        // the absence of a "ui.send.click" entry tells us the button never
+        // fired (e.g. the click landed on the disabled `allSkipped` state);
+        // the presence with an "early return" follow-up tells us why.
+        let jobs = pipeline.jobs
+        let counts = (
+            analyzed: jobs.filter { $0.status == .analyzed }.count,
+            ready:    jobs.filter { $0.status == .ready }.count,
+            dup:      jobs.filter { $0.duplicateOnDevice == true && !$0.syncDespiteDuplicate }.count,
+            total:    jobs.count
+        )
+        DebugLog.notice(
+            "ui.send.click",
+            "running=\(pipeline.isRunning) connected=\(pipeline.isDeviceConnected) " +
+            "total=\(counts.total) analyzed=\(counts.analyzed) ready=\(counts.ready) skipDup=\(counts.dup)"
+        )
+        guard !pipeline.isRunning else {
+            DebugLog.notice("ui.send.click", "early return: pipeline already running")
+            return
+        }
         Task { await pipeline.runPipelined() }
     }
 
@@ -211,6 +235,15 @@ struct ContentView: View {
                 affectedCount: pick.affectedJobIDs.count,
                 onClose: { /* binding above re-evaluates against pendingShowPicks */ }
             )
+        }
+        .sheet(isPresented: $showWelcome) {
+            WelcomeSheet {
+                welcomeShown = true
+                showWelcome = false
+            }
+        }
+        .onAppear {
+            if !welcomeShown { showWelcome = true }
         }
     }
 

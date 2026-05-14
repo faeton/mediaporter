@@ -16,6 +16,8 @@ enum ConfigLoader {
     static let osLanguagesDefaultsKey = "openSubtitlesLanguages"
     static let hwAccelDefaultsKey = "transcodeHwAccel"
     static let airplayTo4KDefaultsKey = "outputAirplayTo4K"
+    static let bugsinkDSNDefaultsKey = "bugsinkDSN"
+    static let heartbeatOptInDefaultsKey = "heartbeatOptIn"
 
     /// Whether to use Apple VideoToolbox hardware encoding. Defaults to true
     /// (preserved unless the user has explicitly disabled it in Settings).
@@ -37,6 +39,41 @@ enum ConfigLoader {
 
     static func saveAirplayTo4K(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: airplayTo4KDefaultsKey)
+    }
+
+    // MARK: - Diagnostics (Bugsink)
+
+    /// Compile-time fallback DSN. Sentry DSNs are public-by-design (they
+    /// identify a project's ingest endpoint, not a secret — the same way
+    /// google-analytics IDs are public), so embedding the prod DSN here is
+    /// fine. Points at the self-hosted Bugsink at bugs.porter.md. Users
+    /// who want their reports to go somewhere else can override via
+    /// Settings → Privacy, env var, or config.toml.
+    private static let defaultBugsinkDSN: String? = "https://63593fd2486448fcb2aa22be891abd24@bugs.porter.md/1"
+
+    /// Resolved diagnostic DSN, or nil if neither user-config nor build-baked
+    /// value exists. The Send Diagnostic sheet shows "not configured" when nil.
+    static func bugsinkDSN() -> String? {
+        if let v = nonEmpty(UserDefaults.standard.string(forKey: bugsinkDSNDefaultsKey)) { return v }
+        if let v = nonEmpty(ProcessInfo.processInfo.environment["BUGSINK_DSN"]) { return v }
+        if let v = readFromConfigToml(key: "bugsink_dsn") { return v }
+        if let v = readFromDotenvWalkUp(key: "BUGSINK_DSN") { return v }
+        if let v = readFromHomeDotenv(key: "BUGSINK_DSN") { return v }
+        return defaultBugsinkDSN
+    }
+
+    static func saveBugsinkDSN(_ dsn: String) {
+        save(dsn, to: bugsinkDSNDefaultsKey)
+    }
+
+    /// Whether the user has opted in to a weekly anonymized heartbeat
+    /// (version + OS + device class, no UDIDs / filenames). Default: false.
+    static func heartbeatOptIn() -> Bool {
+        UserDefaults.standard.bool(forKey: heartbeatOptInDefaultsKey)
+    }
+
+    static func saveHeartbeatOptIn(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: heartbeatOptInDefaultsKey)
     }
 
     /// Best-effort TMDb API key discovery. Returns nil if nothing is found.

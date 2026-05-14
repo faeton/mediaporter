@@ -1686,21 +1686,43 @@ public class PipelineController {
     ///   - collect PipelineStats into `lastRunStats`
     public func runPipelined() async {
         cancelFlag.set(false) // Fresh run — clear any stale cancel state.
-        // Filter out files that already exist on the device (#10b). User
-        // can opt back in per-row via `syncDespiteDuplicate`. Skipped jobs
-        // stay in .analyzed and are simply ignored by this run.
-        let analyzed = jobs.filter {
-            $0.status == .analyzed
+        // Accept `.ready` alongside `.analyzed` — the Send button counts both
+        // (a previously-transcoded file sitting at .ready from a cancelled
+        // run is "ready to send"). Without `.ready` here, clicking Send with
+        // any `.ready` row would silently exit with "Nothing to sync".
+        // runTranscodeStep short-circuits jobs that already have outputURL,
+        // so accepting `.ready` doesn't trigger a re-transcode.
+        let eligible = jobs.filter {
+            ($0.status == .analyzed || $0.status == .ready)
                 && !($0.duplicateOnDevice == true && !$0.syncDespiteDuplicate)
         }
-        guard !analyzed.isEmpty else {
-            overallStatus = "Nothing to sync (all files already on device)"
+        DebugLog.notice(
+            "pipeline.runPipelined",
+            "enter — total=\(jobs.count) eligible=\(eligible.count) " +
+            "analyzed=\(jobs.filter { $0.status == .analyzed }.count) " +
+            "ready=\(jobs.filter { $0.status == .ready }.count) " +
+            "duplicate=\(jobs.filter { $0.duplicateOnDevice == true }.count) " +
+            "syncDespiteDup=\(jobs.filter { $0.syncDespiteDuplicate }.count)"
+        )
+        guard !eligible.isEmpty else {
+            // Tell the user *why* — common confusion: "I see Send N enabled,
+            // but click does nothing." With this we get a real status line.
+            let dups = jobs.filter { $0.duplicateOnDevice == true && !$0.syncDespiteDuplicate }.count
+            let total = jobs.count
+            overallStatus = total == 0
+                ? "No files to sync — drop video files into the left column."
+                : dups == total
+                    ? "Nothing to sync — all \(total) files already on device. Click the \u{201c}on device\u{201d} badge to sync anyway."
+                    : "Nothing to sync — files need to be analyzed first."
+            DebugLog.notice("pipeline.runPipelined", "guard: eligible empty (status=\(overallStatus))")
             return
         }
         guard let device = deviceInfo else {
             overallStatus = "No device connected"
+            DebugLog.notice("pipeline.runPipelined", "guard: deviceInfo nil")
             return
         }
+        let analyzed = eligible
 
         // ------------------------------------------------------------------
         // Preflight: fail fast if there isn't ~1.1× source size free locally
@@ -1718,6 +1740,7 @@ public class PipelineController {
             stats.deviceTotalBytes = r.deviceTotal
         } catch {
             overallStatus = error.localizedDescription
+            DebugLog.error("pipeline.runPipelined", "preflight disk check failed: \(error.localizedDescription)")
             return
         }
 
@@ -1730,6 +1753,7 @@ public class PipelineController {
         } catch {
             overallStatus = "AFC connection failed: \(error.localizedDescription)"
             isRunning = false
+            DebugLog.error("pipeline.runPipelined", "AFC connection failed: \(error.localizedDescription)")
             return
         }
 
@@ -1778,6 +1802,7 @@ public class PipelineController {
             isRunning = false
             lastRunStats = stats
             cancelFlag.set(false)
+            DebugLog.error("pipeline.runPipelined", "register session open failed: \(error.localizedDescription)")
             return
         }
 
@@ -2095,9 +2120,21 @@ public class PipelineController {
 
     /// Transcode + tag a single analyzed job in place. Shared between runPipelined and transcodeOne.
     private func runTranscodeStep(for job: FileJob) async {
+        // Short-circuit when a previous run already left this job at .ready
+        // with a valid output file. Without this, accepting .ready in
+        // runPipelined()'s filter would re-transcode the file unnecessarily
+        // (and overwrite the previous output, breaking the upload loop's
+        // outputURL reference).
+        if job.status == .ready,
+           let out = job.outputURL,
+           FileManager.default.fileExists(atPath: out.path) {
+            DebugLog.notice("pipeline.transcode", "skip — \(job.fileName) already at .ready with output on disk")
+            return
+        }
         guard job.mediaInfo != nil, job.decision != nil else {
             job.status = .failed
             job.error = "Missing analysis data"
+            DebugLog.error("pipeline.transcode", "\(job.fileName) missing mediaInfo or decision (status=\(job.status.rawValue))")
             return
         }
 
