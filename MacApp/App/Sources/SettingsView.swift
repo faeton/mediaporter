@@ -128,6 +128,42 @@ struct SettingsView: View {
             }
 
             Section {
+                HStack(spacing: 8) {
+                    Image(systemName: ffmpegStateIcon)
+                        .foregroundStyle(ffmpegStateColor)
+                        .font(.system(size: 12))
+                    Text(ffmpegStateLabel)
+                        .font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    if let p = pipe.ffmpegSource.ffmpegPath {
+                        Text(p)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(p)
+                            .textSelection(.enabled)
+                    }
+                }
+                if !pipe.ffmpegSource.isAvailable {
+                    HStack {
+                        Button("How to install ffmpeg") {
+                            NSWorkspace.shared.open(URL(string: "https://porter.md/setup#ffmpeg")!)
+                        }
+                        .buttonStyle(.link)
+                        Spacer()
+                    }
+                }
+            } header: {
+                Text("FFmpeg").font(.system(size: 13, weight: .semibold))
+            } footer: {
+                Text(ffmpegFooter)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+            }
+
+            Section {
                 Toggle("Always propagate per-episode changes to the whole show",
                        isOn: $alwaysApplyWithinShow)
                     .toggleStyle(.switch)
@@ -301,6 +337,43 @@ struct SettingsView: View {
         switch keySource {
         case .none: return "No key set — fallback poster will be used."
         default:    return "Currently \(keySource.label)."
+        }
+    }
+
+    // MARK: - FFmpeg surface (R3)
+
+    private var ffmpegStateIcon: String {
+        switch pipeline.ffmpegSource {
+        case .bundled: return "shippingbox.fill"
+        case .system: return "terminal.fill"
+        case .missing: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var ffmpegStateColor: Color {
+        switch pipeline.ffmpegSource {
+        case .bundled: return .green
+        case .system: return .accentColor
+        case .missing: return .orange
+        }
+    }
+
+    private var ffmpegStateLabel: String {
+        switch pipeline.ffmpegSource {
+        case .bundled: return "Bundled (inside the app)"
+        case .system: return "System (PATH / Homebrew)"
+        case .missing: return "Not found"
+        }
+    }
+
+    private var ffmpegFooter: String {
+        switch pipeline.ffmpegSource {
+        case .bundled:
+            return "ffmpeg ships inside MediaPorter.app — nothing to install. The exact binary in Contents/Helpers is what every transcode and remux uses."
+        case .system:
+            return "MediaPorter uses the ffmpeg already on your $PATH. To pin a specific build instead, grab the MediaPorter-with-ffmpeg.dmg from porter.md/setup#ffmpeg."
+        case .missing:
+            return "MediaPorter can't find ffmpeg. Either install via Homebrew (`brew install ffmpeg`) or download the MediaPorter-with-ffmpeg.dmg, which ships ffmpeg inside the app."
         }
     }
 

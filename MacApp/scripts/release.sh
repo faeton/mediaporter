@@ -47,15 +47,32 @@ WITHFF_DMG="$BUILD_DIR/MediaPorter-${SHORT_VERSION}-with-ffmpeg.dmg"
 
 echo "==> Release pipeline ($SHORT_VERSION build $BUILD_NUMBER)"
 
+# DMG window background. Committed PNG at MacApp/Resources/dmg-background.png
+# — owned by the design pass, not regenerated. Expected geometry:
+#   * 540×380 logical points (window content size set in build-dmg.sh)
+#   * Provide as 1080×760 PNG with 144 DPI metadata, OR a .tiff that holds
+#     both @1x and @2x reps (created via `tiffutil -cathidpicheck`). A plain
+#     1080×760 PNG without DPI hints will be displayed at native pixel size
+#     and overflow the window.
+#   * Two icon slots are positioned at logical {140, 200} and {400, 200}
+#     (top-left origin) — keep that band clear of solid graphics.
+DMG_BACKGROUND="$MACAPP_DIR/Resources/dmg-background.png"
+if [[ ! -f "$DMG_BACKGROUND" ]]; then
+    echo "ERROR: $DMG_BACKGROUND missing — drop the design PNG there before releasing." >&2
+    exit 2
+fi
+
 # Build ffmpeg first if it isn't on disk. Cheap when cached.
 if [[ ! -x "$FFMPEG_BIN_DIR/ffmpeg" || ! -x "$FFMPEG_BIN_DIR/ffprobe" ]]; then
     echo "==> Bundled ffmpeg missing — invoking build-ffmpeg.sh"
     "$SCRIPT_DIR/build-ffmpeg.sh"
 fi
 
+mkdir -p "$BUILD_DIR"
+
 # Wipe stale .app/.dmg outputs from prior runs but keep ffmpeg-bin and the
 # SwiftPM cache (.build/) so we don't pay 60s of compile twice for two variants.
-rm -rf "$SYSTEM_APP" "$WITHFF_APP" "$SYSTEM_DMG" "$WITHFF_DMG" "$BUILD_DIR/dmg-staging"
+rm -rf "$SYSTEM_APP" "$WITHFF_APP" "$SYSTEM_DMG" "$WITHFF_DMG" "$BUILD_DIR"/dmg-staging-*
 
 # ---- assemble both .app variants -----------------------------------------
 
@@ -210,18 +227,11 @@ build_dmg() {
     spctl --assess --type execute --verbose=4 "$app"
 
     echo "==> [$label] Building DMG: $dmg"
-    local staging="$BUILD_DIR/dmg-staging-$label"
-    rm -rf "$staging"
-    mkdir -p "$staging"
-    # ditto preserves the codesign seal exactly; cp -R is safe on modern
-    # macOS but ditto is the documented path.
-    ditto "$app" "$staging/$(basename "$app")"
-    ln -s /Applications "$staging/Applications"
-    hdiutil create \
-        -volname "MediaPorter ${SHORT_VERSION}" \
-        -srcfolder "$staging" \
-        -ov -format UDZO \
-        "$dmg" >/dev/null
+    "$SCRIPT_DIR/build-dmg.sh" \
+        --app "$app" \
+        --output "$dmg" \
+        --volname "MediaPorter ${SHORT_VERSION}" \
+        --background "$BUILD_DIR/dmg-background.png"
 
     echo "==> [$label] Signing DMG"
     codesign --force --timestamp --sign "$IDENTITY" "$dmg"
