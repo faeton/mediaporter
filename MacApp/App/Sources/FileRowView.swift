@@ -62,6 +62,9 @@ struct FileRowView: View {
             RoundedRectangle(cornerRadius: 12)
                 .fill(isExpanded ? theme.rowSelected : Color.clear)
         )
+        // Dim rows that won't actually be sent (#10b skip). The "on device — skip"
+        // badge keeps full opacity so the toggle is still discoverable.
+        .opacity(job.duplicateOnDevice == true && !job.syncDespiteDuplicate ? 0.5 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isExpanded)
         .popover(item: $clusterApplyPending, attachmentAnchor: .point(.bottom)) { prompt in
             clusterApplyPopover(prompt: prompt)

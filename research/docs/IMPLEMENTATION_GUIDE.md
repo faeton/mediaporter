@@ -2,11 +2,15 @@
 
 ## Overview
 
-This document is a complete, detailed specification for building a macOS CLI application that transfers video files to an iOS device's TV app — without iTunes, Finder, or jailbreak. The protocol was reverse-engineered through LLDB wire-level tracing and AFC file inspection.
+This document is the protocol-level specification for transferring video files to an iOS device's TV app — without iTunes, Finder, or jailbreak. The protocol was reverse-engineered through LLDB wire-level tracing and AFC file inspection.
 
-**Proven working**: Tested on iPad (iOS 17+) with `test_tiny_red.m4v`. Videos appear instantly in the TV app with correct metadata (`media_type=2048`, `media_kind=2`).
+**Proven working**: Tested on iPhone / iPad (iOS 17 – 26+) with files from a few MB up to 8+ GB (HEVC, multi-audio, multi-sub). Videos appear in the TV app with correct metadata (`media_type=2048`, `media_kind=2`) and play.
 
-**Reference implementation**: `scripts/atc_nodeps_sync.py` (zero-dependency: pure ctypes + Apple frameworks + libcig.dylib, no pymobiledevice3). An earlier version using pymobiledevice3 for AFC is `scripts/atc_proper_sync.py`.
+**Shipping implementation (Swift)**: `MacApp/MediaPorter/Sources/Sync/` — `ATCSession.swift` (ATC protocol), `AFC.swift` (file transport), `Frameworks.swift` (`dlopen` of `MobileDevice.framework` + `AirTrafficHost.framework`, embedded `SyncAuthSeed`). The shipping app needs **no admin prompts**, no `sudo`, and no helper install — it talks to the system `remoted` / `usbmuxd` via the same private frameworks the OS already trusts.
+
+**Frozen Python reference**: `python-reference/src/mediaporter/sync/` (importable module) and the standalone scripts under `python-reference/scripts/` — `atc_nodeps_sync.py` (zero-dependency: pure ctypes + Apple frameworks + libcig.dylib), `atc_proper_sync.py` (older, pymobiledevice3-based AFC). These are the original reverse-engineering artefacts; protocol-correct, but **frozen** — bug fixes land in Swift, not here. The Python path additionally requires `sudo pymobiledevice3 remote start-tunnel` once per boot to set up the iOS 17+ tunnel; the Swift app does not (it uses the system tunnel that `remoted` already maintains).
+
+The Python snippets throughout this document remain the easiest way to read the protocol top-to-bottom; for production behaviour cross-reference the Swift sources cited inline.
 
 ---
 
@@ -22,8 +26,8 @@ This document is a complete, detailed specification for building a macOS CLI app
 │  └─────────┘ │                        │  └──────┬───────┘ │
 │              │                        │         │         │
 │  ┌─────────┐ │  AFC (com.apple.afc)   │  ┌──────▼───────┐ │
-│  │pymobile │ │ ◄────────────────────► │  │ medialibraryd│ │
-│  │device3  │ │  (file read/write)     │  │              │ │
+│  │ Mobile- │ │ ◄────────────────────► │  │ medialibraryd│ │
+│  │ Device  │ │  (file read/write)     │  │              │ │
 │  └─────────┘ │                        │  └──────────────┘ │
 │              │                        │                   │
 │  ┌─────────┐ │                        │  ┌──────────────┐ │
@@ -37,22 +41,28 @@ This document is a complete, detailed specification for building a macOS CLI app
 
 | Component | Role | Source |
 |-----------|------|--------|
-| **AirTrafficHost.framework** | macOS private framework. Provides `ATHostConnection*` API for ATC protocol. Loaded via `ctypes`. | `/System/Library/PrivateFrameworks/AirTrafficHost.framework/` or `/Library/Apple/System/Library/PrivateFrameworks/AirTrafficHost.framework/` |
-| **MobileDevice.framework** | macOS private framework. Device discovery via `AMDeviceNotificationSubscribe`. | `/System/Library/PrivateFrameworks/MobileDevice.framework/` |
-| **CoreFoundation.framework** | CF types (CFString, CFDictionary, CFNumber, CFData, CFArray). | System framework |
-| **pymobiledevice3** | Python library for AFC file operations (async, v9.x). Used by `atc_proper_sync.py`; NOT needed by `atc_nodeps_sync.py` which uses native AFC via MobileDevice.framework. | `pip install pymobiledevice3` |
-| **libcig.dylib** | Compiled CIG (Cryptographic Integrity Guarantee) engine. Produces 21-byte signatures for sync plists. Source: `cig.cpp` (from `yinyajiang/go-tunes` on GitHub). | Compiled with `clang++ -shared -fPIC -std=c++11 -O2` |
-| **Grappa blob** | 84-byte static authentication blob. Replayable across sessions. Same blob is hardcoded in go-tunes. | `traces/grappa.bin` |
+| **AirTrafficHost.framework** | macOS private framework. Provides `ATHostConnection*` API for ATC protocol. `dlopen`-ed at runtime (not linked) so notarization passes. | `/System/Library/PrivateFrameworks/AirTrafficHost.framework/` (also `/Library/Apple/System/Library/PrivateFrameworks/`) |
+| **MobileDevice.framework** | macOS private framework. Device discovery (`AMDeviceNotificationSubscribe`) AND AFC file transport (`AMDeviceStartService("com.apple.afc")` + `AFCFileRefOpen` etc.). Same `dlopen` strategy. | `/System/Library/PrivateFrameworks/MobileDevice.framework/` |
+| **CoreFoundation.framework** | CF types (CFString, CFDictionary, CFNumber, CFData, CFArray). Used at the framework boundary. | System framework |
+| **pymobiledevice3** | Python-only. Used by the older `atc_proper_sync.py` reference for AFC + iOS 17+ tunnel setup. The shipping Swift app uses native AFC via `MobileDevice.framework` and the system tunnel — pymobiledevice3 is **not** part of the shipping path. | `pip install pymobiledevice3` (Python reference only) |
+| **libcig.dylib** | Compiled CIG (Cryptographic Integrity Guarantee) engine. Produces 21-byte signatures for sync plists. Bundled with the shipping app at `MacApp/MediaPorter/Resources/libcig.dylib` (arm64). Source: `scripts/cig/` (`cig.cpp` from `yinyajiang/go-tunes`). | Built via `clang++ -shared -fPIC -std=c++11 -O2` |
+| **SyncAuthSeed (Grappa) blob** | 84-byte static authentication blob, replayable across sessions. Bundled with the shipping app as `MacApp/MediaPorter/Resources/SyncAuthSeed.dat` (XOR-masked at rest, un-masked in `Sync/Frameworks.swift::SyncAuthSeed`). Same blob hardcoded in go-tunes (`deviceGrapa`). | Repo: `MacApp/MediaPorter/Resources/SyncAuthSeed.dat` (Swift) and `python-reference/src/mediaporter/sync/data/SyncAuthSeed.dat` (Python) |
 
 ---
 
 ## Prerequisites
 
-- **macOS** with Python 3.11+
-- **USB-connected iOS device** (trusted/paired)
-- **pymobiledevice3** (`pip install pymobiledevice3`)
-- **ffmpeg/ffprobe** for video analysis (optional but recommended)
-- **iOS 17+ tunnel** (required for device connection):
+**Shipping app (Swift)**:
+- macOS 13+
+- USB-connected iOS device (trusted / paired in Finder once)
+- `ffmpeg` / `ffprobe` on `$PATH` for transcode + analysis (`brew install ffmpeg`); release builds bundle ffmpeg inside the `.app`
+- **No `sudo`, no helper install, no entitlements.** The system already runs `remoted` / `usbmuxd` and an iOS 17+ tunnel for trusted devices; the app talks to that via `MobileDevice.framework` + `AirTrafficHost.framework` (`dlopen`-ed at launch)
+
+**Frozen Python reference**:
+- macOS with Python 3.11+
+- `pip install -e ".[dev]"` from `python-reference/`
+- USB-connected iOS device
+- iOS 17+ tunnel started by hand once per boot (this is the only step that needs root, and it's a Python-reference limitation — pymobiledevice3 reimplements the tunnel in userspace because it can't talk to the system one):
   ```bash
   sudo pymobiledevice3 remote start-tunnel
   # Or as daemon: sudo pymobiledevice3 remote tunneld -d
@@ -290,13 +300,15 @@ for i in range(20):
     AssetManifest: {
         Media: [
             {AssetID: 449875709684448843, AssetType: "Movie", IsDownload: 1,
-             Variant: {AssetParts: 1}}
+             Variant: {AssetParts: 3}}
         ]
     }
 }}
 ```
 
 If `AssetType` is `Music` instead of `Movie`, the `is_movie: True` field is missing from the plist.
+
+**`Variant.AssetParts` is informational, not a contract.** It reports the device's notion of part count (the number of segments medialibraryd would expect for a hypothetical multi-part asset of this kind), but a single combined MP4 with multi-audio + multi-sub binds correctly with `AssetParts: 3` in the manifest. We send one `FileBegin` / `FileComplete` for the single uploaded MP4 regardless of the value. Confirmed on iOS 26 with HEVC + 3 audio + 2 sub MP4s. See HISTORY.md "2026-05-14 — SyncAllowed is NOT terminal" for the diagnostic that originally suspected `AssetParts` and ruled it out.
 
 ### Step 7: Upload File to Final Path
 
@@ -312,7 +324,9 @@ await afc.makedirs(f'/iTunes_Control/Music/{slot}')
 await afc.set_file_contents(final_path, video_bytes)
 ```
 
-**Airlock staging (`/Airlock/Media/<AssetID>`) is NOT needed.** Previously believed essential for setting `media_type=2048`, but confirmed 2026-04-06 that `is_movie: True` + `location.kind` in the sync plist alone set the correct media type. Single upload to the final path is sufficient.
+**Airlock staging is NOT needed for the media file.** Previously believed essential for setting `media_type=2048`, but confirmed 2026-04-06 that `is_movie: True` + `location.kind` in the sync plist alone set the correct media type. Single upload of the .mp4 to `/iTunes_Control/Music/Fxx/` is sufficient.
+
+(Airlock IS still used for **poster artwork** — write the JPEG to `/Airlock/Media/Artwork/<AssetID>` and set `artwork_cache_id` in the plist `item` dict. See CLAUDE.md rule #13.)
 
 **IMPORTANT for large files:** Steps 5-6 (MetadataSyncFinished → AssetManifest) must happen BEFORE this upload. If you upload first and then send MetadataSyncFinished, the ATC session will time out for multi-GB files. Also, the device sends `Ping` messages during long uploads — respond with `Pong` to keep the session alive.
 
@@ -365,12 +379,18 @@ ATH.ATHostConnectionSendMessage(conn, ATH.ATCFMessageCreate(0,
         ErrorCode=cfnum32(0)
     )))
 
-# Read SyncFinished
+# Read SyncFinished — wait STRICTLY for SyncFinished, NOT SyncAllowed.
+# SyncAllowed arrives early (right after MetadataSyncFinished / FileBegin)
+# as a "you may proceed" signal and accumulates in any background reader
+# during a long upload. Treating it as terminal returns before
+# medialibraryd commits the row → row stays unbound, file gets swept by
+# background GC. See HISTORY.md "2026-05-14 — SyncAllowed is NOT terminal".
 for i in range(15):
     msg, name = read_msg(conn, timeout=10)
     if name == 'SyncFinished':
         print("Sync complete! Video is in TV app.")
         break
+    # Ignore SyncAllowed / InstalledAssets / AssetMetrics — keep waiting.
 ```
 
 ### Cleanup
@@ -388,14 +408,18 @@ After successful sync, the entry in `MediaLibrary.sqlitedb`:
 
 | Table | Column | Value | Notes |
 |-------|--------|-------|-------|
-| `item` | `media_type` | `2048` | Set by device from Airlock processing |
+| `item` | `media_type` | `2048` | Set by device from `is_movie: True` + `location.kind` in the insert_track plist |
 | `item` | `in_my_library` | `1` | Visible in library |
+| `item` | `base_location_id` | non-zero | Binding marker — `0` means the row exists but no file is bound; row is unplayable and the uploaded bytes will be GC'd |
 | `item_extra` | `media_kind` | `2` | Set by device |
 | `item_extra` | `location_kind_id` | `4` | Set by device |
 | `item_extra` | `location` | `XXXX.mp4` | Filename only (no path) |
 | `item_extra` | `title` | Video title | From plist `item.title` |
 | `item_extra` | `sort_name` | lowercase title | From plist `item.sort_name` |
 | `item_extra` | `total_time_ms` | duration | From plist `item.total_time_ms` |
+| `item_extra` | `file_size` | byte count | Set on bind; `0` is the same "unbound" signal as `base_location_id=0` |
+
+**Diagnosing "row exists but won't play"**: pull `MediaLibrary.sqlitedb` via AFC and check `base_location_id` + `location` + `file_size` for the title. All three at zero / empty means the bind never completed — most often because `finishSync` returned on `SyncAllowed` instead of `SyncFinished`. See CLAUDE.md rule #14.
 
 ---
 
@@ -406,7 +430,7 @@ The CIG signature protects the sync plist from tampering. It uses a modified SHA
 **Input:** Device Grappa (83 bytes from `ReadyForSync.Params.DeviceInfo.Grappa`) + plist bytes
 **Output:** 21 bytes
 
-**Source:** `scripts/cig/cig.cpp` (from go-tunes project, publicly available on GitHub)
+**Source:** `scripts/cig/cig.cpp` + `cig_wrapper.cpp` (from `yinyajiang/go-tunes`). Compiled `libcig.dylib` (arm64) is bundled at `MacApp/MediaPorter/Resources/libcig.dylib`.
 
 **Build:**
 ```bash
@@ -431,28 +455,31 @@ int cig_calc(
 ## Critical Implementation Details
 
 ### 1. Binary Plist Format
-Binary plist (`FMT_BINARY`) is required, not XML. Use `plistlib.dumps(..., fmt=plistlib.FMT_BINARY)`.
+Binary plist is required, not XML. Python: `plistlib.dumps(..., fmt=plistlib.FMT_BINARY)`. Swift: `PropertyListSerialization.data(fromPropertyList:format: .binary, options: 0)`.
 
-### 2. Naive Datetime
-Binary plist serialization in Python requires naive datetime (no timezone info). Use `datetime.datetime.now()` not `datetime.datetime.now(datetime.timezone.utc)`.
+### 2. Naive Datetime (Python only)
+Binary plist serialization in Python requires naive datetime (no timezone info). Use `datetime.datetime.now()` not `datetime.datetime.now(datetime.timezone.utc)`. Swift `Date` serializes correctly without ceremony.
 
 ### 3. String vs Number Types
-On the ATC wire, **all anchors and AssetIDs are strings**. Pass them as `cfstr(str(value))`, not `cfnum64(value)`. FileSize/TotalSize are numbers (`cfnum64`).
+On the ATC wire, **all anchors and AssetIDs are strings**. Pass them as `cfstr(str(value))` (Python) / `String(value) as CFString` (Swift), not as numbers. `FileSize` / `TotalSize` are 64-bit numbers.
 
 ### 4. Stale Asset Handling
-Failed syncs leave "pending download" entries in the device's manifest. These accumulate across sessions. Send `FileError` for any asset in the manifest that isn't yours, or the device will wait forever for them (causing TIMEOUT instead of SyncFinished).
+Failed syncs leave "pending download" entries in the device's manifest. These accumulate across sessions. Send `FileError(ErrorCode=0)` for any asset in the manifest that isn't yours, or the device will wait forever for them (causing TIMEOUT instead of SyncFinished).
 
 ### 5. File Extension
 Use `.mp4` for the final filename even for `.m4v` input files. Both work on the device.
 
 ### 6. Video Compatibility
 The video file must be in a format the device can play:
-- **Container:** MP4/M4V (use `-f mp4` with ffmpeg for .m4v output)
+- **Container:** MP4/M4V (use `-f mp4` with ffmpeg for .m4v output — the `.m4v` extension otherwise picks the ipod muxer which can't do HEVC)
 - **Video codec:** H.264 or HEVC (H.265) with `hvc1` tag (`-tag:v hvc1`)
-- **Audio codec:** AAC or AC-3
+- **Audio codec:** AAC, EAC3 (copy through). AC3 is dropped from the iPad TV-app audio switcher — transcode AC3→AAC. See `AUDIO_SWITCHER_RULE.md`.
 
-### 7. pymobiledevice3 v9.x is Fully Async
-All AFC operations must use `async/await` with `asyncio.run()`.
+### 7. AFC transport (Swift uses `MobileDevice.framework` natively)
+The shipping Swift app talks AFC directly via `AMDeviceStartService("com.apple.afc")` + `AFCFileRefOpen` / `AFCFileRefWrite` / `AFCFileRefClose`. See `MacApp/MediaPorter/Sources/Sync/AFC.swift`. The Python reference uses `pymobiledevice3.services.afc` (async, v9.x — `async / await` with `asyncio.run()`); this is a Python-implementation detail, not a protocol requirement.
+
+### 8. `SyncAllowed` is NOT terminal-equivalent to `SyncFinished`
+`SyncAllowed` arrives early in the post-MetadataSyncFinished phase as "you may proceed" — during a long upload it accumulates in any background reader. Only `SyncFinished` confirms medialibraryd has committed the row. If `finishSync` accepts `SyncAllowed` it returns before the bind, leaving the row with `base_location_id=0` and orphaning the bytes for background GC. See CLAUDE.md rule #14 + HISTORY.md "2026-05-14".
 
 ---
 
@@ -462,15 +489,16 @@ These approaches were tested and do NOT work:
 
 | Approach | Why it fails |
 |----------|-------------|
-| Code-signed .app with `com.apple.private.fpsd.client` | macOS kills process with private entitlements (even with SIP debug disabled) |
-| `DYLD_INSERT_LIBRARIES` injection | Blocked by library validation for Apple binaries |
-| Grappa struct patch (offset 0x5C) | Triggers CoreFP but creates entries with empty location |
-| Direct `MediaLibrary.sqlitedb` modification | `medialibraryd` reverts changes within seconds |
-| ~~Setting `media_kind`/`media_type` via sync plist fields~~ | **CORRECTED**: `is_movie: True` + `location.kind` DO work. Previous testing missed these specific fields. |
-| Raw ATC connection (manual protocol without ATHostConnection) | Device ignores `MetadataSyncFinished` (connection state not managed) |
-| ~~Writing file only to `/iTunes_Control/Music/Fxx/` (without Airlock)~~ | **CORRECTED**: Single upload WITHOUT Airlock works when `is_movie: True` is in the plist. Airlock was a red herring. |
-| AFC hardlink/symlink between Airlock and iTunes_Control | `AFCLinkPath` returns error 15 — cross-directory links not allowed on iOS |
-| Uploading large files before MetadataSyncFinished | ATC session times out during multi-GB uploads. Must send MetadataSyncFinished first. |
+| Code-signed .app with `com.apple.private.fpsd.client` (or any other private entitlement) | macOS kills the process at launch with private Apple entitlements, even on SIP-disabled developer machines. Notarization would also reject it. The shipping app uses **no private entitlements** — it `dlopen`s the framework instead. |
+| `DYLD_INSERT_LIBRARIES` injection into Apple binaries | Blocked by library validation. |
+| Grappa struct patch (offset 0x5C) inside CoreFP | Triggers CoreFP but creates DB entries with empty location. Replaying the static 84-byte Grappa as `SyncAuthSeed` is the working path. |
+| Direct `MediaLibrary.sqlitedb` modification via AFC | `medialibraryd` reverts the row within seconds. Use the ATC `insert_track` plist instead. |
+| ~~Setting `media_kind`/`media_type` via sync plist fields~~ | **CORRECTED**: `is_movie: True` + `location.kind: "MPEG-4 video file"` in `insert_track` give `media_type=2048`, `media_kind=2`, `location_kind_id=4`. Earlier testing missed these specific fields. |
+| Raw ATC connection (manual TCP-style protocol without `ATHostConnection`) | Device silently ignores `MetadataSyncFinished` because the framework also manages PowerAssertion / SyncSession state the device expects. Use `ATHostConnection*`. |
+| ~~Writing file only to `/iTunes_Control/Music/Fxx/` (without Airlock)~~ | **CORRECTED**: Single upload to `/iTunes_Control/Music/Fxx/` works when `is_movie: True` is in the plist. Airlock was a red herring; not used in shipping. |
+| AFC hardlink/symlink between Airlock and `iTunes_Control` | `AFCLinkPath` returns error 15 — cross-directory links not allowed on iOS. |
+| Uploading large files before `MetadataSyncFinished` | ATC session times out during multi-GB uploads. Send `MetadataSyncFinished` first, then upload. |
+| Treating `SyncAllowed` as terminal-equivalent to `SyncFinished` | `SyncAllowed` arrives early (post-FileBegin) as "you may proceed" and accumulates in the inbox during long uploads. Returning on it leaves the row unbound (`base_location_id=0`) and the file gets GC'd. Wait strictly for `SyncFinished`. See HISTORY.md "2026-05-14". |
 
 ---
 
@@ -482,7 +510,8 @@ These approaches were tested and do NOT work:
 | `/iTunes_Control/Sync/Media/Sync_XXXX.plist.cig` | CIG signature for plist |
 | `/iTunes_Control/Music/F{00-49}/XXXX.mp4` | Final media file location (single upload target) |
 | `/iTunes_Control/iTunes/MediaLibrary.sqlitedb` | Media library database |
-| `/Airlock/Media/<AssetID>` | ~~Staging area~~ NOT needed — `is_movie: True` in plist suffices |
+| `/Airlock/Media/<AssetID>` | ~~Media staging~~ NOT needed for media files — `is_movie: True` in plist suffices |
+| `/Airlock/Media/Artwork/<AssetID>` | Poster artwork JPEG (paired with `artwork_cache_id` in the plist `item` dict). See CLAUDE.md #13. |
 
 ---
 
@@ -498,34 +527,44 @@ These approaches were tested and do NOT work:
 
 ## Testing
 
+**Shipping app (Swift)**:
+```bash
+cd MacApp && swift build && .build/debug/MediaPorter      # GUI
+cd MacApp && swift run mediaporterctl ls /iTunes_Control/Music/F00   # CLI: list
+cd MacApp && swift run mediaporterctl pull /iTunes_Control/iTunes/MediaLibrary.sqlitedb /tmp/m.sqlitedb
+sqlite3 /tmp/m.sqlitedb 'SELECT ie.title, i.media_type, i.base_location_id, ie.file_size FROM item i JOIN item_extra ie ON i.item_pid=ie.item_pid ORDER BY i.item_pid DESC LIMIT 5;'
+```
+
+`base_location_id != 0` and `file_size != 0` ⇒ row is bound and the file will play. Both zero ⇒ unbound, the uploaded bytes will be GC'd.
+
+**Frozen Python reference**:
 ```bash
 # Single video transfer (zero-dependency version)
-python scripts/atc_nodeps_sync.py path/to/video.m4v "Video Title"
+python python-reference/scripts/atc_nodeps_sync.py path/to/video.m4v "Video Title"
 
 # Or with pymobiledevice3 version:
-# python scripts/atc_proper_sync.py path/to/video.m4v "Video Title"
-
-# Verify in DB
-python3 -c "
-import asyncio, sqlite3, tempfile
-async def check():
-    from pymobiledevice3.lockdown import create_using_usbmux
-    from pymobiledevice3.services.afc import AfcService
-    ld = await create_using_usbmux()
-    async with AfcService(ld) as a:
-        tmp = tempfile.mkdtemp()
-        open(f'{tmp}/db','wb').write(await a.get_file_contents('/iTunes_Control/iTunes/MediaLibrary.sqlitedb'))
-        db = sqlite3.connect(f'{tmp}/db')
-        for r in db.execute('SELECT ie.title, i.media_type, ie.media_kind FROM item i JOIN item_extra ie ON i.item_pid=ie.item_pid ORDER BY i.item_pid DESC LIMIT 5'):
-            print(r)
-asyncio.run(check())
-"
+# python python-reference/scripts/atc_proper_sync.py path/to/video.m4v "Video Title"
 ```
+
+The shipping debug log lives at `/tmp/mediaporter-debug.log`; tail it during a sync to see ATC wire events (`atc.MetadataSyncFinished`, `atc.manifest`, `atc.FileBegin`, `atc.FileProgress`, `atc.FileComplete`, `atc.finishSync.done via=...`).
 
 ---
 
 ## References
 
-- **go-tunes** (`yinyajiang/go-tunes`) — Open-source Go implementation of ringtone sync via ATC. Source of CIG engine and hardcoded Grappa blob.
-- **IpaInstall** (`Kerrbty/IpaInstall`) — Windows tool that calls AirFairSyncGrappaCreate via fake struct. Analysis of Grappa generation mechanism.
-- **pymobiledevice3** — Python library for iOS device communication (AFC, lockdown, etc.)
+**Source code**:
+- Swift shipping implementation: `MacApp/MediaPorter/Sources/Sync/` — `ATCSession.swift`, `AFC.swift`, `Frameworks.swift`, `SyncEngine.swift`
+- Python frozen reference: `python-reference/src/mediaporter/sync/` (importable) and `python-reference/scripts/` (standalone)
+- CIG engine: `scripts/cig/` (`cig.cpp`, `cig.h`, `cig_wrapper.cpp`); compiled `libcig.dylib` shipped at `MacApp/MediaPorter/Resources/`
+
+**Companion docs**:
+- `ATC_SYNC_FLOW.md` — wire-level message dictionaries and state machine
+- `HISTORY.md` — chronological findings log (most recent: 2026-05-14 SyncAllowed/SyncFinished diagnosis)
+- `AUDIO_SWITCHER_RULE.md` — AC3 / disposition-flag interaction with the iPad TV-app picker
+- `MEDIA_LIBRARY_DB.md` — schema notes for `MediaLibrary.sqlitedb`
+- `GRAPPA.md` — Grappa blob format and replay analysis
+
+**External**:
+- **go-tunes** (`yinyajiang/go-tunes` on GitHub) — Open-source Go implementation of ringtone sync via ATC. Source of the CIG engine and the hardcoded `deviceGrapa` blob we replay as `SyncAuthSeed`.
+- **IpaInstall** (`Kerrbty/IpaInstall` on GitHub) — Windows tool that calls `AirFairSyncGrappaCreate` via a fake struct. Useful for understanding Grappa generation, not used at runtime.
+- **pymobiledevice3** — Python library for iOS device communication (AFC, lockdown, tunnel). Used by the Python reference, not the Swift shipping path.

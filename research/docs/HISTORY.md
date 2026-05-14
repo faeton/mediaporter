@@ -234,6 +234,28 @@ Status: FULLY WORKING. Tested with 5 GB+ files.
 - CIG (signature) engine from go-tunes `cig.cpp` (10K lines) — signs individual plist messages after Grappa handshake.
 - `Kerrbty/IpaInstall` (GitHub) — calls real Apple DLL functions at hardcoded offsets via fake ATHostConnection struct.
 
+## 2026-05-14 — `SyncAllowed` is NOT terminal-equivalent to `SyncFinished`
+
+Symptom: large-file syncs (Violet HEVC: 1.5 GB transcode, 6 GB original) landed the row in TV.app but the row was unbound (`base_location_id=0`, `location=''`, `file_size=0`) and the bytes vanished from `/iTunes_Control/Music/Fxx/...mp4` within seconds. Mini-clip (141 MB, 4 s upload) worked perfectly with identical metadata + flags.
+
+Initial wrong hypothesis: `Variant = { AssetParts = 3 }` in AssetManifest implied medialibraryd expected V + alt-audio + sub sidecars and got just one combined MP4. Disproven — mini-clip got `AssetParts = 3` too and bound fine. The flag is informational, not a contract.
+
+Real cause (found via side-by-side log diff): `ATCSession.finishSync` treated `SyncAllowed` as terminal-equivalent to `SyncFinished`. The device sends `SyncAllowed` early in the post-MetadataSyncFinished phase (right after FileBegin / AssetManifest exchange) as "you may proceed". During a long upload it accumulates in the drainer inbox alongside `InstalledAssets` / `AssetMetrics`. When finishSync starts after FileComplete, it grabs the stale `SyncAllowed` immediately (via `drainInbox()` in insertion order) and returns. medialibraryd never gets the chance to commit our asset → row stays unbound → background sweep deletes the orphan file.
+
+Why mini-clip always worked: upload finished in <4 s, so `SyncFinished` and the early `SyncAllowed` both landed within ~35 ms of FileComplete. `SyncFinished` was first in the inbox, `finishSync` accepted it.
+
+Side-by-side log evidence (single MacApp session, same anchor sequence):
+
+| File | Upload | finishSync result | TV.app outcome |
+|------|--------|-------------------|---------------|
+| mini-clip 141 MB | 4 s | `via=SyncFinished elapsed=0s` | plays |
+| Violet 1.5 GB | 49 s | `via=SyncAllowed elapsed=0s` (stale `SyncAllowed`+`InstalledAssets`+`AssetMetrics` in inbox) | row visible, `base_location_id=0`, file swept |
+| Violet 6 GB (post-fix) | 3:06 | `via=SyncFinished elapsed=0s` (no early `SyncAllowed` arrived this run) | plays |
+
+Fix: `finishSync` (1) drops anything already in inbox on entry (stale upload-phase noise), (2) waits strictly for `SyncFinished` for up to 120 s, (3) falls back to `SyncAllowed` only after a 30 s grace period with no `SyncFinished` (safety net for misbehaving devices). New log markers: `atc.finishSync.discard_stale`, `atc.finishSync.syncallowed`, `atc.finishSync.done via=SyncFinished|SyncAllowed_fallback`.
+
+Likely also explains the open "re-uploaded deleted episode doesn't bind on first sync" item from commit 00450b4 — same family of symptoms, same root cause class.
+
 ## CLI Improvements (2026-04-10) — Python v0.3.1
 
 Real-world two-file run (Send.Help 4.7 GB + Avatar 15 GB) exposed and fixed:

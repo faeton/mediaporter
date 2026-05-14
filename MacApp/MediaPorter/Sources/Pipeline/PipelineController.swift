@@ -1661,12 +1661,25 @@ public class PipelineController {
                 try registerSession.beginFile(capPrepared.asSyncFileInfo)
 
                 var lastReport = Date.distantPast
+                var lastAtcProgress = Date()
+                var lastAtcPct: Double = 0
+                let capAssetID = capPrepared.assetID
                 try uploader.upload(capPrepared, progress: { sent, total in
                     let now = Date()
-                    guard now.timeIntervalSince(lastReport) >= 0.25 else { return }
-                    lastReport = now
                     let pct = total > 0 ? Double(sent) / Double(total) : 0
-                    Task { @MainActor in capJob.progress = pct }
+                    if now.timeIntervalSince(lastReport) >= 0.25 {
+                        lastReport = now
+                        Task { @MainActor in capJob.progress = pct }
+                    }
+                    // Heartbeat FileProgress: every 5 s OR every 10% (whichever
+                    // first). Without these, medialibraryd marks the asset
+                    // slot stale on multi-GB uploads and the terminal
+                    // FileComplete binds nothing — bytes get swept as orphan.
+                    if now.timeIntervalSince(lastAtcProgress) >= 5.0 || pct - lastAtcPct >= 0.1 {
+                        lastAtcProgress = now
+                        lastAtcPct = pct
+                        registerSession.sendProgress(assetID: capAssetID, fraction: pct)
+                    }
                 }, isCancelled: { capCancel.get() || diskDetector.isFull() })
                 let uploadElapsed = Date().timeIntervalSince(uploadStart)
 

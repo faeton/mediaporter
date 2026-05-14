@@ -2,6 +2,16 @@
 
 The Swift MacApp under `MacApp/` is the shipping target. Versions starting with 0.4.0 track the MacApp; the 0.1.x – 0.3.x entries describe the now-frozen Python CLI under `python-reference/`.
 
+## 0.6.1 — 2026-05-14
+
+Hotfix: large-file syncs (>~10 s upload) landed the row in TV.app but the row was unbound and the file got swept — title visible, Play did nothing.
+
+### Fixed
+
+- **Large-file binding** — `ATCSession.finishSync` was treating `SyncAllowed` as terminal-equivalent to `SyncFinished`. The device sends `SyncAllowed` early (right after MetadataSyncFinished / FileBegin) as "you may proceed" and it accumulates in the drainer inbox during long uploads; finishSync grabbed the stale message and returned before medialibraryd committed the asset, leaving the row with `base_location_id=0` and the bytes orphaned for background GC. Mini-clips worked because their upload finished before `SyncAllowed` arrived. Fix: drop pre-existing inbox entries on entry, wait strictly for `SyncFinished` (up to 120 s), fall back to `SyncAllowed` only after a 30 s grace period. Detail: `research/docs/HISTORY.md` "2026-05-14 — SyncAllowed is NOT terminal" + new CLAUDE.md rule #14.
+- **`Send N to iPhone` button no-op when all files were skip-on-device** — button now counts files matching the actual `runPipelined` filter; if zero remain it shows a disabled "N file(s) already on device" with a hint to use the per-row badge to override. Skipped rows are dimmed.
+- **`atc.FileProgress` heartbeat during upload** — sent every 5 s or 10 % during the AFC upload to keep medialibraryd's asset slot warm. (Turned out the binding bug was elsewhere, but the heartbeat is correct protocol behaviour and matches what real iTunes/Finder do.)
+
 ## 0.6.0 — 2026-05-14
 
 The cluster-extras release. Drop a folder of episodes with dub / sub subfolders, pick studios / labels once at cluster level, and Mediaporter muxes each episode's extras into the transcode pass — with the user-chosen default audio surviving into the TV app. Plus the long tail of post-0.5.0 reliability + UX work, signing + notarization, and the first signed DMG shipping from porter.md.

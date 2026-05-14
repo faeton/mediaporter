@@ -217,6 +217,13 @@ class ATCSession {
                 itemDict["is_movie"] = true
             }
 
+            DebugLog.write("atc.insert_track",
+                "asset=\(f.assetID) title=\"\(f.item.title)\" "
+                + "has_alt_audio=\(f.item.hasAlternateAudio) "
+                + "has_subs=\(f.item.hasSubtitles) "
+                + "is_hd=\(f.item.isHD) "
+                + "is_tv=\(f.item.isTVShow) "
+                + "channels=\(f.item.channels)")
             operations.append([
                 "operation": "insert_track",
                 "pid": f.assetID,
@@ -617,11 +624,30 @@ class ATCSession {
         try completeFile(f)
     }
 
+    /// Send an in-progress FileProgress for `assetID`. Used to keep
+    /// medialibraryd's per-asset timer from giving up on a long upload —
+    /// without periodic progress hints, multi-GB transfers can finish AFC-side
+    /// but the device has already marked the asset slot as stale, so the
+    /// terminal FileComplete binds nothing and the bytes get GC'd as orphan.
+    /// Callers should throttle (every ~5 s / ~10 %).
+    func sendProgress(assetID: Int, fraction: Double) {
+        let aid = String(assetID)
+        let p = max(0.0, min(1.0, fraction))
+        check("FileProgress", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileProgress" as CFString, [
+            "AssetID": aid,
+            "AssetProgress": p,
+            "OverallProgress": p,
+            "Dataclass": "Media",
+        ] as NSDictionary as CFDictionary)!))
+        DebugLog.write("atc.FileProgress", "asset=\(assetID) frac=\(String(format: "%.2f", p))")
+    }
+
     /// Send FileError(0) for an asset we will NOT be FileCompleting (transcode
     /// failure, user cancel mid-batch, etc.). Without this, medialibraryd
     /// blocks SyncFinished waiting for the missing asset (CLAUDE.md #8).
     func abandonAsset(assetID: Int) {
         log("  >> FileError (abandon asset=\(assetID))")
+        DebugLog.write("atc.abandonAsset", "id=\(assetID)")
         check("FileError", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileError" as CFString, [
             "AssetID": String(assetID),
             "Dataclass": "Media",
@@ -631,26 +657,65 @@ class ATCSession {
 
     /// Phase 3. Waits for SyncFinished by polling the drainer's inbox (no
     /// direct readMsg — that would race the drainer for the single ATC
-    /// connection and silently swallow SyncFinished). SyncAllowed is also
-    /// terminal: the device only emits it once it has flushed our anchor
-    /// and is ready to accept a fresh sync, which is what we need before
-    /// returning. Subsequent Progress / Ping noise during medialibraryd's
-    /// background indexing is irrelevant to us.
+    /// connection and silently swallow SyncFinished).
+    ///
+    /// Treat ONLY `SyncFinished` as the terminal "row is bound and committed"
+    /// signal. `SyncAllowed` is sent by the device much earlier (right after
+    /// FileBegin / MetadataSyncFinished) as "you may proceed", and during a
+    /// long upload it accumulates in the drainer inbox. If we treat it as
+    /// terminal, finishSync returns instantly without medialibraryd ever
+    /// committing our asset → row exists with base_location_id=0, file gets
+    /// swept by background GC, TV.app shows the title with no playable file.
+    /// Symptom in the wild: 1.5 GB Violet HEVC transcode (2026-05-14).
+    ///
+    /// Strategy:
+    /// 1. Drop anything that landed in the inbox before we got here — old
+    ///    SyncAllowed / InstalledAssets / AssetMetrics from the upload phase
+    ///    are stale, not commit signals for the just-finished file.
+    /// 2. Wait up to 120 s for `SyncFinished`.
+    /// 3. Fallback: if `SyncAllowed` arrives but no `SyncFinished` follows
+    ///    within 30 s, accept it with a warning so we don't hang forever on
+    ///    a misbehaving device.
     func finishSync() {
-        log("  Waiting for SyncFinished/SyncAllowed...")
-        let hardDeadline = Date().addingTimeInterval(120)
+        log("  Waiting for SyncFinished...")
+        DebugLog.write("atc.finishSync.wait", "deadline=120s")
+        let start = Date()
+        let hardDeadline = start.addingTimeInterval(120)
+
+        // Drop pre-existing inbox entries — they're from the upload phase,
+        // not commit signals for the just-finished file.
+        let stale = drainInbox()
+        if !stale.isEmpty {
+            DebugLog.write("atc.finishSync.discard_stale", "names=\(stale.joined(separator: ","))")
+        }
+
+        var syncAllowedAt: Date? = nil
         while Date() < hardDeadline {
             for name in drainInbox() {
                 log("  << \(name)")
-                if name == "SyncFinished" || name == "SyncAllowed" {
-                    log("  *** SYNC COMPLETE (\(name)) ***")
+                DebugLog.write("atc.inbox", "\(name) (+\(Int(Date().timeIntervalSince(start)))s)")
+                if name == "SyncFinished" {
+                    log("  *** SYNC COMPLETE (SyncFinished) ***")
+                    DebugLog.write("atc.finishSync.done", "via=SyncFinished elapsed=\(Int(Date().timeIntervalSince(start)))s")
                     stopDrainer()
                     return
                 }
+                if name == "SyncAllowed" && syncAllowedAt == nil {
+                    syncAllowedAt = Date()
+                    DebugLog.write("atc.finishSync.syncallowed", "waiting up to 30s for SyncFinished")
+                }
+            }
+            // Fallback: SyncAllowed seen, no SyncFinished after 30 s grace.
+            if let sa = syncAllowedAt, Date().timeIntervalSince(sa) > 30 {
+                log("  *** SYNC COMPLETE (SyncAllowed fallback, no SyncFinished) ***")
+                DebugLog.write("atc.finishSync.done", "via=SyncAllowed_fallback elapsed=\(Int(Date().timeIntervalSince(start)))s")
+                stopDrainer()
+                return
             }
             Thread.sleep(forTimeInterval: 0.2)
         }
         log("  SyncFinished not received (120 s timeout)")
+        DebugLog.write("atc.finishSync.timeout", "elapsed=120s")
         stopDrainer()
     }
 
@@ -688,8 +753,10 @@ class ATCSession {
                 if self.verbose { NSLog("ATC drainer: << %@", name) }
                 if name == "Ping" {
                     self.sendPong()
+                    DebugLog.write("atc.drainer", "Ping → Pong")
                     continue
                 }
+                DebugLog.write("atc.drainer", "<< \(name)")
                 self.inboxLock.lock()
                 self.inbox.append(name)
                 self.inboxLock.unlock()

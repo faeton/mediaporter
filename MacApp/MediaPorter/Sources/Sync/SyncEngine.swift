@@ -217,6 +217,10 @@ final class RegisterSession {
         session?.abandonAsset(assetID: assetID)
     }
 
+    func sendProgress(assetID: Int, fraction: Double) {
+        session?.sendProgress(assetID: assetID, fraction: fraction)
+    }
+
     func finish() {
         session?.finishSync()
         afc?.close(); afc = nil

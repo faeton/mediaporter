@@ -56,6 +56,12 @@ case "pull":
     guard argv.count >= 3 else { usage() }
     let local = argv.count >= 4 ? argv[3] : (argv[2] as NSString).lastPathComponent
     runPull(remote: argv[2], local: local)
+case "ls":
+    guard argv.count >= 3 else { usage() }
+    runLs(remote: argv[2])
+case "stat":
+    guard argv.count >= 3 else { usage() }
+    runStat(remote: argv[2])
 case "gate-test":
     guard argv.count >= 4 else { usage() }
     var sleepSec: Double = 60
@@ -180,6 +186,48 @@ func runPull(remote: String, local: String) {
     }
     let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
     print("\(remote) -> \(url.path) (\(size) bytes)")
+}
+
+// MARK: - ls / stat
+
+func runLs(remote: String) {
+    let device: DeviceInfo
+    do { device = try discoverDevice() }
+    catch {
+        FileHandle.standardError.write(Data("no device: \(error)\n".utf8))
+        exit(1)
+    }
+    do {
+        let entries = try listDeviceDirectory(remote, device: device)
+        if entries.isEmpty {
+            print("(empty or missing: \(remote))")
+        } else {
+            for e in entries.sorted() { print(e) }
+        }
+    } catch {
+        FileHandle.standardError.write(Data("ls failed: \(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+}
+
+func runStat(remote: String) {
+    let device: DeviceInfo
+    do { device = try discoverDevice() }
+    catch {
+        FileHandle.standardError.write(Data("no device: \(error)\n".utf8))
+        exit(1)
+    }
+    do {
+        if let sz = try statDeviceFile(remote, device: device) {
+            print("\(remote): \(sz) bytes")
+        } else {
+            print("\(remote): MISSING")
+            exit(2)
+        }
+    } catch {
+        FileHandle.standardError.write(Data("stat failed: \(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
 }
 
 // MARK: - streaming-test (plan #8 validation)

@@ -61,24 +61,50 @@ struct DeviceColumnView: View {
     }
 
     private var sendButton: some View {
-        let pendingCount = jobs.filter { $0.status == .analyzed || $0.status == .ready }.count
-        return Button(action: onSend) {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 11, weight: .bold))
-                Text("Send \(pendingCount) to \(deviceClassLabel)")
-                    .font(.system(size: 13, weight: .semibold))
-            }
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 10).fill(accent.solid)
-            )
-            .shadow(color: accent.solid.opacity(0.4), radius: 6, y: 2)
-            .contentShape(Rectangle())
+        // Match runPipelined()'s filter: skip jobs flagged as duplicateOnDevice
+        // unless the user has opted in to syncDespiteDuplicate. Without this,
+        // the button shows "Send 1" but click does nothing.
+        let analyzedJobs = jobs.filter { $0.status == .analyzed || $0.status == .ready }
+        let eligible = analyzedJobs.filter {
+            !($0.duplicateOnDevice == true && !$0.syncDespiteDuplicate)
         }
-        .buttonStyle(.plain)
+        let skippedCount = analyzedJobs.count - eligible.count
+        let allSkipped = eligible.isEmpty && skippedCount > 0
+
+        return VStack(spacing: 6) {
+            Button(action: onSend) {
+                HStack(spacing: 6) {
+                    if !allSkipped {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 11, weight: .bold))
+                    }
+                    Text(allSkipped
+                         ? "\(skippedCount) \(skippedCount == 1 ? "file" : "files") already on device"
+                         : "Send \(eligible.count) to \(deviceClassLabel)")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .foregroundStyle(allSkipped ? theme.textDim : .white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(allSkipped ? theme.pill : accent.solid)
+                )
+                .shadow(color: allSkipped ? .clear : accent.solid.opacity(0.4), radius: 6, y: 2)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(allSkipped)
+            .help(allSkipped ? "Click the “on device” badge on a row to sync it anyway" : "")
+
+            if allSkipped {
+                Text("Click the “on device” badge to sync anyway")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textFaint)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private func deviceBlock(info: DeviceInfo) -> some View {

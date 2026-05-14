@@ -214,3 +214,19 @@ public func pullDeviceFile(remote: String, to local: URL, device: DeviceInfo) th
     let data = try client.readFile(remote)
     try data.write(to: local)
 }
+
+/// List a remote AFC directory. Returns entry names (no path prefix). Empty
+/// array if path doesn't exist. Public wrapper for CLI debug.
+public func listDeviceDirectory(_ path: String, device: DeviceInfo) throws -> [String] {
+    let client = try AFCClient(device: device)
+    defer { client.close() }
+    return client.listDirectory(path)
+}
+
+/// Stat a remote AFC path. Returns st_size or nil if missing/inaccessible.
+/// Public wrapper for CLI debug.
+public func statDeviceFile(_ path: String, device: DeviceInfo) throws -> Int64? {
+    let client = try AFCClient(device: device)
+    defer { client.close() }
+    return client.fileSize(path)
+}

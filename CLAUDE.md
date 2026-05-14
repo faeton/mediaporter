@@ -19,6 +19,7 @@ Non-obvious — breaking any silently fails. Trace-level evidence in `research/d
 11. **ffmpeg .m4v output needs `-f mp4`** (the `.m4v` extension picks the ipod muxer which can't do HEVC). HEVC copy still needs `-tag:v hvc1`.
 12. **ffmpeg subprocess gotchas**: drain stderr in a thread (full pipe deadlocks ffmpeg); set stdin to `/dev/null` (else SIGTTIN freezes); register Process / Popen handles globally so Cancel can reach them.
 13. **Artwork via Airlock**: poster JPEG → `/Airlock/Media/Artwork/<AssetID>` + `artwork_cache_id` in plist item dict.
+14. **`SyncAllowed` is NOT `SyncFinished`**. `SyncAllowed` arrives early (after MetadataSyncFinished / FileBegin) as "you may proceed" and accumulates in the drainer inbox during long uploads. Only `SyncFinished` confirms medialibraryd has committed the row. Treating `SyncAllowed` as terminal returns before the bind → row exists with `base_location_id=0`, file gets swept by background GC, TV.app shows the title with no playable file. Detail: `research/docs/HISTORY.md` "2026-05-14 — SyncAllowed is NOT terminal".
 
 ## References
 
