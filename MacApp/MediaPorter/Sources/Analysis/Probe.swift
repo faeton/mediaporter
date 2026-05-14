@@ -179,6 +179,12 @@ public func probeFile(url: URL) async throws -> MediaInfo {
         let tags = s["tags"] as? [String: String] ?? [:]
         let disposition = s["disposition"] as? [String: Any] ?? [:]
 
+        // Older AVI / re-encode files have no `TAG:language` — ffprobe returns
+        // nil and the UI shows "Unknown" even though the title field carries
+        // strong hints (Cyrillic dubber names → rus, Japanese title → jpn).
+        // Infer from script when the explicit tag is missing.
+        let inferredLang = tags["language"] ?? inferLanguageFromTitle(tags["title"])
+
         let stream = StreamInfo(
             index: s["index"] as? Int ?? 0,
             codecType: codecType,
@@ -191,7 +197,7 @@ public func probeFile(url: URL) async throws -> MediaInfo {
             channelLayout: s["channel_layout"] as? String,
             sampleRate: Int(s["sample_rate"] as? String ?? ""),
             bitRate: Int(s["bit_rate"] as? String ?? ""),
-            language: tags["language"],
+            language: inferredLang,
             title: tags["title"],
             isDefault: disposition["default"] as? Int == 1,
             isForced: disposition["forced"] as? Int == 1,
@@ -215,4 +221,41 @@ public func probeFile(url: URL) async throws -> MediaInfo {
         audioStreams: audio,
         subtitleStreams: subtitle
     )
+}
+
+/// Best-effort language inference from a stream title when ffprobe couldn't
+/// extract an explicit `TAG:language`. AVI / older re-encodes carry no
+/// language tag at all, but the title often contains script-specific
+/// characters (Cyrillic dubber names → rus, Japanese title → jpn) that pin
+/// the track's source language down well enough for cluster matching. Returns
+/// ISO 639-2 codes so downstream lang normalization sees consistent values.
+///
+/// Conservative on purpose: only fires when the title contains characters
+/// from a single, unambiguous script. A track titled "Russian dub" stays
+/// "und" — the user can still pick by title in the UI.
+func inferLanguageFromTitle(_ rawTitle: String?) -> String? {
+    guard let title = rawTitle, !title.isEmpty else { return nil }
+    var hasCyrillic = false
+    var hasHiragana = false
+    var hasKatakana = false
+    var hasHangul = false
+    var hasCJK = false
+    for scalar in title.unicodeScalars {
+        let v = scalar.value
+        switch v {
+        case 0x0400...0x04FF, 0x0500...0x052F: hasCyrillic = true
+        case 0x3040...0x309F: hasHiragana = true
+        case 0x30A0...0x30FF: hasKatakana = true
+        case 0xAC00...0xD7AF, 0x1100...0x11FF, 0x3130...0x318F: hasHangul = true
+        case 0x4E00...0x9FFF: hasCJK = true
+        default: break
+        }
+    }
+    if hasCyrillic { return "rus" }
+    // Hiragana / Katakana are kana → Japanese. CJK alone could be Chinese,
+    // but combined with kana confirms Japanese.
+    if hasHiragana || hasKatakana { return "jpn" }
+    if hasHangul { return "kor" }
+    if hasCJK { return "chi" }
+    return nil
 }

@@ -50,3 +50,37 @@ public enum LanguageCodes {
         return raw
     }
 }
+
+/// Manual-pick language menu offered when ffprobe found no language tag.
+/// Same shortlist as the App-side Settings → OpenSubtitles language picker —
+/// any of these maps to ISO 639-2/T for ffmpeg + iOS audio-switcher labelling.
+public enum AudioLanguageOptions {
+    public struct Option: Sendable {
+        public let code: String   // ISO 639-2/T
+        public let label: String
+    }
+
+    public static let common: [Option] = [
+        Option(code: "eng", label: "English"),
+        Option(code: "rus", label: "Russian"),
+        Option(code: "jpn", label: "Japanese"),
+        Option(code: "ukr", label: "Ukrainian"),
+        Option(code: "spa", label: "Spanish"),
+        Option(code: "fra", label: "French"),
+        Option(code: "deu", label: "German"),
+        Option(code: "ita", label: "Italian"),
+        Option(code: "por", label: "Portuguese"),
+        Option(code: "pol", label: "Polish"),
+        Option(code: "zho", label: "Chinese"),
+        Option(code: "kor", label: "Korean"),
+        Option(code: "tur", label: "Turkish"),
+        Option(code: "ara", label: "Arabic"),
+    ]
+
+    /// Return a user-friendly label for a stored ISO code if it's one we
+    /// know, otherwise nil so the caller can fall back to the raw string.
+    public static func label(for code: String) -> String? {
+        let normalized = LanguageCodes.toIso6392T(code) ?? code.lowercased()
+        return common.first { $0.code == normalized }?.label
+    }
+}

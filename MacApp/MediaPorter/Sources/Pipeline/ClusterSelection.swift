@@ -52,6 +52,13 @@ public struct ClusterSelection: Sendable, Equatable {
     public var defaultAudioStudio: String?
     public var includedSubLabels: Set<String> = []
 
+    /// Audio-track language tags the user supplied because ffprobe couldn't.
+    /// Keyed by position in `mediaInfo.audioStreams` (0-based). Position-based
+    /// (not (lang, codec)-based) on purpose — every sibling episode usually
+    /// has the same audio layout, so "track #0 is rus, track #1 is jpn"
+    /// propagates cleanly. Empty = no overrides for this cluster.
+    public var audioLanguageOverrides: [Int: String] = [:]
+
     public init() {}
 }
 
@@ -85,6 +92,8 @@ public extension ClusterSelection {
         sel.subs = .langCodecs(sPairs)
 
         sel.maxResolution = job.maxResolution
+
+        sel.audioLanguageOverrides = job.audioLanguageOverrides
 
         switch job.burnInSubtitle {
         case .embedded(let i):
@@ -142,6 +151,15 @@ public extension ClusterSelection {
     /// `externalTracksToMux` for the job's episode.
     func apply(to job: FileJob, extras: ReleaseExtras? = nil) {
         guard let info = job.mediaInfo else { return }
+
+        // Audio language overrides propagate verbatim by position. Siblings
+        // with fewer audio streams silently drop the unmatched entries —
+        // dropping is benign (track doesn't exist to tag).
+        var carriedOverrides: [Int: String] = [:]
+        for (idx, lang) in audioLanguageOverrides where idx < info.audioStreams.count {
+            carriedOverrides[idx] = lang
+        }
+        job.audioLanguageOverrides = carriedOverrides
 
         switch audio {
         case .all:
@@ -257,8 +275,13 @@ public extension ClusterSelection {
 }
 
 /// Derive an `EpisodeKey` for the job from its parsed filename. Used to
-/// look up per-episode dub / sub paths in `ReleaseExtras.dubs/subs`.
+/// look up per-episode dub / sub paths in `ReleaseExtras.dubs/subs`. Honors
+/// the sibling-detected override (`FileJob.parsedOverride`) so plain
+/// "Show Name 01.avi" releases match without needing a regex anchor.
 private func episodeKey(for job: FileJob) -> EpisodeKey? {
+    if let p = job.parsedOverride, let s = p.season, let n = p.episode {
+        return EpisodeKey(season: s, episode: n)
+    }
     let parsed = FilenameParser.parse(job.fileName)
     guard let s = parsed.season, let n = parsed.episode else { return nil }
     return EpisodeKey(season: s, episode: n)

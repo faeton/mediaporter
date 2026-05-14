@@ -594,10 +594,7 @@ struct FileRowView: View {
                     SelectableLine(checked: on, theme: theme, accent: accent,
                                    onTap: { toggleAudio(i) }) {
                         HStack(spacing: 8) {
-                            Text(a.language ?? "Unknown")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(theme.text)
-                                .frame(minWidth: 80, alignment: .leading)
+                            audioLanguagePicker(streamIdx: i, audio: a)
                             Text("\(a.codecName.uppercased()) \(channelsLabel(a.channels ?? 2))")
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(theme.textDim)
@@ -933,6 +930,67 @@ struct FileRowView: View {
             job.selectedAudio.remove(at: idx)
         } else {
             job.selectedAudio = (job.selectedAudio + [i]).sorted()
+        }
+        didChangeClusterSelection()
+    }
+
+    /// Language label for an audio track. Order of precedence: user override,
+    /// ffprobe-extracted language (real or script-inferred), "Unknown". Used
+    /// in both the displayed label and the cluster propagation flow.
+    private func audioLanguageDisplay(_ a: StreamInfo, streamIdx: Int) -> String {
+        if let lo = job.audioLanguageOverrides[streamIdx], !lo.isEmpty {
+            return AudioLanguageOptions.label(for: lo) ?? lo.uppercased()
+        }
+        if let lang = a.language, !lang.isEmpty, lang.lowercased() != "und" {
+            return AudioLanguageOptions.label(for: lang) ?? lang.capitalized
+        }
+        return "Unknown"
+    }
+
+    /// Click-to-pick label for the audio track's language. Shows the
+    /// resolved name (override → probe → "Unknown") and opens a Menu of
+    /// common languages on click. Picking a language sets the override on
+    /// the job and routes through `didChangeClusterSelection()` so the same
+    /// "Apply to all N episodes?" popover surfaces for cluster propagation.
+    @ViewBuilder
+    private func audioLanguagePicker(streamIdx: Int, audio: StreamInfo) -> some View {
+        let label = audioLanguageDisplay(audio, streamIdx: streamIdx)
+        let isOverride = job.audioLanguageOverrides[streamIdx] != nil
+        Menu {
+            ForEach(AudioLanguageOptions.common, id: \.code) { opt in
+                Button(opt.label) { setAudioLanguage(streamIdx: streamIdx, code: opt.code) }
+            }
+            if isOverride {
+                Divider()
+                Button("Clear override", role: .destructive) {
+                    setAudioLanguage(streamIdx: streamIdx, code: nil)
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(label == "Unknown" ? theme.textDim : theme.text)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(theme.textFaint)
+            }
+            .frame(minWidth: 80, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(isOverride
+            ? "Language set manually — applies to the M4V tag and the iOS audio switcher. Click to change."
+            : "ffprobe couldn't find a language tag. Click to set one manually.")
+    }
+
+    private func setAudioLanguage(streamIdx: Int, code: String?) {
+        if let code, !code.isEmpty {
+            job.audioLanguageOverrides[streamIdx] = code
+        } else {
+            job.audioLanguageOverrides.removeValue(forKey: streamIdx)
         }
         didChangeClusterSelection()
     }

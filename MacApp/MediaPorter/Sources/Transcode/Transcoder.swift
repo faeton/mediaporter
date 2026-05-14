@@ -69,7 +69,7 @@ final class ActiveProcesses: @unchecked Sendable {
 /// Thread-safe rolling-tail buffer for ffmpeg stderr. Keeps the last N lines so we can
 /// include them in error messages without letting the 64 KB OS pipe fill up and deadlock
 /// ffmpeg's write(2). Mirrors transcode.py's stderr-drain thread.
-private final class StderrTail: @unchecked Sendable {
+final class StderrTail: @unchecked Sendable {
     private let lock = NSLock()
     private var lines: [String] = []
     private let maxLines: Int
@@ -161,7 +161,8 @@ public enum Transcoder {
         selectedSubtitles: [Int]? = nil,
         externalSubs: [ExternalSubtitle] = [],
         burnIn: BurnInSubtitle? = nil,
-        originalLanguageFallback: String? = nil
+        originalLanguageFallback: String? = nil,
+        audioLanguageOverrides: [Int: String] = [:]
     ) -> [String] {
         let langFallback = LanguageCodes.toIso6392T(originalLanguageFallback)
         guard let ffmpeg = FFmpegLocator.ffmpeg else { return [] }
@@ -359,12 +360,18 @@ public enum Transcoder {
                 cmd += ["-c:a:\(outIdx)", "copy"]
             }
 
-            // Audio metadata. Embedded `language` tag wins; "und" / nil
-            // falls back to the title's TMDb `original_language` so the iOS
-            // switcher doesn't surface every untagged track as "Unknown".
+            // Audio metadata. Precedence: user override (set via the in-UI
+            // language picker when ffprobe couldn't extract a tag) →
+            // embedded `language` tag from the source → TMDb
+            // `original_language` fallback → "und". This makes a single
+            // click on a "Russian" override stick through the M4V's
+            // metadata and the iOS audio-language switcher.
+            let userOverride = LanguageCodes.toIso6392T(audioLanguageOverrides[audioIdx])
             let probed = aa.stream.language?.lowercased()
             let lang: String
-            if let probed, !probed.isEmpty, probed != "und" {
+            if let userOverride, !userOverride.isEmpty, userOverride != "und" {
+                lang = userOverride
+            } else if let probed, !probed.isEmpty, probed != "und" {
                 lang = probed
             } else {
                 lang = langFallback ?? "und"
@@ -437,6 +444,7 @@ public enum Transcoder {
         externalSubs: [ExternalSubtitle] = [],
         burnIn: BurnInSubtitle? = nil,
         originalLanguageFallback: String? = nil,
+        audioLanguageOverrides: [Int: String] = [:],
         progress: ((Double) -> Void)? = nil
     ) async throws -> URL {
         guard let ffmpeg = FFmpegLocator.ffmpeg else { throw TranscodeError.ffmpegNotFound }
@@ -454,7 +462,8 @@ public enum Transcoder {
             selectedSubtitles: selectedSubtitles,
             externalSubs: externalSubs,
             burnIn: burnIn,
-            originalLanguageFallback: originalLanguageFallback
+            originalLanguageFallback: originalLanguageFallback,
+            audioLanguageOverrides: audioLanguageOverrides
         )
 
         guard !cmd.isEmpty else { throw TranscodeError.ffmpegNotFound }

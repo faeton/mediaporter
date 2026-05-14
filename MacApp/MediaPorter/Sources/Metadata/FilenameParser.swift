@@ -79,6 +79,65 @@ enum FilenameParser {
         parseInternal(filename).parsed
     }
 
+    /// Plain-numbered fallback for anime / torrent re-encodes that don't carry
+    /// any S## / [Group] / year hints — files like "Jujutsu Kaisen 01.avi",
+    /// "Show.Name.05.mkv". Gated on `knownPrefixes` containing the cleaned
+    /// title (normalized lowercase, separator-collapsed) so a single
+    /// "Apollo 13.mkv" sitting alone in a folder doesn't get misclassified.
+    /// `PipelineController.addFiles(urls:)` computes the prefix set from
+    /// ≥3 siblings sharing the same title prefix.
+    static func parsePlainNumbered(
+        filename: String,
+        knownPrefixes: Set<String>
+    ) -> ParsedFilename? {
+        let stem: String
+        if let dotIdx = filename.lastIndex(of: ".") {
+            stem = String(filename[..<dotIdx])
+        } else {
+            stem = filename
+        }
+        let range = NSRange(stem.startIndex..., in: stem)
+        guard let match = plainNumberedPattern.firstMatch(in: stem, range: range) else {
+            return nil
+        }
+        let rawTitle = extractGroup(stem, match: match, group: 1)
+        let cleaned = cleanTitle(rawTitle)
+        guard knownPrefixes.contains(normalizePrefix(cleaned)) else { return nil }
+        let episode = Int(extractGroup(stem, match: match, group: 2))
+        return ParsedFilename(
+            title: cleaned,
+            year: nil,
+            season: 1,
+            episode: episode,
+            mediaType: .tvShow
+        )
+    }
+
+    /// Trailing 1-3 digit episode number with separator. Movie pattern would
+    /// have matched first if a 4-digit year was present, so this only sees
+    /// year-less stems.
+    private static let plainNumberedPattern = try! NSRegularExpression(
+        pattern: #"^(.+?)[\s._-]+(\d{1,3})$"#
+    )
+
+    /// Normalize a title for prefix-matching: lowercase + collapse
+    /// dot/underscore/dash/space runs to single spaces. Lets the matcher treat
+    /// "Jujutsu Kaisen", "Jujutsu.Kaisen", "Jujutsu_Kaisen" as the same prefix.
+    static func normalizePrefix(_ s: String) -> String {
+        let lowered = s.lowercased()
+        var out = ""
+        var prevSep = true
+        for ch in lowered {
+            if ch == "." || ch == "_" || ch == "-" || ch == " " {
+                if !prevSep { out.append(" "); prevSep = true }
+            } else {
+                out.append(ch)
+                prevSep = false
+            }
+        }
+        return out.trimmingCharacters(in: .whitespaces)
+    }
+
     private static func parseInternal(_ filename: String) -> (parsed: ParsedFilename, seasonExplicit: Bool) {
         // Strip extension
         let name: String

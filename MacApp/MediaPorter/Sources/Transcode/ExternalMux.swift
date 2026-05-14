@@ -64,9 +64,22 @@ public enum ExternalMux {
             inputs.append((ref.path, ref))
         }
 
+        // Probe source for original audio + sub stream counts (cheap, ~50 ms)
+        // and to gate per-codec workarounds below. Used to live further down,
+        // hoisted up because the input flags depend on what the source is.
+        let sourceInfo = try await probeFile(url: sourceVideo)
+        let origAudioCount = sourceInfo.audioStreams.count
+        let origSubCount = sourceInfo.subtitleStreams.count
+        let sourceVideoCodec = sourceInfo.videoStreams.first?.codecName.lowercased() ?? ""
+
         // Build ffmpeg command.
         // Index 0 = source video. inputs[i] starts at ffmpeg input index i+1.
-        var cmd: [String] = ["-y", "-i", sourceVideo.path]
+        //
+        // `-fflags +genpts`: AVI carries no real PTS, only DTS. Without this
+        // matroska's muxer rejects copy-mode packets with "Invalid argument"
+        // (EINVAL = -22) because it can't interleave streams without PTS.
+        // Benign for every other container — they already have PTS.
+        var cmd: [String] = ["-y", "-fflags", "+genpts", "-i", sourceVideo.path]
         for (url, _) in inputs { cmd.append("-i"); cmd.append(url.path) }
 
         // Keep only video/audio/sub from source. `-map 0` pulled attached_pic,
@@ -94,6 +107,22 @@ public enum ExternalMux {
         // pre-pass; downstream transcode will retag containers as needed.
         cmd.append("-c"); cmd.append("copy")
 
+        // `-avoid_negative_ts make_zero`: AVI's synthesised PTS sometimes
+        // start at a non-zero or negative offset (from BFrames being out-of-
+        // order in DTS-only containers). matroska treats those as invalid
+        // and aborts the stream copy.
+        cmd.append("-avoid_negative_ts"); cmd.append("make_zero")
+
+        // `-bsf:v mpeg4_unpack_bframes`: DivX/Xvid in AVI uses the "packed
+        // bitstream" format — B-frames are smuggled inside the previous
+        // P-frame packet, and the AVI demuxer hands them out as-is. Matroska
+        // rejects those compound packets ("Error submitting a packet to the
+        // muxer: Invalid argument"). The bsf unpacks them into separate
+        // frame packets that mkv accepts. Codec-specific, so gated.
+        if sourceVideoCodec == "mpeg4" {
+            cmd.append("-bsf:v"); cmd.append("mpeg4_unpack_bframes")
+        }
+
         // Metadata + disposition. The audio streams from the source come
         // first; appended dubs are audio streams [orig_audio_count ...].
         // Subs similarly stack after the source's subtitle streams. We
@@ -120,11 +149,6 @@ public enum ExternalMux {
             // simplest correct path: probe the source for audio count once.
             _ = ref
         }
-
-        // Probe source for original audio + sub stream counts (cheap, ~50 ms).
-        let sourceInfo = try await probeFile(url: sourceVideo)
-        let origAudioCount = sourceInfo.audioStreams.count
-        let origSubCount = sourceInfo.subtitleStreams.count
 
         for (_, ref) in inputs {
             switch ref.kind {
@@ -155,41 +179,69 @@ public enum ExternalMux {
 
         cmd.append(outputPath.path)
 
-        let proc = Process()
-        proc.executableURL = ffmpeg
-        proc.arguments = cmd
-        let errPipe = Pipe()
-        proc.standardError = errPipe
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardInput = FileHandle.nullDevice
-
-        ActiveProcesses.shared.add(proc)
-        defer { ActiveProcesses.shared.remove(proc) }
-        try proc.run()
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else {
-            let data = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let tail = String(data: data, encoding: .utf8)?.suffix(800) ?? ""
-            throw ExternalMuxError.failed(String(tail))
-        }
+        DebugLog.write("ffmpeg.extmux", ffmpeg.path + " " + cmd.joined(separator: " "))
+        try await runFfmpeg(ffmpeg: ffmpeg, arguments: cmd, errorPrefix: "")
     }
 
     private static func convertAssToSrt(input: URL, output: URL, ffmpeg: URL) async throws {
+        let args = ["-y", "-i", input.path, output.path]
+        DebugLog.write("ffmpeg.extmux.ass2srt", ffmpeg.path + " " + args.joined(separator: " "))
+        try await runFfmpeg(ffmpeg: ffmpeg, arguments: args, errorPrefix: "ass→srt: ")
+    }
+
+    /// Run an ffmpeg subprocess with a rolling stderr drain, a termination
+    /// continuation (not `waitUntilExit`, which can hang when the caller has
+    /// no runloop), and a final post-exit pipe flush. Mirrors the pattern in
+    /// `Transcoder.transcode` so a fast-failing or chatty ffmpeg can never:
+    ///   - deadlock by filling its 64 KB stderr pipe, or
+    ///   - throw `External-track mux failed:` with an empty tail because the
+    ///     readabilityHandler hadn't observed the last bytes yet.
+    private static func runFfmpeg(
+        ffmpeg: URL,
+        arguments: [String],
+        errorPrefix: String
+    ) async throws {
         let proc = Process()
         proc.executableURL = ffmpeg
-        proc.arguments = ["-y", "-i", input.path, output.path]
+        proc.arguments = arguments
         let errPipe = Pipe()
         proc.standardError = errPipe
         proc.standardOutput = FileHandle.nullDevice
         proc.standardInput = FileHandle.nullDevice
-        ActiveProcesses.shared.add(proc)
-        defer { ActiveProcesses.shared.remove(proc) }
-        try proc.run()
-        proc.waitUntilExit()
+
+        let tail = StderrTail()
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+            } else {
+                tail.append(data)
+            }
+        }
+
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            proc.terminationHandler = { _ in cont.resume() }
+            do {
+                try proc.run()
+                ActiveProcesses.shared.add(proc)
+            } catch {
+                proc.terminationHandler = nil
+                tail.append(Data("spawn failed: \(error.localizedDescription)\n".utf8))
+                cont.resume()
+            }
+        }
+        ActiveProcesses.shared.remove(proc)
+
+        errPipe.fileHandleForReading.readabilityHandler = nil
+        let remaining = errPipe.fileHandleForReading.readDataToEndOfFile()
+        if !remaining.isEmpty { tail.append(remaining) }
+
         guard proc.terminationStatus == 0 else {
-            let data = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let tail = String(data: data, encoding: .utf8)?.suffix(400) ?? ""
-            throw ExternalMuxError.failed("ass→srt: \(tail)")
+            let errOutput = tail.joined()
+            let lastLines = errOutput.split(separator: "\n").suffix(8).joined(separator: "\n")
+            let detail = lastLines.isEmpty ? "exit code \(proc.terminationStatus)"
+                                           : "exit code \(proc.terminationStatus)\n\(lastLines)"
+            throw ExternalMuxError.failed("\(errorPrefix)\(detail)")
         }
     }
 }

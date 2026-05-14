@@ -43,6 +43,14 @@ public class FileJob: Identifiable {
     public let fileName: String
     public let fileSize: Int
 
+    /// Sibling-aware filename interpretation. Set by
+    /// `PipelineController.addFiles` when plain-numbered "Show Name NN" files
+    /// are detected from sibling shape — the raw FilenameParser can't recover
+    /// season/episode/title from those on its own. nil for files the regex
+    /// parser already handled (S01E02, [Group], year). Internal because
+    /// `ParsedFilename` is module-internal.
+    var parsedOverride: ParsedFilename?
+
     public var status: JobStatus = .pending
     public var error: String?
     public var progress: Double = 0  // 0.0–1.0
@@ -82,6 +90,15 @@ public class FileJob: Identifiable {
     /// is rewritten to `.embedded(idx)`. ISO-639 normalized; nil = no
     /// deferred burn-in.
     public var pendingBurnInExtraLang: String?
+
+    /// User-supplied language tag per audio-stream position (key = index into
+    /// `mediaInfo.audioStreams`). Used when ffprobe couldn't extract a real
+    /// language tag — common for AVI re-encodes where the container has no
+    /// language field. The override is consulted by the transcoder's
+    /// `-metadata:s:a:N language=...`, by cluster-selection capture, and by
+    /// the UI display, in that order. Empty when the user hasn't touched it.
+    /// Propagates cluster-wide through `ClusterSelection`.
+    public var audioLanguageOverrides: [Int: String] = [:]
 
     // User selections (populated after analysis)
     public var selectedAudio: [Int] = []          // indices into audioStreams

@@ -183,12 +183,36 @@ public class PipelineController {
     // MARK: - File Management
 
     public func addFiles(urls: [URL]) {
-        let filtered = urls.filter { Self.videoExtensions.contains($0.pathExtension.lowercased()) }
+        // Expand dropped directories. Without this, dragging a season folder
+        // ("Jujutsu Kaisen/") onto the app silently no-ops because the URL has
+        // no video extension and gets filtered out below. Depth-bounded so a
+        // dropped `~/Movies` tree doesn't take forever.
+        let expanded = expandDroppedURLs(urls, maxDepth: 6)
+        let filtered = expanded.filter { Self.videoExtensions.contains($0.pathExtension.lowercased()) }
         let existing = Set(jobs.map(\.inputURL))
-        let newJobs = filtered
-            .filter { !existing.contains($0) }
-            .map { FileJob(url: $0) }
+        let newURLs = filtered.filter { !existing.contains($0) }
+
+        // Sibling-aware "Show Name NN" detection. The standard regex misses
+        // plain-numbered anime / re-encode releases (no S##, no [Group], no
+        // year). When ≥3 sibling video files in the same folder share a title
+        // prefix and end in 1-3 digits, treat them as TV season 1 — drives
+        // clustering + ExternalTrackScanner. Re-evaluated against the union of
+        // existing jobs + new URLs so a second batch dropped into the same
+        // folder counts toward the sibling floor.
+        detectPlainNumberedSeasons(amongAll: existing.union(newURLs))
+
+        let newJobs = newURLs.map { url -> FileJob in
+            let job = FileJob(url: url)
+            job.parsedOverride = filenameOverrides[url]
+            return job
+        }
+        // Also retro-tag existing jobs that just became part of a sibling group
+        // big enough to trigger plain-numbered detection (second-batch case).
+        for job in jobs where filenameOverrides[job.inputURL] != nil {
+            job.parsedOverride = filenameOverrides[job.inputURL]
+        }
         jobs.append(contentsOf: newJobs)
+        sortJobs()
         if selectedJobID == nil, let first = jobs.first {
             selectedJobID = first.id
         }
@@ -201,6 +225,186 @@ public class PipelineController {
         if !newJobs.isEmpty, jobs.contains(where: { $0.status == .pending }) {
             Task { await self.analyzeAll() }
         }
+    }
+
+    /// Per-parent-dir title prefixes for plain-numbered TV releases, populated
+    /// by `detectPlainNumberedSeasons`. Used by `parseFilename(for:)` and by
+    /// `ExternalTrackScanner` so sidecar subs in a `Subs/` subfolder match the
+    /// same prefix rule as their sibling videos.
+    public var clusterTitlePrefixes: [URL: Set<String>] = [:]
+
+    /// URLs → forced ParsedFilename when sibling detection identified a TV
+    /// release the regex parser couldn't. Lookup-driven so the existing
+    /// `FilenameParser.parse(job.fileName)` call sites stay simple.
+    /// (Internal: `ParsedFilename` is module-internal.)
+    var filenameOverrides: [URL: ParsedFilename] = [:]
+
+    /// Centralized filename → ParsedFilename for jobs. Always prefer the
+    /// sibling-detected override; otherwise consult the parent folder for a
+    /// "Season N" hint, then fall back to the regex parser.
+    func parseFilename(for job: FileJob) -> ParsedFilename {
+        if let forced = job.parsedOverride ?? filenameOverrides[job.inputURL] {
+            return forced
+        }
+        let parentName = job.inputURL.deletingLastPathComponent().lastPathComponent
+        return FilenameParser.parse(job.fileName, parentDir: parentName)
+    }
+
+    /// Re-order `jobs` so episodes of the same show stay together and the
+    /// season / episode order matches viewer expectations (S01E01 before
+    /// S01E02 before S01E16). FileManager.enumerator gives no ordering
+    /// guarantee, so without this step a folder drop renders in inode order.
+    /// Grouping uses `clusterID` once analyze ran, otherwise the parsed title
+    /// (override-aware) — so plain-numbered "Show NN" files cluster visually
+    /// even before TMDb resolves.
+    func sortJobs() {
+        jobs.sort { lhs, rhs in
+            let lk = sortKey(for: lhs)
+            let rk = sortKey(for: rhs)
+            if lk.group != rk.group { return lk.group < rk.group }
+            if lk.season != rk.season { return lk.season < rk.season }
+            if lk.episode != rk.episode { return lk.episode < rk.episode }
+            return lhs.fileName.localizedStandardCompare(rhs.fileName) == .orderedAscending
+        }
+    }
+
+    private func sortKey(for job: FileJob) -> (group: String, season: Int, episode: Int) {
+        let parsed = parseFilename(for: job)
+        let group: String
+        if let cid = job.clusterID, !cid.isEmpty {
+            group = cid.lowercased()
+        } else if parsed.mediaType == .tvShow, !parsed.title.isEmpty {
+            group = parsed.title.lowercased()
+        } else {
+            // Movies / unrecognized: group by parent dir so they at least stay
+            // adjacent to anything else dropped from the same folder.
+            group = job.inputURL.deletingLastPathComponent().path.lowercased()
+        }
+        return (group, parsed.season ?? Int.max, parsed.episode ?? Int.max)
+    }
+
+    /// Recursively expand any directory URLs in the drop. Files pass through
+    /// unchanged. Symlinks are followed once, hidden files are skipped.
+    private func expandDroppedURLs(_ urls: [URL], maxDepth: Int) -> [URL] {
+        let fm = FileManager.default
+        var out: [URL] = []
+        for url in urls {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            if !isDir.boolValue {
+                out.append(url)
+                continue
+            }
+            guard let enumerator = fm.enumerator(
+                at: url,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            while let any = enumerator.nextObject() {
+                guard let child = any as? URL else { continue }
+                if enumerator.level > maxDepth { enumerator.skipDescendants(); continue }
+                if let isFile = try? child.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile,
+                   isFile {
+                    out.append(child)
+                }
+            }
+        }
+        return out
+    }
+
+    /// Look at every parent dir that holds ≥3 video files matching the same
+    /// `<Title>[ ._-]+(\d{1,3})$` shape but no S## / year markers. For each
+    /// such group, write a TV-tagged `ParsedFilename` into `filenameOverrides`
+    /// and register the normalized title in `clusterTitlePrefixes[parentDir]`.
+    /// The 3-sibling floor is the false-positive guard for stray titles like
+    /// "Apollo 13.mkv" — anime / TV seasons are always 6+ episodes.
+    private func detectPlainNumberedSeasons(amongAll allURLs: Set<URL>) {
+        // Group every video URL (including jobs already present) by parent dir
+        // so a second-batch drop into the same folder joins the existing
+        // sibling set instead of being measured in isolation.
+        let videoURLs = allURLs.filter { Self.videoExtensions.contains($0.pathExtension.lowercased()) }
+        let parents = Set(videoURLs.map { $0.deletingLastPathComponent().standardizedFileURL })
+
+        // Enrich each parent's sibling list with every video file actually
+        // present on disk in that folder. Without this, dropping a single
+        // file (`Jujutsu Kaisen 01.avi`) yields a sibling group of 1, fails
+        // the ≥3 floor, and never registers the title prefix — which means
+        // ExternalTrackScanner can't match `Rus subs/Jujutsu Kaisen 01.srt`
+        // either, because the sub matching also gates on the prefix. We
+        // only scan parents that already have a drop, so an unrelated TV
+        // folder elsewhere on disk doesn't get fingerprinted.
+        var byParent: [URL: [URL]] = [:]
+        for parent in parents {
+            var set = Set<URL>(videoURLs.filter {
+                $0.deletingLastPathComponent().standardizedFileURL == parent
+            })
+            if let items = try? FileManager.default.contentsOfDirectory(
+                at: parent,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) {
+                for url in items
+                    where Self.videoExtensions.contains(url.pathExtension.lowercased()) {
+                    set.insert(url.standardizedFileURL)
+                }
+            }
+            byParent[parent] = Array(set)
+        }
+
+        for (parent, siblings) in byParent {
+            // Group siblings by normalized title prefix → list of (URL, episode).
+            var prefixHits: [String: [(URL, Int, String)]] = [:]
+            for url in siblings {
+                let stdName = (url.lastPathComponent as NSString).deletingPathExtension
+                let standard = FilenameParser.parse(url.lastPathComponent)
+                // Skip files the regex parser already understood as TV — they
+                // don't need help. Movies pass through (in case a folder
+                // accidentally mixes 2 movies + 5 plain-numbered episodes
+                // from the same show, but that's rare enough to ignore).
+                if standard.mediaType == .tvShow,
+                   standard.season != nil, standard.episode != nil {
+                    continue
+                }
+                guard let (title, ep) = matchPlainNumberedShape(stdName) else { continue }
+                let key = FilenameParser.normalizePrefix(title)
+                guard !key.isEmpty else { continue }
+                prefixHits[key, default: []].append((url, ep, title))
+            }
+            for (prefix, hits) in prefixHits where hits.count >= 3 {
+                // Distinct trailing numbers — protect against a folder of
+                // alternate-language dubs all named "Show 01.mkv".
+                let distinctEpisodes = Set(hits.map(\.1))
+                guard distinctEpisodes.count >= 3 else { continue }
+                clusterTitlePrefixes[parent, default: []].insert(prefix)
+                for (url, ep, title) in hits {
+                    filenameOverrides[url] = ParsedFilename(
+                        title: title,
+                        year: nil,
+                        season: 1,
+                        episode: ep,
+                        mediaType: .tvShow
+                    )
+                }
+            }
+        }
+    }
+
+    /// Plain-numbered shape match for a stem (no extension). Returns the
+    /// cleaned title and the trailing episode number, or nil if it doesn't
+    /// look like "<title>[ ._-]+<NN>".
+    private func matchPlainNumberedShape(_ stem: String) -> (title: String, episode: Int)? {
+        let pattern = #"^(.+?)[\s._-]+(\d{1,3})$"#
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(stem.startIndex..., in: stem)
+        guard let m = re.firstMatch(in: stem, range: range),
+              let titleR = Range(m.range(at: 1), in: stem),
+              let epR = Range(m.range(at: 2), in: stem),
+              let ep = Int(stem[epR]) else { return nil }
+        let raw = String(stem[titleR])
+        let spaced = raw.replacingOccurrences(of: ".", with: " ")
+                        .replacingOccurrences(of: "_", with: " ")
+        let trimmed = spaced.trimmingCharacters(in: .whitespaces)
+        return (trimmed, ep)
     }
 
     public func removeJob(_ job: FileJob) {
@@ -323,7 +527,7 @@ public class PipelineController {
     /// Look up metadata for one job. TV files go through the cluster cache;
     /// movies use the existing per-file path.
     private func resolveJobMetadata(_ job: FileJob) async {
-        let parsed = FilenameParser.parse(job.fileName)
+        let parsed = parseFilename(for: job)
 
         if parsed.mediaType == .tvShow {
             let clusterID = TVShowCluster.key(showName: parsed.title, year: parsed.year)
@@ -645,7 +849,7 @@ public class PipelineController {
               show.tmdbShowID.map(String.init) ?? "nil",
               matching.count)
         for job in matching {
-            let parsed = FilenameParser.parse(job.fileName)
+            let parsed = parseFilename(for: job)
             let season = parsed.season ?? 1
             let episode = parsed.episode ?? 1
             let episodeID = String(format: "S%02dE%02d", season, episode)
@@ -937,8 +1141,11 @@ public class PipelineController {
             $0.inputURL.deletingLastPathComponent().standardizedFileURL
         }
         for (dir, jobsInDir) in pendingByDir {
-            let parsedFiles = jobsInDir.map { FilenameParser.parse($0.fileName) }
-            let extras = ExternalTrackScanner.scanRelease(sourceDir: dir, episodes: parsedFiles)
+            let parsedFiles = jobsInDir.map { parseFilename(for: $0) }
+            let titlePrefixes = clusterTitlePrefixes[dir.standardizedFileURL] ?? []
+            let extras = ExternalTrackScanner.scanRelease(
+                sourceDir: dir, episodes: parsedFiles, titlePrefixes: titlePrefixes
+            )
             guard !extras.isEmpty else { continue }
             // Map clusters that live in this dir (parse-time only; the
             // resolver runs again post-TMDb so cluster IDs are stable).
@@ -1005,6 +1212,10 @@ public class PipelineController {
 
         overallStatus = "Analysis complete"
         overallProgress = 1.0
+        // Re-sort once clusterIDs land — addFiles only had the regex-parser
+        // result, so plain-numbered files with the same title would group, but
+        // jobs whose cluster was disambiguated by TMDb get repositioned now.
+        sortJobs()
         isRunning = false
     }
 
@@ -1237,6 +1448,7 @@ public class PipelineController {
                         externalSubs: externalSubs,
                         burnIn: job.burnInSubtitle,
                         originalLanguageFallback: job.metadata?.originalLanguage,
+                        audioLanguageOverrides: job.audioLanguageOverrides,
                         progress: { pct in
                             let now = Date()
                             if pct < 1.0, now.timeIntervalSince(lastTranscodeUpdate) < 0.25 { return }
@@ -1574,12 +1786,70 @@ public class PipelineController {
             }
         }
 
+        // Parallel transcode lookahead. Without this, the upload pointer
+        // sat idle waiting for the *next* file's transcode after every
+        // upload — uploads on USB-C run at ~150 MB/s, transcodes at single-
+        // file pace, so the upload phase finished in 1/N the time of one
+        // transcode and then the whole pipeline stalled. Pre-spawn all
+        // transcodes gated by a small concurrency limit so K-1 files are
+        // already done by the time the upload loop arrives at them.
+        //
+        // K=2 is a deliberate floor: VideoToolbox media engines are a fixed
+        // resource (1 on base Apple Silicon, 2 on Pro/Max), software
+        // transcode is CPU-bound and benefits from full cores per file —
+        // running 2 in parallel keeps the next output queued without
+        // starving either path. Higher cores get a higher cap; capped at 4.
+        // Per-job transcode start time. Written from the worker task on
+        // MainActor (runTranscodeStep is @MainActor-isolated, the orchestrator
+        // hops onto it via `await self.runTranscodeStep`), read in the upload
+        // loop. Wall-clock per-file timing under parallelism is approximate
+        // by definition; we surface it for stats only.
+        var transcodeStartTimes: [Date] = Array(repeating: .distantPast, count: preparedPairs.count)
+        let readyGates: [TranscodeReadyGate] = preparedPairs.map { _ in TranscodeReadyGate() }
+        let parallelCap = max(2, min(4, ProcessInfo.processInfo.activeProcessorCount / 4))
+
+        // Orchestrator runs on MainActor so the transcodeStartTimes write
+        // and the runTranscodeStep call stay on a single isolation domain —
+        // no captures-across-actor warnings. The actual ffmpeg work happens
+        // inside Transcoder.transcode (nonisolated async), so MainActor only
+        // serializes the status flips around it.
+        let weakSelf = self
+        // Fire-and-forget — the upload loop awaits each readyGate, and
+        // cancellation is checked via cancelFlag + ActiveProcesses inside
+        // each task before spawning ffmpeg. No need to retain the handle.
+        _ = Task { @MainActor in
+            await withTaskGroup(of: Void.self) { group in
+                var pendingIdx = 0
+                func enqueueNext(_ group: inout TaskGroup<Void>) {
+                    while pendingIdx < preparedPairs.count {
+                        let i = pendingIdx
+                        pendingIdx += 1
+                        let job = preparedPairs[i].job
+                        if weakSelf.cancelFlag.get() {
+                            Task { await readyGates[i].fire() }
+                            continue
+                        }
+                        group.addTask { @MainActor in
+                            transcodeStartTimes[i] = Date()
+                            await weakSelf.runTranscodeStep(for: job)
+                            await readyGates[i].fire()
+                        }
+                        return
+                    }
+                }
+                for _ in 0..<parallelCap { enqueueNext(&group) }
+                while await group.next() != nil {
+                    enqueueNext(&group)
+                }
+            }
+        }
+
         for (idx, pair) in preparedPairs.enumerated() {
             let job = pair.job
             if cancelFlag.get() { break }
 
-            let transcodeStart = Date()
-            await runTranscodeStep(for: job)
+            await readyGates[idx].wait()
+            let transcodeStart = transcodeStartTimes[idx]
 
             if cancelFlag.get() {
                 if job.status == .failed { job.error = "Cancelled" }
@@ -1901,7 +2171,8 @@ public class PipelineController {
                     selectedSubtitles: job.selectedSubtitles,
                     externalSubs: externalSubs,
                     burnIn: job.burnInSubtitle,
-                    originalLanguageFallback: job.metadata?.originalLanguage
+                    originalLanguageFallback: job.metadata?.originalLanguage,
+                    audioLanguageOverrides: job.audioLanguageOverrides
                 ) { pct in
                     let now = Date()
                     // Always let the final 1.0 through — the throttle would

@@ -93,7 +93,17 @@ public enum ExternalTrackScanner {
     /// Walk `sourceDir` for external dub / sub files matching any of the
     /// supplied episodes. Returns empty when no known (s, e) keys can be
     /// derived (e.g. all-movie drop).
-    static func scanRelease(sourceDir: URL, episodes: [ParsedFilename]) -> ReleaseExtras {
+    ///
+    /// `titlePrefixes` is the set of normalized title prefixes that the
+    /// pipeline detected via plain-numbered sibling matching ("Jujutsu Kaisen"
+    /// → matches "Jujutsu Kaisen 01.srt"). When supplied, sub / dub files
+    /// whose names don't carry S## / [Group] markers but DO start with a
+    /// known prefix are matched as season 1, episode <NN>.
+    static func scanRelease(
+        sourceDir: URL,
+        episodes: [ParsedFilename],
+        titlePrefixes: Set<String> = []
+    ) -> ReleaseExtras {
         let known: Set<EpisodeKey> = Set(episodes.compactMap { e in
             guard let s = e.season, let n = e.episode else { return nil }
             return EpisodeKey(season: s, episode: n)
@@ -118,10 +128,20 @@ public enum ExternalTrackScanner {
             let parentURL = url.deletingLastPathComponent().standardizedFileURL
             guard parentURL != sourceDirStd else { continue }
 
-            // Match to an episode key by parsing the file name.
+            // Match to an episode key by parsing the file name. Plain-numbered
+            // sidecar files ("Jujutsu Kaisen 01.srt") only resolve via the
+            // titlePrefix fallback, since the regex parser has no year /
+            // [Group] / S## to anchor against.
             let parsed = FilenameParser.parse(url.lastPathComponent)
-            guard let s = parsed.season, let n = parsed.episode else { continue }
-            let key = EpisodeKey(season: s, episode: n)
+            let resolved: (Int, Int)? = {
+                if let s = parsed.season, let n = parsed.episode { return (s, n) }
+                if let p = FilenameParser.parsePlainNumbered(
+                    filename: url.lastPathComponent, knownPrefixes: titlePrefixes
+                ), let s = p.season, let n = p.episode { return (s, n) }
+                return nil
+            }()
+            guard let pair = resolved else { continue }
+            let key = EpisodeKey(season: pair.0, episode: pair.1)
             guard known.contains(key) else { continue }
 
             // Label = immediate parent folder name. Works for both nested
