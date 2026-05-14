@@ -44,6 +44,7 @@ struct MediaPorterApp: App {
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1200, height: 780)
         .commands {
+            CommandGroup(replacing: .newItem) {}
             CommandGroup(replacing: .help) {
                 Button("MediaPorter Documentation") {
                     if let url = URL(string: "https://porter.md") {
