@@ -532,7 +532,7 @@ class ATCSession {
         if !staleIDs.isEmpty {
             progress?("Clearing \(staleIDs.count) stale pending asset(s) from prior syncs…")
             log("  Clearing \(staleIDs.count) stale pending asset(s)...")
-            DebugLog.write("atc.FileError.stale", "count=\(staleIDs.count) ids=\(staleIDs.joined(separator: ","))")
+            DebugLog.notice("atc.FileError.stale", "count=\(staleIDs.count) ids=\(staleIDs.joined(separator: ","))")
             for sid in staleIDs {
                 check("FileError", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileError" as CFString, [
                     "AssetID": sid,
@@ -647,7 +647,7 @@ class ATCSession {
     /// blocks SyncFinished waiting for the missing asset (CLAUDE.md #8).
     func abandonAsset(assetID: Int) {
         log("  >> FileError (abandon asset=\(assetID))")
-        DebugLog.write("atc.abandonAsset", "id=\(assetID)")
+        DebugLog.notice("atc.abandonAsset", "id=\(assetID)")
         check("FileError", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileError" as CFString, [
             "AssetID": String(assetID),
             "Dataclass": "Media",
@@ -686,7 +686,7 @@ class ATCSession {
         // not commit signals for the just-finished file.
         let stale = drainInbox()
         if !stale.isEmpty {
-            DebugLog.write("atc.finishSync.discard_stale", "names=\(stale.joined(separator: ","))")
+            DebugLog.notice("atc.finishSync.discard_stale", "names=\(stale.joined(separator: ","))")
         }
 
         var syncAllowedAt: Date? = nil
@@ -702,20 +702,20 @@ class ATCSession {
                 }
                 if name == "SyncAllowed" && syncAllowedAt == nil {
                     syncAllowedAt = Date()
-                    DebugLog.write("atc.finishSync.syncallowed", "waiting up to 30s for SyncFinished")
+                    DebugLog.notice("atc.finishSync.syncallowed", "waiting up to 30s for SyncFinished")
                 }
             }
             // Fallback: SyncAllowed seen, no SyncFinished after 30 s grace.
             if let sa = syncAllowedAt, Date().timeIntervalSince(sa) > 30 {
                 log("  *** SYNC COMPLETE (SyncAllowed fallback, no SyncFinished) ***")
-                DebugLog.write("atc.finishSync.done", "via=SyncAllowed_fallback elapsed=\(Int(Date().timeIntervalSince(start)))s")
+                DebugLog.notice("atc.finishSync.done", "via=SyncAllowed_fallback elapsed=\(Int(Date().timeIntervalSince(start)))s")
                 stopDrainer()
                 return
             }
             Thread.sleep(forTimeInterval: 0.2)
         }
         log("  SyncFinished not received (120 s timeout)")
-        DebugLog.write("atc.finishSync.timeout", "elapsed=120s")
+        DebugLog.error("atc.finishSync.timeout", "elapsed=120s")
         stopDrainer()
     }
 
@@ -750,7 +750,6 @@ class ATCSession {
                 }
                 guard let nameCF = ATH.messageName(msg) else { continue }
                 let name = nameCF as String
-                if self.verbose { NSLog("ATC drainer: << %@", name) }
                 if name == "Ping" {
                     self.sendPong()
                     DebugLog.write("atc.drainer", "Ping → Pong")

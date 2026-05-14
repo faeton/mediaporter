@@ -289,13 +289,51 @@ public class DeviceMonitor {
 
     /// All devices currently attached, ordered iPad → iPhone → other for stable UX
     /// (iPad is the intended target for TV-app sync).
+    ///
+    /// Phantom devices (those whose lockdown values came back empty — typically a
+    /// previously-paired device discovered over Wi-Fi without valid trust, or a
+    /// USB device mid-handshake) are hidden. Without this filter the UI shows
+    /// "iOS Device · 1024p" with bogus stats when no real device is attached.
     public var allDevices: [DeviceInfo] {
         devicesLock.lock(); defer { devicesLock.unlock() }
-        return devicesByUDID.values.sorted { a, b in
-            let ra = Self.priority(a), rb = Self.priority(b)
-            if ra != rb { return ra < rb }
-            return a.displayName.localizedCaseInsensitiveCompare(b.displayName) == .orderedAscending
+        return devicesByUDID.values
+            .filter { !$0.deviceClass.isEmpty }
+            .sorted { a, b in
+                let ra = Self.priority(a), rb = Self.priority(b)
+                if ra != rb { return ra < rb }
+                return a.displayName.localizedCaseInsensitiveCompare(b.displayName) == .orderedAscending
+            }
+    }
+
+    /// Devices the framework has attached but whose lockdown values are still
+    /// unreadable. The polling loop re-queries these so they appear once
+    /// pairing/trust completes.
+    public var pendingUDIDs: [String] {
+        devicesLock.lock(); defer { devicesLock.unlock() }
+        return devicesByUDID.values
+            .filter { $0.deviceClass.isEmpty }
+            .map { $0.udid }
+    }
+
+    /// Re-read lockdown values for a known device. Called from the pipeline's
+    /// polling loop to recover devices that arrived faster than their trust
+    /// handshake. No-op if the device is gone or now fully populated.
+    public func refreshIfPending(udid: String) {
+        devicesLock.lock()
+        guard let existing = devicesByUDID[udid], existing.deviceClass.isEmpty else {
+            devicesLock.unlock()
+            return
         }
+        let handle = existing.handle
+        devicesLock.unlock()
+
+        let refreshed = queryDeviceInfo(device: handle, udid: udid)
+        guard !refreshed.deviceClass.isEmpty else { return }
+
+        devicesLock.lock()
+        devicesByUDID[udid] = refreshed
+        devicesLock.unlock()
+        DebugLog.notice("device.monitor", "lockdown values recovered for \(udid) → \(refreshed.deviceClass)")
     }
 
     /// Preferred single device: first iPad, else first iPhone, else anything.
@@ -359,6 +397,13 @@ private let _monitorCallback: MD.NotificationCallback = { infoPtr, _ in
         if let cfUDID = MD.copyID(dev) {
             let udid = cfUDID as String
             let deviceInfo = queryDeviceInfo(device: dev, udid: udid)
+            if deviceInfo.deviceClass.isEmpty {
+                // Pairing/trust not yet valid — typically a Wi-Fi-discovered device
+                // with stale pairing, or a USB device pre-trust. Tracked but hidden;
+                // polling loop will retry via refreshIfPending().
+                DebugLog.notice("device.monitor",
+                                "attach with unreadable lockdown values for \(udid); hiding until trust completes")
+            }
             DeviceMonitor.shared.add(deviceInfo)
         }
     } else if msgType == 2 {

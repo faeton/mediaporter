@@ -27,7 +27,7 @@ public enum ZombieSweep {
             guard let cmd = commandLine(for: pid),
                   cmd.contains(tempPrefix) else { continue }
             kill(pid, SIGKILL)
-            DebugLog.write("zombie.killed", "pid=\(pid) cmd=\(cmd.prefix(160))")
+            DebugLog.notice("zombie.killed", "pid=\(pid) cmd=\(cmd.prefix(160))")
         }
     }
 

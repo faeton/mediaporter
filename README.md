@@ -93,6 +93,38 @@ Release builds run through `MacApp/scripts/release.sh`: arm64 SwiftPM build → 
 
 The result is a native media library entry — videos appear in the TV app with correct `media_type=2048`, artwork, and full playback functionality. No jailbreak, no third-party apps on the device.
 
+## Diagnostics & logging
+
+Every diagnostic event the app produces (ATC wire traffic, AFC upload progress, ffmpeg invocations, TMDb / OpenSubtitles lookups, device-library snapshots) goes to **two** sinks at once:
+
+1. **Apple Unified Logging** under subsystem **`md.porter.MediaPorter`** (matches the app's bundle identifier). The category is the tag prefix before the first dot — currently `afc`, `atc`, `cleanup`, `device`, `extracts`, `ffmpeg`, `ffprobe`, `opensubs`, `prereq`, `tmdb`, `zombie`. Inspect with:
+
+   ```bash
+   # live tail
+   log stream --predicate 'subsystem == "md.porter.MediaPorter"' --info
+
+   # last hour, ATC wire traffic only
+   log show --predicate 'subsystem == "md.porter.MediaPorter" AND category == "atc"' \
+            --info --last 1h
+
+   # open Console.app and filter on the subsystem
+   open -a Console
+   ```
+
+   Entries are emitted at one of four levels — `.debug`, `.info`, `.notice`, `.error`. `.debug` and `.info` are volatile (memory only, kept lean for users who never look) and require `--info` (or `--debug`) to surface in `log show`. `.notice` and `.error` are persisted by OSLog: recovery actions (stale-asset clears, abandoned assets, SyncAllowed fallback, device-trust recovery, zombie-ffmpeg kills) emit at `.notice`, and hard failures (finishSync timeout, TMDb fetch threw) at `.error`. To filter to just the persistent layer post-incident:
+
+   ```bash
+   log show --predicate 'subsystem == "md.porter.MediaPorter"' --last 1h
+   ```
+
+2. **`/tmp/mediaporter-debug.log`** — plaintext mirror, append-mode, persistent until macOS clears `/tmp`. Easiest path for `tail -f` during a sync and for attaching to bug reports without needing `log show` privileges:
+
+   ```bash
+   tail -f /tmp/mediaporter-debug.log
+   ```
+
+   The "Submit Bug Report" item in the Help menu captures the tail of this file (redacted) into the GitHub-issue body.
+
 ## Research and documentation
 
 This project includes extensive protocol research and reverse engineering documentation:

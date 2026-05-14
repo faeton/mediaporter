@@ -453,6 +453,18 @@ public class PipelineController {
             var lastDiskQuery: Date = .distantPast
             var lastDiskUDID: String? = nil
             while let self {
+                // Re-query any devices whose lockdown values were unreadable at
+                // attach time (Wi-Fi-discovered with stale trust, USB pre-handshake).
+                // No-op when there are no pending devices, which is the common case.
+                let pending = DeviceMonitor.shared.pendingUDIDs
+                if !pending.isEmpty {
+                    await Task.detached {
+                        for udid in pending {
+                            DeviceMonitor.shared.refreshIfPending(udid: udid)
+                        }
+                    }.value
+                }
+
                 let all = DeviceMonitor.shared.allDevices
                 self.availableDevices = all
 
@@ -587,8 +599,9 @@ public class PipelineController {
         if show.tmdbShowID == nil,
            let promoted = tvShowResolutions[clusterID],
            promoted.tmdbShowID != nil {
-            NSLog("resolveTVEpisode: cluster %@ promoted mid-analyze, re-fetching ep S%02dE%02d",
-                  clusterID, season, episode)
+            DebugLog.write("tmdb.resolve",
+                "cluster=\(clusterID) promoted mid-analyze, re-fetching ep "
+                + String(format: "S%02dE%02d", season, episode))
             show = promoted
             if let id = show.tmdbShowID, !tmdbAPIKey.isEmpty,
                let info = try? await TMDbClient.fetchEpisodeOnly(
@@ -844,10 +857,9 @@ public class PipelineController {
     /// change), only show identity + per-episode TMDb fetch are re-run.
     private func refreshEpisodes(in clusterID: String, using show: ResolvedShow) async {
         let matching = jobs.filter { $0.clusterID == clusterID }
-        NSLog("refreshEpisodes: cluster=%@ showID=%@ jobs=%d",
-              clusterID,
-              show.tmdbShowID.map(String.init) ?? "nil",
-              matching.count)
+        DebugLog.write("tmdb.refresh",
+            "cluster=\(clusterID) showID=\(show.tmdbShowID.map(String.init) ?? "nil") "
+            + "jobs=\(matching.count)")
         for job in matching {
             let parsed = parseFilename(for: job)
             let season = parsed.season ?? 1
@@ -870,14 +882,17 @@ public class PipelineController {
                     epTitle = info.title
                     stillURL = info.stillURL
                     overview = info.overview
-                    NSLog("refreshEpisodes: %@ S%02dE%02d title=%@ still=%@",
-                          job.fileName, season, episode,
-                          info.title ?? "<nil>",
-                          info.stillURL == nil ? "<nil>" : "ok")
+                    DebugLog.write("tmdb.refresh",
+                        "\(job.fileName) "
+                        + String(format: "S%02dE%02d", season, episode)
+                        + " title=\(info.title ?? "<nil>") "
+                        + "still=\(info.stillURL == nil ? "<nil>" : "ok")")
                 } catch {
                     fetchSucceeded = false
-                    NSLog("refreshEpisodes: fetchEpisodeOnly threw for %@ S%02dE%02d: %@",
-                          job.fileName, season, episode, String(describing: error))
+                    DebugLog.error("tmdb.refresh",
+                        "fetchEpisodeOnly threw for \(job.fileName) "
+                        + String(format: "S%02dE%02d", season, episode)
+                        + ": \(String(describing: error))")
                 }
             }
 
@@ -1126,9 +1141,11 @@ public class PipelineController {
                 .split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
-            NSLog("OpenSubtitles: enabled for languages %@", langs.joined(separator: ","))
+            DebugLog.write("opensubs", "enabled for languages \(langs.joined(separator: ","))")
         } else if !openSubtitlesAPIKey.isEmpty {
-            NSLog("OpenSubtitles: API key set but username/password/languages missing — skipping auto-fetch. Fill them in Settings → Subtitles.")
+            DebugLog.write("opensubs",
+                "API key set but username/password/languages missing — skipping auto-fetch. "
+                + "Fill them in Settings → Subtitles.")
         }
 
         // Scan each source directory present in the drop for external
@@ -1157,9 +1174,10 @@ public class PipelineController {
                 clusterExtras[cid] = extras
             }
             if !dirClusters.isEmpty {
-                NSLog("ExternalTrackScanner: %@ → %d dub(s), %d sub(s) for cluster(s) %@",
-                      dir.lastPathComponent, extras.dubs.count, extras.subs.count,
-                      dirClusters.sorted().joined(separator: ","))
+                DebugLog.write("extracts",
+                    "\(dir.lastPathComponent) → \(extras.dubs.count) dub(s), "
+                    + "\(extras.subs.count) sub(s) for cluster(s) "
+                    + dirClusters.sorted().joined(separator: ","))
             }
         }
 
@@ -1172,7 +1190,7 @@ public class PipelineController {
             deviceLibrarySnapshot = (try? await Task.detached {
                 try loadDeviceLibrary(device: devCopy)
             }.value) ?? []
-            NSLog("Device library snapshot: %d entries", deviceLibrarySnapshot.count)
+            DebugLog.write("device.library", "snapshot \(deviceLibrarySnapshot.count) entries")
         } else {
             deviceLibrarySnapshot = []
         }
@@ -1275,10 +1293,12 @@ public class PipelineController {
                     return !existingLangs.contains(iso3) && !existingLangs.contains(iso2)
                 }
                 if missing.isEmpty {
-                    NSLog("OpenSubtitles: \(job.fileName) — all requested languages already present, skipping")
+                    DebugLog.write("opensubs",
+                        "\(job.fileName) — all requested languages already present, skipping")
                 } else {
                     overallStatus = "Looking up subtitles: \(job.fileName)"
-                    NSLog("OpenSubtitles: querying %@ for %@", missing.joined(separator: ","), job.fileName)
+                    DebugLog.write("opensubs",
+                        "querying \(missing.joined(separator: ",")) for \(job.fileName)")
                     let client = OpenSubtitlesClient(
                         apiKey: openSubtitlesAPIKey,
                         username: openSubtitlesUsername,
@@ -1293,10 +1313,11 @@ public class PipelineController {
                         client: client
                     )
                     if fetched.isEmpty {
-                        NSLog("OpenSubtitles: no matches for \(job.fileName)")
+                        DebugLog.notice("opensubs", "no matches for \(job.fileName)")
                     } else {
                         let picked = fetched.map(\.language).joined(separator: ",")
-                        NSLog("OpenSubtitles: \(job.fileName) — added \(fetched.count) track(s): \(picked)")
+                        DebugLog.write("opensubs",
+                            "\(job.fileName) — added \(fetched.count) track(s): \(picked)")
                         info.externalSubtitles.append(contentsOf: fetched)
                         job.mediaInfo = info
                     }
@@ -2331,7 +2352,8 @@ public class PipelineController {
             }
         }
         if unfinished {
-            NSLog("MediaPorter: skipping temp cleanup — \(jobs.count) jobs unfinished, "
+            DebugLog.write("cleanup",
+                "skipping temp cleanup — \(jobs.count) jobs unfinished, "
                 + ".m4v files preserved for Recover Orphaned Uploads")
             return
         }
