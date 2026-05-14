@@ -9,3 +9,11 @@
 /zh/guides/anime-on-ipad       /zh/guides/anime-on-iphone-and-ipad     301
 /ko/guides/anime-on-iphone     /ko/guides/anime-on-iphone-and-ipad     301
 /ko/guides/anime-on-ipad       /ko/guides/anime-on-iphone-and-ipad     301
+
+# Short download aliases. Bump the version here on each release.
+# Direct .dmg links — 302 (Found) so search engines don't cache the binary URL
+# and we can repoint to a newer build without 301 cache pollution.
+/dl/mac             https://github.com/faeton/mediaporter/releases/download/v0.6.1/MediaPorter-0.6.1-with-ffmpeg.dmg   302
+/dl/mac-ffmpeg      https://github.com/faeton/mediaporter/releases/download/v0.6.1/MediaPorter-0.6.1-with-ffmpeg.dmg   302
+/dl/mac-minimal     https://github.com/faeton/mediaporter/releases/download/v0.6.1/MediaPorter-0.6.1.dmg                302
+/dl/releases        https://github.com/faeton/mediaporter/releases                                                       302

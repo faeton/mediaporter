@@ -4,15 +4,40 @@ import Base from "../layouts/Base.astro";
 // Keeping it static now to avoid coupling the site build to source layout changes in MacApp/.
 const releases = [
   {
-    version: "0.3.2",
-    date: "2026-05-10",
+    version: "0.6.1",
+    date: "2026-05-14",
     notes: [
-      "Skip files already on the device (de-duplicate before upload).",
-      "Mid-sync disk-space polling — aborts cleanly if iOS background traffic eats free space.",
-      "Parallel analysis (probe + TMDb) with per-cluster guard.",
-      "Streaming registration — files appear in the TV app as they upload, not after.",
-      "Anime episode handling: parser, picker race fix, burned-in episode numbers.",
-      "Programmatic dock icon. Cmd-Q guard while syncing.",
+      "Hotfix: large-file syncs landed the row in the TV app but the file was unbound and got swept by background GC — title visible, Play did nothing. Root cause: `SyncAllowed` (sent early, accumulates in the inbox during a long upload) was treated as terminal-equivalent to `SyncFinished`.",
+      "Strict `SyncFinished` wait with 120 s cap + 30 s `SyncAllowed` fallback grace. Mini-clips were unaffected because they finished uploading before `SyncAllowed` arrived.",
+      "`Send N to iPhone` no longer no-ops when every file is already on the device — counts files matching the actual pipeline filter and surfaces a disabled, explanatory button.",
+      "`atc.FileProgress` heartbeat sent every 5 s / 10 % during the AFC upload to keep medialibraryd's asset slot warm.",
+    ],
+  },
+  {
+    version: "0.6.0",
+    date: "2026-05-14",
+    notes: [
+      "Cluster-extras — drop a folder of episodes with dub / sub subfolders, pick studios / labels once at cluster level, MediaPorter muxes each episode's extras into the transcode pass with the user-chosen default audio surviving into the TV app.",
+      "External-track scanner — finds sibling dubs (`.mka` / `.ac3` / `.eac3` / `.flac` / `.aac` / `.m4a` / `.opus`) and subs (`.srt` / `.ass` / `.ssa` / `.vtt`), groups by parent folder = label, infers language from path, detects \"forced\" subs by token.",
+      "Burn-in for cluster-extras subs is end-to-end: auto-included for the mux, language carried through, post-mux re-probe rewrites burn-in index to the embedded stream.",
+      "OpenSubtitles auto-fetch — analyze pulls missing-language SRTs via moviehash / TMDb id, includes them in the next run.",
+      "Burn-in for text, sidecar SRT, and bitmap (PGS / VOBSUB via `filter_complex overlay`). Bitmap canvas sized per codec; downscale applied after overlay so glyphs scale with the picture.",
+      "Streaming registration, mid-sync disk watchdog, parallel analyze, duplicate skip against the device's `MediaLibrary.sqlitedb`.",
+      "Cluster-scoped selection — audio / sub / resolution / burn-in changes raise an \"Apply to all N episodes?\" popover (auto-dismiss 5 s); \"Always\" toggle silences it.",
+      "Help menu — bug report + diagnostic info: app version, OS, device, debug log tail into a pre-filled GitHub issue.",
+      "Sign-and-notarize pipeline — Developer ID signed, notarized, stapled DMG. First public DMG shipping from porter.md.",
+      "Cancel + Retry per row reaches every in-flight ffmpeg (mux pass, ass→srt, main transcode). Zombie ffmpeg sweep at launch.",
+      "Two-artwork TV sync (show portrait + episode still). Multi-device support with override persistence. CLI `pull` command.",
+    ],
+  },
+  {
+    version: "0.3.2",
+    date: "2026-04-13",
+    notes: [
+      "Corrected the iPad audio-language-switcher rule: AAC and EAC-3 are listable, AC-3 is silently filtered. AC-3 → AAC; AAC + EAC-3 pass through bit-perfect (typical `ac3 + eac3` releases keep 5.1 EAC-3 untouched).",
+      "Exactly one default audio track enforced at ffmpeg invocation (`-disposition:a:0 default` + `-disposition:a:N 0`), regardless of source — multiple defaults kill the switcher entirely.",
+      "Mixed-codec files no longer force-remux: per-stream codec decisions are authoritative. `aac + eac3` flavors copy through.",
+      "Full experimental matrix at `research/docs/AUDIO_SWITCHER_RULE.md` (11 variants A–K).",
     ],
   },
 ];

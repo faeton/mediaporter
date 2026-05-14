@@ -104,9 +104,19 @@ export type Strings = {
   downloadEyebrow: string;
   downloadTitle: string;
   downloadBody: string;
-  downloadCta: string;
-  downloadEmailPlaceholder: string;
-  downloadNote: string;
+  downloadVersion: string;
+  downloadRequires: string;
+  downloadBundledTag: string;
+  downloadBundledTitle: string;
+  downloadBundledBody: string;
+  downloadBundledCta: string;
+  downloadBundledRecommended: string;
+  downloadMinimalTag: string;
+  downloadMinimalTitle: string;
+  downloadMinimalBody: string;
+  downloadMinimalCta: string;
+  downloadCompare: string;
+  downloadSource: string;
   /** Setup callout on homepage */
   setupCalloutEyebrow: string;
   setupCalloutTitle: string;
@@ -315,10 +325,22 @@ const en: Strings = {
   downloadEyebrow: "## download",
   downloadTitle: "Get MediaPorter.",
   downloadBody:
-    "The macOS app is in private beta while we await Apple Developer Program approval. Drop your email and we'll send a signed build the day notarization lands.",
-  downloadCta: "Notify me",
-  downloadEmailPlaceholder: "you@example.com",
-  downloadNote: "# No tracking pixel. The form posts a plain mailto: — your client opens.",
+    "Signed and notarized by Apple. Pick the build that fits — both ship the same app, the only difference is whether ffmpeg comes inside the bundle.",
+  downloadVersion: "v0.6.1 · 2026-05-14",
+  downloadRequires: "# Requires macOS 14+ · Apple Silicon",
+  downloadBundledTag: "## with-ffmpeg",
+  downloadBundledTitle: "MediaPorter + ffmpeg",
+  downloadBundledBody:
+    "Works out of the box. ffmpeg is inside the app — no Homebrew, no command line. Pick this if you're not sure.",
+  downloadBundledCta: "Download .dmg",
+  downloadBundledRecommended: "Recommended",
+  downloadMinimalTag: "## minimal",
+  downloadMinimalTitle: "MediaPorter",
+  downloadMinimalBody:
+    "Smaller download. Bring your own ffmpeg via `brew install ffmpeg` (or any compatible binary on $PATH).",
+  downloadMinimalCta: "Download .dmg",
+  downloadCompare: "Compare builds →",
+  downloadSource: "View source on GitHub",
   setupCalloutEyebrow: "## setup",
   setupCalloutTitle: "You'll need two free API keys.",
   setupCalloutBody:
@@ -556,10 +578,22 @@ const ru: Strings = {
   downloadEyebrow: "## скачать",
   downloadTitle: "Получить MediaPorter.",
   downloadBody:
-    "Приложение macOS в закрытой бете, ждём одобрения Apple Developer Program. Оставьте email — пришлём подписанный билд, как только пройдём нотаризацию.",
-  downloadCta: "Сообщить мне",
-  downloadEmailPlaceholder: "you@example.com",
-  downloadNote: "# Никаких пикселей. Форма открывает обычный mailto: в вашем почтовом клиенте.",
+    "Подписано и нотаризовано Apple. Выберите сборку — приложение одинаковое, отличается только тем, лежит ли ffmpeg внутри бандла.",
+  downloadVersion: "v0.6.1 · 2026-05-14",
+  downloadRequires: "# Требуется macOS 14+ · Apple Silicon",
+  downloadBundledTag: "## with-ffmpeg",
+  downloadBundledTitle: "MediaPorter + ffmpeg",
+  downloadBundledBody:
+    "Работает из коробки. ffmpeg внутри приложения — без Homebrew и терминала. Если сомневаетесь — берите этот.",
+  downloadBundledCta: "Скачать .dmg",
+  downloadBundledRecommended: "Рекомендуем",
+  downloadMinimalTag: "## minimal",
+  downloadMinimalTitle: "MediaPorter",
+  downloadMinimalBody:
+    "Меньше весит. ffmpeg ставите сами через `brew install ffmpeg` (или любой совместимый бинарь в $PATH).",
+  downloadMinimalCta: "Скачать .dmg",
+  downloadCompare: "Сравнить сборки →",
+  downloadSource: "Исходники на GitHub",
   setupCalloutEyebrow: "## установка",
   setupCalloutTitle: "Понадобятся два бесплатных API-ключа.",
   setupCalloutBody:
@@ -796,10 +830,22 @@ const zh: Strings = {
   downloadEyebrow: "## 下载",
   downloadTitle: "获取 MediaPorter。",
   downloadBody:
-    "macOS 应用正在私测，正在等待 Apple Developer Program 审核。留下邮箱，公证一通过我们就发送签名版本。",
-  downloadCta: "通知我",
-  downloadEmailPlaceholder: "you@example.com",
-  downloadNote: "# 没有跟踪像素。表单只是普通的 mailto:，会打开你的邮件客户端。",
+    "已由 Apple 签名并公证。两种构建里跑的是同一个应用——区别只在于 ffmpeg 是否打包在应用内。",
+  downloadVersion: "v0.6.1 · 2026-05-14",
+  downloadRequires: "# 需要 macOS 14+ · Apple Silicon",
+  downloadBundledTag: "## with-ffmpeg",
+  downloadBundledTitle: "MediaPorter + ffmpeg",
+  downloadBundledBody:
+    "开箱即用。ffmpeg 已打包在应用里——无需 Homebrew，无需命令行。不确定就选这个。",
+  downloadBundledCta: "下载 .dmg",
+  downloadBundledRecommended: "推荐",
+  downloadMinimalTag: "## minimal",
+  downloadMinimalTitle: "MediaPorter",
+  downloadMinimalBody:
+    "体积更小。自行通过 `brew install ffmpeg` 或任何兼容的 ffmpeg 二进制（位于 $PATH 中）。",
+  downloadMinimalCta: "下载 .dmg",
+  downloadCompare: "对比两种构建 →",
+  downloadSource: "在 GitHub 查看源码",
   setupCalloutEyebrow: "## 设置",
   setupCalloutTitle: "需要两个免费的 API 密钥。",
   setupCalloutBody:
@@ -1037,10 +1083,22 @@ const ko: Strings = {
   downloadEyebrow: "## 다운로드",
   downloadTitle: "MediaPorter 받기.",
   downloadBody:
-    "macOS 앱은 Apple Developer Program 승인 대기 중이라 비공개 베타 단계입니다. 이메일을 남겨 주시면, 공증이 끝나는 날 서명된 빌드를 보내 드립니다.",
-  downloadCta: "알려 주세요",
-  downloadEmailPlaceholder: "you@example.com",
-  downloadNote: "# 트래킹 픽셀 없음. 폼은 그냥 mailto: 링크 — 메일 클라이언트가 열립니다.",
+    "Apple 서명 및 공증 완료. 빌드 두 가지 모두 동일한 앱이며, 차이는 ffmpeg가 번들에 포함되어 있는지 여부뿐입니다.",
+  downloadVersion: "v0.6.1 · 2026-05-14",
+  downloadRequires: "# macOS 14+ · Apple Silicon 필요",
+  downloadBundledTag: "## with-ffmpeg",
+  downloadBundledTitle: "MediaPorter + ffmpeg",
+  downloadBundledBody:
+    "바로 동작합니다. ffmpeg가 앱 안에 포함되어 있어 Homebrew도 터미널도 필요 없습니다. 헷갈리면 이걸 받으세요.",
+  downloadBundledCta: ".dmg 다운로드",
+  downloadBundledRecommended: "권장",
+  downloadMinimalTag: "## minimal",
+  downloadMinimalTitle: "MediaPorter",
+  downloadMinimalBody:
+    "용량이 더 작습니다. `brew install ffmpeg`로 직접 설치하거나 $PATH에 호환 ffmpeg 바이너리를 두면 됩니다.",
+  downloadMinimalCta: ".dmg 다운로드",
+  downloadCompare: "빌드 비교 →",
+  downloadSource: "GitHub에서 소스 보기",
   setupCalloutEyebrow: "## 설정",
   setupCalloutTitle: "무료 API 키 두 개가 필요합니다.",
   setupCalloutBody:

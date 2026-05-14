@@ -26,6 +26,12 @@ const faqLd = {
 
 const changelogLink = `<a href="${localizePath(locale, "/changelog")}" class="link">${t.navChangelog.toLowerCase()}</a>`;
 const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
+
+// Shipping artifacts live on GitHub Releases. The site is rebuilt on each release
+// to bump RELEASE_TAG below; the URLs are stable per tag and CDN-cached by GitHub.
+const RELEASE_TAG = "v0.6.1";
+const DMG_BUNDLED = `https://github.com/faeton/mediaporter/releases/download/${RELEASE_TAG}/MediaPorter-0.6.1-with-ffmpeg.dmg`;
+const DMG_MINIMAL = `https://github.com/faeton/mediaporter/releases/download/${RELEASE_TAG}/MediaPorter-0.6.1.dmg`;
 ---
 <Base locale={locale} jsonLd={[faqLd]}>
   <!-- HERO -->
@@ -43,7 +49,7 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
         <div class="cta-row">
           <a href={localizePath(locale, "/") + "#download"} class="btn btn-primary">
             {t.ctaDownload}
-            <span class="md-tag" style="background: rgba(10,10,12,0.15); border-color: transparent; color: #0A0A0C;">v0.3.2</span>
+            <span class="md-tag" style="background: rgba(10,10,12,0.15); border-color: transparent; color: #0A0A0C;">v0.6.1</span>
           </a>
           <a href="https://github.com/faeton/mediaporter" class="btn btn-ghost" rel="noopener">{t.ctaSource}</a>
         </div>
@@ -181,14 +187,35 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
       <div class="card download-card">
         <span class="md-tag accent">{t.downloadEyebrow}</span>
         <h2>{t.downloadTitle}</h2>
+        <p class="md-comment download-version">// {t.downloadVersion}</p>
         <p class="muted">{t.downloadBody}</p>
 
-        <form class="email-form" action="mailto:hi@porter.md" method="post" enctype="text/plain">
-          <input type="email" name="email" placeholder={t.downloadEmailPlaceholder} required aria-label="Email"/>
-          <button type="submit" class="btn btn-primary">{t.downloadCta}</button>
-        </form>
+        <div class="download-grid">
+          <article class="dl-card dl-card-primary">
+            <header class="dl-head">
+              <span class="md-tag accent">{t.downloadBundledTag}</span>
+              <span class="recommended">{t.downloadBundledRecommended}</span>
+            </header>
+            <h3>{t.downloadBundledTitle}</h3>
+            <p>{t.downloadBundledBody}</p>
+            <a href={DMG_BUNDLED} class="btn btn-primary" download>{t.downloadBundledCta}</a>
+          </article>
 
-        <p class="md-comment">{t.downloadNote}</p>
+          <article class="dl-card">
+            <header class="dl-head">
+              <span class="md-tag">{t.downloadMinimalTag}</span>
+            </header>
+            <h3>{t.downloadMinimalTitle}</h3>
+            <p>{t.downloadMinimalBody}</p>
+            <a href={DMG_MINIMAL} class="btn btn-ghost" download>{t.downloadMinimalCta}</a>
+          </article>
+        </div>
+
+        <p class="md-comment download-foot">
+          {t.downloadRequires} ·
+          <a href={localizePath(locale, "/setup") + "#ffmpeg"} class="link">{t.downloadCompare}</a> ·
+          <a href="https://github.com/faeton/mediaporter" class="link" rel="noopener">{t.downloadSource}</a>
+        </p>
       </div>
     </div>
   </section>
@@ -380,27 +407,54 @@ const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
   .faq-item p { color: var(--text-2); margin-top: var(--sp-3); }
 
   .download-card { text-align: center; padding-block: var(--sp-10); }
-  .download-card h2 { margin-block: var(--sp-3) var(--sp-4); }
+  .download-card h2 { margin-block: var(--sp-3) var(--sp-2); }
+  .download-card .download-version { margin-bottom: var(--sp-4); color: var(--text-3); }
   .download-card .muted { max-width: 52ch; margin-inline: auto; }
-  .email-form {
-    display: flex; gap: var(--sp-2);
-    max-width: 460px; margin: var(--sp-8) auto var(--sp-3);
-    flex-wrap: wrap; justify-content: center;
+  .download-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--sp-4);
+    max-width: 720px;
+    margin: var(--sp-8) auto var(--sp-4);
+    text-align: left;
   }
-  .email-form input {
-    flex: 1; min-width: 220px;
-    padding: 12px 14px;
-    border-radius: var(--r-sm);
+  .dl-card {
+    padding: var(--sp-6);
     border: 1px solid var(--border);
+    border-radius: var(--r-sm);
     background: var(--code-bg);
-    color: var(--text);
-    font-family: var(--font-body);
-    font-size: 0.9375rem;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
   }
-  .email-form input:focus {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  .dl-card-primary {
+    border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.04), transparent 60px),
+      color-mix(in srgb, var(--surface) 80%, var(--bg));
+  }
+  .dl-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+  }
+  .dl-head .recommended {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    color: var(--accent);
+    text-transform: lowercase;
+  }
+  .dl-card h3 { margin: 0; font-size: 1.15rem; }
+  .dl-card p { color: var(--text-2); margin: 0; }
+  .dl-card .btn { align-self: flex-start; margin-top: var(--sp-2); }
+  .download-foot { margin-top: var(--sp-4); }
+  .download-foot .link { color: var(--text-2); }
+  .download-foot .link:hover { color: var(--accent); }
+  @media (max-width: 640px) {
+    .download-grid { grid-template-columns: 1fr; max-width: 420px; }
+    .dl-card .btn { align-self: stretch; text-align: center; }
   }
 
   @media (min-width: 881px) {
