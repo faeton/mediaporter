@@ -402,6 +402,73 @@ Code-review pass against the shipping 0.6.0 codebase. Each item lists severity, 
 
 ---
 
+## Release polish — untriaged (2026-05-14)
+
+Cosmetic / packaging items captured against v0.6.1 shipping artifacts. Pull into the next release cycle.
+
+### R1. DMG window cosmetics — **Medium**
+
+**Today.** `release.sh::build_dmg` produces a default Finder DMG: stock background, default icon layout, generic mini-arrow Finder icon in the titlebar. Reference: porter.md/release v0.6.1 screenshot 2026-05-14.
+
+**Want.** A branded DMG window — background image with the porter.md mark + a positioned arrow from the `.app` icon to the `Applications` shortcut. Mirror Apple/Sketch/Transmission convention.
+
+**How.** Either `create-dmg` (npm package, wraps `hdiutil` + AppleScript) or hand-roll AppleScript that runs after `hdiutil create` and before `hdiutil convert`. Background PNG should live at `MacApp/Resources/dmg-background.png` (or similar) and be referenced from release.sh. Brand assets in `brand/logo/` are SVG — pre-rasterize to PNG at 540×380 (standard DMG window size) + @2x.
+
+### R2. `.app` filename inside the DMG should be `MediaPorter.app` regardless of variant — **High**
+
+**Today.** `release.sh::build_dmg` does `ditto "$app" "$staging/$(basename "$app")"` — so the with-ffmpeg DMG shows `MediaPorter-with-ffmpeg.app` in the window. End-user-visible artifact name. The DMG filename can keep `-with-ffmpeg` for downloads, but the contained `.app` must be `MediaPorter.app` either way (otherwise the install shortcut copies an unusual name into /Applications).
+
+**Fix.** One-liner — replace the basename call with the literal `MediaPorter.app`. Both variants ship the same Swift binary; the variant is fully captured by the presence/absence of `Contents/Helpers/ffmpeg`.
+
+### R3. Show "bundled vs system ffmpeg" inside the app, not in the DMG name — **Low**
+
+**Today.** Users see the variant in the DMG filename, but once `MediaPorter.app` is moved to /Applications that hint is gone. The `MissingFFmpegBanner` only surfaces when ffmpeg is *unavailable*.
+
+**Want.** Surface the current `ffmpegSource` (`.bundled` / `.system` / `.missing`) in Settings → About or Settings → Diagnostics. Read off `Prerequisites.ffmpegSource`; the path resolution is already there. Free of code complexity — pure SwiftUI addition.
+
+---
+
+## Future / Platform expansion — research notes (not committed)
+
+Speculative work. Each item has a stated unknown that needs device verification before we'd commit engineering effort. Captured here so we don't redo the research.
+
+### F1. Wi-Fi transport (USB-less sync)
+
+**Today.** Sync path is USB → `usbmuxd` → `MobileDevice.framework` lockdown → `com.apple.atc`. Wi-Fi-paired devices are visible on the bus, but the session opener (`Sync/Frameworks.swift::AMDeviceConnect`) implicitly assumes USB.
+
+**Hypothesis.** AMDevice handles Wi-Fi pairing transparently — same `AMDeviceConnect` / `AMDeviceStartService` calls should work if the device is Wi-Fi-paired. Throughput will drop (per-`FileProgress` ack RTT over Wi-Fi), but small files should complete.
+
+**Unknowns to verify.**
+- Whether `AirTrafficHost.framework` opens ATC channels the same way over Wi-Fi-only `AMDevice` handles.
+- Real upload rate vs USB baseline (~30 MB/s today).
+- Whether Ping/Pong keepalive cadence (CLAUDE.md #9) survives Wi-Fi jitter on long uploads.
+
+**Why we're not doing it.** USB wins on every axis and porter.md customers have the cable. Pull only if a segment shifts (untethered shoot floor, etc.).
+
+### F2. Apple Vision Pro support — researched 2026-05-14, conclusion: don't ship
+
+Two independent load-bearing blockers.
+
+**Blocker 1 — TV.app on visionOS has no synced-library concept.**
+Apple Support docs + multiple Apple Discussions / MacRumors threads confirm: the visionOS TV app surfaces only iCloud-purchased content + iCloud downloads. No "From This Mac" library, no Finder sync UI, no documented import path. Even if our ATC writes succeed at medialibraryd, TV.app likely won't surface the rows. Apple's own thread "Transferring Movies from Mac TV app to Vision Pro TV app" closed unresolved; community workarounds are Files.app + iCloud + third-party players (Infuse, Moon Player) — no native Mac-sync path exists.
+
+**Blocker 2 — transport story is unfavorable.**
+- Vision Pro ↔ Mac default is Wi-Fi only. USB-C requires the $299 Developer Strap (gen1 USB 2.0 / 480 Mbps; gen2 released 2025-10 hits 20 Gbps but still niche). Assuming customers own the strap is unrealistic.
+- Wi-Fi path inherits all of F1's unknowns plus a device-pairing flow with no public documentation on whether `usbmuxd`/`remoted` enumerate Vision Pro identically to iOS.
+- pymobiledevice3 has no documented visionOS support — we'd be the first to map which lockdown services are exposed.
+
+**Cheap discovery experiment, if we ever revisit.**
+1. Plug Vision Pro via Developer Strap (or pair over Wi-Fi).
+2. `pymobiledevice3 lockdown service-list` — does `com.apple.atc` appear? Does `com.apple.afc` mount the same `/iTunes_Control/...` paths?
+3. If yes: try Grappa replay handshake. `ErrorCode 4/12` here = challenge changed per platform; `ErrorCode 0` = seed transfers.
+4. If handshake works: send a single `MetadataSyncFinished` + `insert_track` + tiny file. Then check whether TV.app surfaces the row, or only Files.app sees the bytes.
+
+Steps 1–3 are necessary preconditions; step 4 is the real question.
+
+**Realistic ship path if demand emerges** is not ATC-based — it's a visionOS-native app that accepts files via Files.app sharing / AirDrop and plays them in-app (Infuse model). Different product, different binary, no shared code with the Mac sync engine.
+
+---
+
 ## Deferred / not planned (with reason)
 
 - **Multi-track HW transcode** — VideoToolbox media-engine count makes
