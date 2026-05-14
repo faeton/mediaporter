@@ -41,8 +41,11 @@ func diagnosticInfoString(pipeline: PipelineController) -> String {
         deviceLine = "\(d.displayName) — \(d.productType) / iOS \(d.productVersion)"
     }
 
-    let ffmpeg = Prerequisites.ffmpegPath ?? "(not found)"
-    let ffprobe = Prerequisites.ffprobePath ?? "(not found)"
+    // Distinguish bundled (from the with-ffmpeg DMG) from system (brew/PATH)
+    // so bug reports about codec/filter behavior land with the right context.
+    let source = Prerequisites.ffmpegSource
+    let ffmpeg = source.ffmpegPath.map { "\($0)  [\(source.label)]" } ?? "(not found)"
+    let ffprobe = source.ffprobePath.map { "\($0)  [\(source.label)]" } ?? "(not found)"
 
     return """
     MediaPorter \(shortVersion) (\(build))

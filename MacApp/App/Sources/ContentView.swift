@@ -75,6 +75,14 @@ struct ContentView: View {
                 HStack(spacing: 0) {
                     // LEFT: File list — drop here = analyze + wait for Send
                     VStack(spacing: 0) {
+                        if !pipeline.ffmpegSource.isAvailable {
+                            // ffmpeg is required for every analyze + transcode call.
+                            // PipelineController.startFFmpegMonitoring re-polls every 3s
+                            // so this banner self-dismisses the moment ffmpeg appears
+                            // on PATH (or the user reinstalls the with-ffmpeg DMG).
+                            MissingFFmpegBanner(theme: theme, accent: tweaks.accent)
+                        }
+
                         if !pipeline.leftoverTranscodes.isEmpty {
                             LeftoverBanner(
                                 theme: theme,
@@ -273,6 +281,59 @@ struct ContentView: View {
             }
             .allowsHitTesting(false)
             .transition(.opacity)
+        }
+    }
+}
+
+// MARK: - Missing ffmpeg banner
+
+/// Persistent banner shown above the file list while ffmpeg/ffprobe can't
+/// be found. Two install paths are surfaced — Homebrew for users who already
+/// have brew, and the with-ffmpeg DMG for everyone else — both routed to a
+/// single help page on porter.md so we can iterate the install copy without
+/// shipping new app builds. The banner self-dismisses as soon as
+/// PipelineController's monitor sees ffmpeg appear (typically right after
+/// the user finishes `brew install ffmpeg` in another window).
+private struct MissingFFmpegBanner: View {
+    let theme: Theme
+    let accent: AccentKey
+
+    private let helpURL = URL(string: "https://porter.md/setup#ffmpeg")!
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(Color.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("ffmpeg not found")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                Text("Required to analyze and transcode video. Every drop will fail until ffmpeg is on your Mac.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textDim)
+            }
+            Spacer()
+            Button {
+                NSWorkspace.shared.open(helpURL)
+            } label: {
+                HStack(spacing: 4) {
+                    Text("How to install")
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 6).fill(accent.solid))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.12))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(theme.divider).frame(height: 1)
         }
     }
 }

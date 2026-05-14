@@ -27,6 +27,7 @@ struct MediaPorterApp: App {
                     // can check for in-flight work before honoring Cmd-Q.
                     AppDelegate.sharedPipeline = pipeline
                     pipeline.startDeviceMonitoring()
+                    pipeline.startFFmpegMonitoring()
                     pipeline.refreshLeftovers()
                     if let key = ConfigLoader.tmdbAPIKey() {
                         pipeline.tmdbAPIKey = key
@@ -125,15 +126,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // before we start dispatching new transcodes that would compete with
         // them for disk + CPU.
         ZombieSweep.sweep()
-        // Pre-flight ffmpeg/ffprobe — better to flag the missing dependency
-        // at launch with install guidance than let it surface as per-file
-        // "ffprobe not found" errors after the user drops a batch.
-        if !Prerequisites.ffmpegAvailable {
-            DebugLog.write("prereq.ffmpeg", "missing — showing install dialog")
-            showFFmpegMissingAlert()
-        } else {
-            DebugLog.write("prereq.ffmpeg", "ok")
-        }
+        // ffmpeg pre-flight: log the source for debug, but don't surface a
+        // modal alert. ContentView shows a persistent banner while ffmpeg
+        // is missing — the user sees it the entire time, vs a one-shot
+        // dialog they can dismiss and forget.
+        let source = Prerequisites.ffmpegSource
+        DebugLog.write("prereq.ffmpeg", "source=\(source.label) ffmpeg=\(source.ffmpegPath ?? "-") ffprobe=\(source.ffprobePath ?? "-")")
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -152,36 +150,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Quit Anyway")
         let response = alert.runModal()
         return response == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
-    }
-}
-
-@MainActor
-private func showFFmpegMissingAlert() {
-    let alert = NSAlert()
-    alert.messageText = "ffmpeg is required"
-    alert.informativeText = """
-    MediaPorter uses ffmpeg to analyze and transcode video before sending it to your device. \
-    Without it, every file you drop will fail at the Analyze step.
-
-    Install via Homebrew:
-        brew install ffmpeg
-
-    If you don't have Homebrew yet, get it from brew.sh first.
-    """
-    alert.alertStyle = .warning
-    alert.addButton(withTitle: "Open brew.sh")
-    alert.addButton(withTitle: "Continue Anyway")
-    alert.addButton(withTitle: "Quit")
-    let response = alert.runModal()
-    switch response {
-    case .alertFirstButtonReturn:
-        if let url = URL(string: "https://brew.sh") {
-            NSWorkspace.shared.open(url)
-        }
-    case .alertThirdButtonReturn:
-        NSApp.terminate(nil)
-    default:
-        break  // Continue Anyway — per-file errors will still surface, user was warned
     }
 }
 

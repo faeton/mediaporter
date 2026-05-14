@@ -1,31 +1,84 @@
 // Launch-time precondition checks for external tools the pipeline depends on.
 //
-// Right now: ffmpeg + ffprobe (planned to be bundled in a future release —
-// see CLAUDE.md roadmap #1. Until then, the app shells out to whatever's on
-// PATH or in a known Homebrew prefix, so we surface a clear "install this
-// first" dialog at launch instead of letting analyze fail per-file with
-// confusing error text).
+// Right now: ffmpeg + ffprobe. Two distribution variants ship: the
+// "with-ffmpeg" DMG bundles them under Contents/Helpers/; the regular DMG
+// expects them on PATH (typically `brew install ffmpeg`). The app is
+// universal — same binary in both DMGs — and reports `FFmpegSource` to
+// surface which path it picked plus a persistent banner if neither exists.
 
 import Foundation
 
-public enum Prerequisites {
-    /// True if both ffmpeg and ffprobe are findable. False means analyze and
-    /// transcode will both throw per-file errors — App.swift uses this at
-    /// launch to show a dependency-missing dialog before the user wastes
-    /// time dropping files.
-    ///
-    /// Note: FFmpegLocator doesn't cache nil results, so if the user installs
-    /// ffmpeg while the app is running, the next pipeline call will pick it
-    /// up — no relaunch needed.
-    public static var ffmpegAvailable: Bool {
-        FFmpegLocator.ffmpeg != nil && FFmpegLocator.ffprobe != nil
+/// The state of ffmpeg/ffprobe availability. Drives:
+///   • the persistent missing-ffmpeg banner in ContentView,
+///   • the diagnostic-info block in BugReporter,
+///   • per-pipeline-step error messaging.
+public enum FFmpegSource: Equatable {
+    /// Ships in MediaPorter.app/Contents/Helpers/ (with-ffmpeg DMG).
+    case bundled(ffmpeg: URL, ffprobe: URL)
+    /// User installed via Homebrew or otherwise put on PATH.
+    case system(ffmpeg: URL, ffprobe: URL)
+    /// Neither bundled nor on PATH. Pipeline will fail at analyze.
+    case missing
+
+    public var isAvailable: Bool {
+        if case .missing = self { return false }
+        return true
     }
 
-    /// Resolved absolute path to ffmpeg, or nil if not findable. Used by the
-    /// Help → Copy Diagnostic Info / Report a Bug actions to surface where
-    /// the binary came from (bundled / brew / not found).
-    public static var ffmpegPath: String? { FFmpegLocator.ffmpeg?.path }
+    public var ffmpegPath: String? {
+        switch self {
+        case .bundled(let f, _), .system(let f, _): return f.path
+        case .missing: return nil
+        }
+    }
+
+    public var ffprobePath: String? {
+        switch self {
+        case .bundled(_, let p), .system(_, let p): return p.path
+        case .missing: return nil
+        }
+    }
+
+    /// Short human label. Used in the diagnostic-info block.
+    public var label: String {
+        switch self {
+        case .bundled: return "bundled"
+        case .system:  return "system"
+        case .missing: return "missing"
+        }
+    }
+}
+
+public enum Prerequisites {
+    /// Probe the current ffmpeg state. Cheap; FFmpegLocator caches the
+    /// resolved path. Call `FFmpegLocator.invalidateCache()` first when
+    /// re-checking after a possible install (e.g. on a recovery timer).
+    public static var ffmpegSource: FFmpegSource {
+        guard
+            let ff = FFmpegLocator.ffmpegResolution,
+            let pr = FFmpegLocator.ffprobeResolution
+        else {
+            return .missing
+        }
+        // Pipeline assumes ffmpeg + ffprobe come as a pair; if they came
+        // from different origins (e.g. bundled ffmpeg but system ffprobe
+        // because the bundled one was deleted), report system since that's
+        // the path that fully exists.
+        if ff.origin == .bundled && pr.origin == .bundled {
+            return .bundled(ffmpeg: ff.url, ffprobe: pr.url)
+        }
+        return .system(ffmpeg: ff.url, ffprobe: pr.url)
+    }
+
+    /// True if both ffmpeg and ffprobe are findable. Convenience wrapper
+    /// around `ffmpegSource.isAvailable`.
+    public static var ffmpegAvailable: Bool {
+        ffmpegSource.isAvailable
+    }
+
+    /// Resolved absolute path to ffmpeg, or nil if not findable.
+    public static var ffmpegPath: String? { ffmpegSource.ffmpegPath }
 
     /// Resolved absolute path to ffprobe, or nil if not findable.
-    public static var ffprobePath: String? { FFmpegLocator.ffprobe?.path }
+    public static var ffprobePath: String? { ffmpegSource.ffprobePath }
 }

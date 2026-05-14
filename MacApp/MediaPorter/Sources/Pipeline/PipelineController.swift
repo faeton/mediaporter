@@ -77,6 +77,12 @@ public class PipelineController {
     /// the user can pick once for the whole cluster instead of N times.
     public var pendingShowPicks: [PendingShowPick] = []
 
+    /// Latest known ffmpeg state. The ContentView banner observes this and
+    /// stays visible while .missing; re-polls every 3s via the loop started
+    /// in `startFFmpegMonitoring()` so a fresh `brew install ffmpeg`
+    /// dismisses it without an app restart.
+    public var ffmpegSource: FFmpegSource = Prerequisites.ffmpegSource
+
     /// Files that finished AFC upload in the last run but lost their ATC
     /// registration step. Set when the final batch register call throws; the
     /// AFC bytes are still on the device, only the MediaLibrary insert failed.
@@ -208,6 +214,29 @@ public class PipelineController {
         jobs.removeAll { $0.status == .synced }
         if let sel = selectedJobID, !jobs.contains(where: { $0.id == sel }) {
             selectedJobID = jobs.first?.id
+        }
+    }
+
+    // MARK: - ffmpeg monitoring
+
+    /// Re-poll ffmpeg/ffprobe availability on a slow heartbeat. Lets the
+    /// missing-ffmpeg banner self-dismiss the moment a user finishes
+    /// `brew install ffmpeg` in another window without forcing a relaunch.
+    /// Cheap when found (3s sleep, no work); cheap when missing (a couple
+    /// of stat() calls). Never stops — the heartbeat also catches the
+    /// inverse case (user uninstalls ffmpeg mid-session) so the banner
+    /// reappears before the next pipeline call fails per-file.
+    public func startFFmpegMonitoring() {
+        Task { @MainActor [weak self] in
+            while let self {
+                FFmpegLocator.invalidateCache()
+                let next = Prerequisites.ffmpegSource
+                if next != self.ffmpegSource {
+                    self.ffmpegSource = next
+                    DebugLog.write("prereq.ffmpeg", "transition → \(next.label)")
+                }
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
         }
     }
 
