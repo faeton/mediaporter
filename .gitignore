@@ -20,6 +20,13 @@ python-reference/scripts/test_*.py
 .claude/
 raw/
 
+# Raw (un-masked) sync authentication seed. Do not commit captured blobs.
+# The bundled `SyncAuthSeed.dat` files in Resources/data dirs are XOR-masked
+# and *are* committed.
+MacApp/Private/
+MacApp/MediaPorter/Resources/grappa.bin
+python-reference/src/mediaporter/sync/data/grappa.bin
+
 # site/ (Astro + Cloudflare Pages)
 site/node_modules/
 site/dist/

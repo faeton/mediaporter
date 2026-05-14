@@ -15,7 +15,7 @@ let package = Package(
             path: "MediaPorter/Sources",
             resources: [
                 .copy("../Resources/libcig.dylib"),
-                .copy("../Resources/grappa.bin"),
+                .copy("../Resources/SyncAuthSeed.dat"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v5),

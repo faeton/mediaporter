@@ -117,8 +117,8 @@ class ATCSession {
         _ = readUntil("SyncAllowed")
         log("  << SyncAllowed")
 
-        // RequestingSync with Grappa
-        let grappaData = loadGrappaBlob()
+        // RequestingSync with host auth seed.
+        let grappaData = try loadSyncAuthSeed()
         let hostInfoForSync: NSDictionary = [
             "Grappa": grappaData as CFData,
             "LibraryID": "MEDIAPORTER00001",
