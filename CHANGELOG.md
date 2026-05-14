@@ -2,14 +2,43 @@
 
 The Swift MacApp under `MacApp/` is the shipping target. Versions starting with 0.4.0 track the MacApp; the 0.1.x – 0.3.x entries describe the now-frozen Python CLI under `python-reference/`.
 
-## 0.6.1 — 2026-05-14
+## 0.6.2 — 2026-05-14
 
-Hotfix: large-file syncs (>~10 s upload) landed the row in TV.app but the row was unbound and the file got swept — title visible, Play did nothing.
+Patch release. Phantom-device fix + observability overhaul + the long tail of post-0.6.1 polish: folder drops, AVI passthrough, USB-speed hint, "Auto" appearance, ffmpeg source in Settings, and Cyrillic / CJK audio-language inference for embedded AVI dubs.
+
+### Fixed
+
+- **Phantom "iOS Device · 1024p"** — when MobileDevice.framework reports an attach event but lockdown values are unreadable (Wi-Fi-discovered device with stale trust, or USB device mid-handshake), the UI used to render placeholders ("iOS Device", `1024p`, fabricated disk numbers) as if a real device was attached. `DeviceMonitor.allDevices` now hides devices with empty `deviceClass`; pending ones are re-queried by the polling loop and surface automatically once trust completes.
+- **AVI / MPEG-4 ASP (DivX / Xvid) → matroska copy** failed with `Error submitting a packet to the muxer: Invalid argument (-22)`. Fix: `-fflags +genpts` synthesises PTS from AVI's DTS-only timeline, `-avoid_negative_ts make_zero` normalises the start offset, and the codec-gated `mpeg4_unpack_bframes` bitstream filter splits packed-bitstream compound packets that matroska rejects.
+- **External-mux failure tail** — `ExternalMux` now reuses `Transcoder`'s `StderrTail` + termination-handler pattern, so failure messages carry the last 8 stderr lines and the 64 KB pipe can't deadlock.
+
+### New
+
+- **Folder drop** — drag a season directory and Mediaporter walks the tree (depth 6) to find the videos. Previously the folder was silently filtered (no video extension on the directory itself).
+- **Plain-numbered TV detection** — files like `Show Name 01.mkv` parse as `S01E01` when ≥3 siblings share the prefix. Single-file drops in a populated folder enrich the sibling set with the parent dir's on-disk listing, so dropping `Jujutsu Kaisen 01.avi` still picks up the Rus subs/ sidecars nearby. False-positive guard keeps lone `Apollo 13.mkv` as a movie.
+- **Audio-language inference for AVI dubs** — embedded streams with no `TAG:language` but Cyrillic / Hiragana-Katakana / Hangul / CJK bytes in the title now infer `rus` / `jpn` / `kor` / `chi`. Covers AVI releases whose only dub marker is the translator credit. New per-row audio-language picker (14-language shortlist) lets users override; the pick propagates across the cluster.
+- **USB-speed hint** — the connection pill under the silhouette reads `● CONNECTED over USB-C 2.0 🐢` when the device's bus capability beats the negotiated speed; the turtle opens a popover naming the cable bottleneck and the device's actual USB ceiling (iPhone 15/16 Pro = 10 Gbps, iPad Pro M1+ = Thunderbolt, etc.). USB-2-only devices suppress the hint — the cable can't help. Read-only IOKit walk, no entitlements.
+- **Settings → Appearance "Auto"** — `Tweaks.appearance` (`auto` / `light` / `dark`) replaces the binary toggle. Auto follows the macOS Appearance setting. Migration translates the legacy `tweaks.dark` `UserDefaults` key on first launch.
+- **Settings → FFmpeg source** — new section showing `.bundled` / `.system` / `.missing` with a stateful icon, the resolved ffmpeg path (monospaced, truncating middle), and a `How to install ffmpeg` link to porter.md/setup#ffmpeg when missing.
+- **Parallel transcode lookahead** — `runPipelined` spawns transcodes via `TaskGroup` with `K=max(2, min(4, cores/4))`. Upload loop awaits each file's `TranscodeReadyGate` so order is preserved, but transcodes run ahead of uploads.
+- **Multi-device picker copy** — when ≥2 devices are attached, the picker leads with a disabled `Sync target — other devices stay idle` header so users with e.g. two iPads + an iPhone understand `Send` doesn't fan out.
 
 ### Diagnostics
 
-- **Apple Unified Logging** — every `DebugLog` event now mirrors to `os_log` under subsystem `md.porter.MediaPorter` (matches `CFBundleIdentifier`), category derived from the tag prefix (`afc`, `atc`, `cleanup`, `device`, `extracts`, `ffmpeg`, `ffprobe`, `opensubs`, `prereq`, `tmdb`, `zombie`). Inspect with `log stream --predicate 'subsystem == "md.porter.MediaPorter"' --info`, filter by category in Console.app, or `log show --info --last 1h`. The `/tmp/mediaporter-debug.log` plaintext mirror is preserved for `tail -f` and bug-report attachments. Scattered `NSLog` call sites (TMDb refresh, OpenSubtitles fetch, external-track scanner, device-library snapshot, cleanup) routed through the same pipe so they show up under the subsystem too. README has the inspection commands. See `MacApp/MediaPorter/Sources/Pipeline/DebugLog.swift`.
-- **Severity levels** — `DebugLog.write` now takes a `level:` parameter (`.debug` / `.info` / `.notice` / `.error`, default `.info`) with convenience wrappers `DebugLog.notice` / `.error` / `.debug`. Recovery actions emit at `.notice` (stale-asset clears, abandoned assets, SyncAllowed fallback, lockdown-trust recovery, zombie-ffmpeg kills) and hard failures at `.error` (`atc.finishSync.timeout`, `tmdb.refresh` fetch threw) so they survive `log show --last 1h` without `--info`. The `/tmp` plaintext mirror prefixes non-info entries with `NOTICE ` / `ERROR ` / `DEBUG ` so existing `tail -f` / regex consumers of the file format keep working unchanged.
+- **Apple Unified Logging** — every `DebugLog` event mirrors to `os_log` under subsystem `md.porter.MediaPorter` (matches `CFBundleIdentifier`), category derived from the tag prefix (`afc`, `atc`, `cleanup`, `device`, `extracts`, `ffmpeg`, `ffprobe`, `opensubs`, `prereq`, `tmdb`, `zombie`). Inspect with `log stream --predicate 'subsystem == "md.porter.MediaPorter"' --info`, filter by category in Console.app, or `log show --info --last 1h`. The `/tmp/mediaporter-debug.log` plaintext mirror is preserved for `tail -f` and bug-report attachments. Scattered `NSLog` call sites routed through the same pipe so they show up under the subsystem too.
+- **Severity levels** — `DebugLog.write` now takes a `level:` parameter (`.debug` / `.info` / `.notice` / `.error`, default `.info`) with convenience wrappers. Recovery actions emit at `.notice` (stale-asset clears, abandoned assets, SyncAllowed fallback, lockdown-trust recovery, zombie-ffmpeg kills) and hard failures at `.error` (`atc.finishSync.timeout`, `tmdb.refresh` fetch threw) so they survive `log show --last 1h` without `--info`. The `/tmp` plaintext mirror prefixes non-info entries with `NOTICE ` / `ERROR ` / `DEBUG ` so existing consumers keep working.
+
+### Polish
+
+- **In-DMG `.app` name** — both DMG variants now contain `MediaPorter.app` (was `MediaPorter-with-ffmpeg.app` for the bundled variant); the install shortcut and Spotlight see one canonical name. The DMG filename keeps `-with-ffmpeg` for download discoverability.
+- **DMG window layout** — Finder icon view, 540×380 content area, `.app` on the left, `Applications` shortcut on the right, no background image. Plain by design.
+- **In-app glyph matches the brand** — `AppGlyph` in the titlebar now renders the same pink film-strip mark used by the dock and DMG icons (was a procedural play-triangle gradient).
+- **File → New Window removed** — a second window has no purpose for a singleton-pipeline app.
+- **Plan + research updates** — F1 (Wi-Fi sync feasibility), F2 (Vision Pro investigation, concluded "don't ship"), R1 / R2 / R3 / R4 release-polish items shipped or spun out.
+
+## 0.6.1 — 2026-05-14
+
+Hotfix: large-file syncs (>~10 s upload) landed the row in TV.app but the row was unbound and the file got swept — title visible, Play did nothing.
 
 ### Fixed
 

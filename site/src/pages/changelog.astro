@@ -4,6 +4,23 @@ import Base from "../layouts/Base.astro";
 // Keeping it static now to avoid coupling the site build to source layout changes in MacApp/.
 const releases = [
   {
+    version: "0.6.2",
+    date: "2026-05-14",
+    notes: [
+      "Fixed a phantom \"iOS Device · 1024p\" that surfaced when MobileDevice.framework reported an attach without readable lockdown values (Wi-Fi-discovered device with stale trust, or USB device mid-handshake). Hidden until trust completes; the polling loop recovers it automatically.",
+      "AVI / MPEG-4 ASP (DivX / Xvid) → matroska copy: `-fflags +genpts` + `-avoid_negative_ts make_zero` + codec-gated `mpeg4_unpack_bframes` bitstream filter unblock the muxer.",
+      "Folder drop: dragging a season directory now expands into its videos (previously filtered out because the folder itself had no video extension). Depth-6 walk.",
+      "Plain-numbered TV detection: `Show Name 01.mkv` parses as `S01E01` when ≥3 siblings share the prefix. Single-file drops enrich the sibling set from the parent directory.",
+      "Audio-language inference for AVI dubs: titles with Cyrillic / Hiragana-Katakana / Hangul / CJK bytes infer `rus` / `jpn` / `kor` / `chi` when `TAG:language` is missing. New per-row picker (14-language shortlist) overrides cluster-wide.",
+      "USB-speed hint: connection pill reads `● CONNECTED over USB-C 2.0 🐢` when the cable bottlenecks a device capable of more (iPhone 15/16 Pro 10 Gbps, iPad Pro M1+ Thunderbolt). USB-2-only devices suppress.",
+      "Settings → Appearance gains `Auto` (follows macOS Appearance). Settings → FFmpeg shows resolved source (`.bundled` / `.system` / `.missing`) + install hint.",
+      "Apple Unified Logging mirror under subsystem `md.porter.MediaPorter` with `.debug` / `.info` / `.notice` / `.error` levels. Recovery actions emit at `.notice`, hard failures at `.error` — survive `log show --last 1h` without `--info`. README has the inspection commands.",
+      "Parallel transcode lookahead (`TaskGroup` K=2–4) so transcodes run ahead of uploads while preserving send order.",
+      "Multi-device picker now leads with a `Sync target — other devices stay idle` header so users with ≥2 attached devices understand `Send` doesn't fan out.",
+      "DMG packaging: contained `.app` is always `MediaPorter.app` (download filename keeps `-with-ffmpeg`), in-app glyph matches the dock + DMG brand mark, File → New Window removed.",
+    ],
+  },
+  {
     version: "0.6.1",
     date: "2026-05-14",
     notes: [

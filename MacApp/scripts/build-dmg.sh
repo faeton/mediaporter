@@ -1,31 +1,29 @@
 #!/usr/bin/env bash
-# Build a branded, signed-content DMG from a .app bundle.
+# Build a signed-content DMG from a .app bundle.
 #
 # - .app is renamed to MediaPorter.app inside the DMG regardless of source name
 #   (R2 in plan.md) so both shipping variants present the same artifact name.
 # - Window layout is set via Finder AppleScript: 540×380 window, 96px icons,
-#   .app on the left, Applications symlink on the right, branded background.
+#   .app on the left, Applications symlink on the right. No background image —
+#   the install window is intentionally plain.
 # - Signing happens in release.sh AFTER this script exits — we just produce
 #   the UDZO file here.
 #
 # Usage:
 #   build-dmg.sh --app /path/to/Foo.app --output /path/to/Out.dmg \
-#                --volname "MediaPorter 0.6.2" \
-#                --background /path/to/dmg-background.png
+#                --volname "MediaPorter 0.6.2"
 
 set -euo pipefail
 
 APP_SRC=""
 DMG_OUT=""
 VOL_NAME=""
-BG_PNG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --app)        APP_SRC="$2"; shift 2;;
         --output)     DMG_OUT="$2"; shift 2;;
         --volname)    VOL_NAME="$2"; shift 2;;
-        --background) BG_PNG="$2"; shift 2;;
         *) echo "unknown arg: $1" >&2; exit 2;;
     esac
 done
@@ -33,7 +31,6 @@ done
 [[ -d "$APP_SRC" ]] || { echo "ERROR: --app must point at a .app directory" >&2; exit 2; }
 [[ -n "$DMG_OUT" ]] || { echo "ERROR: --output required" >&2; exit 2; }
 [[ -n "$VOL_NAME" ]] || { echo "ERROR: --volname required" >&2; exit 2; }
-[[ -f "$BG_PNG" ]] || { echo "ERROR: --background file missing: $BG_PNG" >&2; exit 2; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$(cd "$SCRIPT_DIR/../build" && pwd)"
@@ -43,14 +40,13 @@ STAGING="$BUILD_DIR/dmg-staging-$(basename "${DMG_OUT%.dmg}")"
 UDRW_DMG="$BUILD_DIR/dmg-rw-$(basename "${DMG_OUT%.dmg}").dmg"
 
 rm -rf "$STAGING" "$UDRW_DMG"
-mkdir -p "$STAGING/.background"
+mkdir -p "$STAGING"
 
 # R2: contained .app is always MediaPorter.app, regardless of source filename.
 # ditto preserves codesign seal exactly; cp -R also works on modern macOS but
 # ditto is the documented preserve-everything path.
 ditto "$APP_SRC" "$STAGING/MediaPorter.app"
 ln -s /Applications "$STAGING/Applications"
-cp "$BG_PNG" "$STAGING/.background/background.png"
 
 # Size the UDRW image to content + 30% slack. hdiutil rejects images too
 # small for the source; the slack lets Finder write .DS_Store + metadata.
@@ -84,9 +80,8 @@ MOUNT_POINT=$(printf '%s\n' "$MOUNT_INFO" | grep -o '<string>/Volumes/[^<]*</str
 echo "    mounted at $MOUNT_POINT"
 
 # Finder AppleScript: window size 540×380, icon view, 96px icons, .app on
-# the left and Applications on the right, branded background image.
-# Y positions in Finder coords are from the top; matches the arrow geometry
-# baked into make-dmg-background.swift.
+# the left and Applications on the right. No background — install window
+# is intentionally plain.
 echo "    apply Finder layout"
 osascript <<APPLESCRIPT
 tell application "Finder"
@@ -102,7 +97,6 @@ tell application "Finder"
         set arrangement of theViewOptions to not arranged
         set icon size of theViewOptions to 96
         set text size of theViewOptions to 12
-        set background picture of theViewOptions to file ".background:background.png"
         set position of item "MediaPorter.app" of container window to {136, 185}
         set position of item "Applications" of container window to {396, 185}
         close
