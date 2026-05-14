@@ -79,34 +79,19 @@ private struct TitleButton: View {
 }
 
 struct AppGlyph: View {
+    // Accent kept for API compatibility — the in-app glyph is the brand mark
+    // and stays fixed pink/black regardless of theme accent. Identity match
+    // with the dock icon (rendered by AppIcon.swift) and the DMG icon.
     let accent: AccentKey
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 5)
-            .fill(
-                LinearGradient(
-                    colors: [accent.solid, accent.solid.opacity(0.78)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                )
-            )
+        Image(nsImage: Self.cached)
+            .resizable()
+            .interpolation(.high)
             .frame(width: 20, height: 20)
-            .overlay(
-                ZStack {
-                    // Play triangle
-                    Path { p in
-                        p.move(to: CGPoint(x: 4.3, y: 5))
-                        p.addLine(to: CGPoint(x: 4.3, y: 15))
-                        p.addLine(to: CGPoint(x: 11, y: 10))
-                        p.closeSubpath()
-                    }
-                    .fill(Color.white)
-                    // Dot (the "port")
-                    Circle()
-                        .fill(Color.white)
-                        .frame(width: 3, height: 3)
-                        .position(x: 15, y: 15)
-                }
-            )
-            .shadow(color: .black.opacity(0.2), radius: 1, y: 1)
     }
+
+    // Render once at 4× the target size for crisp retina down-scaling.
+    // `AppIcon.render` builds the same artwork used for the dock + DMG icon.
+    private static let cached: NSImage = AppIcon.render(size: 80)
 }
