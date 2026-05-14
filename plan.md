@@ -333,6 +333,75 @@ Matching rules (apply to both bulk-apply and external):
 
 ---
 
+## Audit findings — 2026-05-14 (untriaged)
+
+Code-review pass against the shipping 0.6.0 codebase. Each item lists severity, file:line refs, root cause, and a fix sketch. Items aren't prioritized yet — promote into P0/P1 as you tackle them; close with a `*(shipped)*` line like the rest of the doc.
+
+### A1. AFC upload silently accepts a truncated local read — **High**
+- `Sources/Sync/AFC.swift:102-117`. The `while sent < fileSize` loop reads from `InputStream`; on `read == 0` (EOF before fileSize) or `read < 0` (local read error) it just `break`s. After the loop it logs `"TRUNCATED"` but **returns success**.
+- Consequence: caller sends `FileComplete` for an incomplete file. medialibraryd binds a partial row; on device the file is corrupt but the TV-app row exists — worst possible state for diagnostics.
+- Fix: distinguish `read == 0` before EOF (truncation of local file mid-upload) vs `read < 0` (`stream.streamError`). Throw `AFCError.readFailed(sent, …)` / `AFCError.truncated(expected, got)`. Caller propagates → `runPipelined` abandons the asset.
+
+### A2. ATC send failures swallowed by `check()` — **High**
+- `Sources/Sync/ATCSession.swift:838`. `check(_ tag:, _ rc:)` only logs `rc != 0` and returns `rc`. Used by `beginFile` (567), `completeFile` (594, 603), `abandonAsset` (625), and others. These functions are marked `throws` but `check()` never throws.
+- Consequence: if ATC connection dies mid-session (drainer-detected or transport-level), every subsequent send returns nonzero and gets logged-then-ignored. We keep uploading bytes over AFC, send `FileComplete` into the void, and only notice on `finishSync` timeout. Rows from after the drop are unbound.
+- Fix: convert `check` for the `FileBegin`/`FileComplete`/`FileError`/`FileProgress` callsites into `try checkOrThrow(...) throws -> Void`. Other ATC sends (`PowerAssertion`, `MetadataSyncFinished`) where rc != 0 isn't necessarily fatal can keep the logging-only variant under a different name.
+
+### A3. Off-by-one in `registeredCount` skips abandon for in-flight failures — **High**
+- `Sources/Pipeline/PipelineController.swift:1626-1688`. `registeredCount = idx + 1` is set **immediately after** dispatching the detached task that does `beginFile` + AFC upload + `completeFile`. If that task fails between `FileBegin` and `FileComplete`, the cleanup loop `for i in registeredCount..<preparedPairs.count` skips this index — no `abandonAsset` is sent.
+- Secondary: the status filter at 1684 (`!= .syncing && != .uploaded`) also excludes a job that *did* enter the loop range, so even reaching the abandon branch wouldn't fire for a freshly-failed in-flight upload.
+- Consequence: device gets `FileBegin` without `FileComplete` and without `FileError`. medialibraryd waits forever; `SyncFinished` never arrives. Exactly the failure mode CLAUDE.md #8 warns against.
+- Fix: rename to `dispatchedCount` and track a separate `completedCount` flipped from inside the detached task after `completeFile` returns. Cleanup loop iterates `dispatchedCount..<preparedPairs.count` to abandon never-started items, plus inspects each dispatched task's outcome to abandon any that failed mid-flight before `FileComplete`. Status filter needs to keep `.failed` / mid-flight jobs in scope.
+
+### A4. ExternalMux deadlock on stderr-heavy ffmpeg runs — **High**
+- `Sources/Transcode/ExternalMux.swift:158-174` (`mux`) and `:177-194` (`convertAssToSrt`). `errPipe` is a `Pipe`; `proc.run()` + `proc.waitUntilExit()` runs first, then `readDataToEndOfFile()` is called **after exit only on the failure path** (`guard … else { let data = … }`).
+- macOS pipe buffer is ~64 KB. ffmpeg verbose stderr (especially with `-v info`, complex filtergraphs, ASS parse warnings) can fill this. Once full, ffmpeg blocks on write → `waitUntilExit` blocks → entire pipeline thread parks. Directly violates CLAUDE.md #12 ("drain stderr in a thread").
+- Note about the "blocks UI" framing in the original finding: `mux` is a free `async throws` function, not `@MainActor`-isolated. Swift hops the await off MainActor onto the cooperative pool, so the main thread isn't pinned. What hangs is a cooperative-pool worker plus the upstream `Task` awaiting it — pipeline progress freezes, UI stays responsive.
+- Fix: install `readabilityHandler` on `errPipe.fileHandleForReading` before `proc.run()`, append to a tail-only buffer (last ~8 KB), clear the handler after `waitUntilExit`, drain remainder. Pattern already used correctly in `Transcoder.swift` main path — copy it.
+
+### A5. probeFile blocks a cooperative-pool thread (not MainActor) — **Medium**
+- `Sources/Analysis/Probe.swift:126`. Synchronous `proc.run()` + `readDataToEndOfFile()` + `waitUntilExit()`. Called from `PipelineController.analyzeOne` (`PipelineController.swift:989`) which is `@MainActor`-isolated; called concurrently up to 4× by the TaskGroup at 956.
+- Important correction to the original finding's framing: `probeFile` is a *nonisolated* `async` function. Swift 5.7+ hops nonisolated async calls off the caller's actor onto the generic cooperative executor. So UI does **not** freeze. What suffers: 4 concurrent probes each pin a cooperative-pool worker (pool size ≈ `activeProcessorCount`). On a quad-core MBA that's all of them; other concurrency (TMDb fetches, OpenSubtitles, file scanning) gets queued behind them.
+- Consequence: parallel analyze is parallel, but during the probe window other async work in the app stalls. Not catastrophic — the analyze wave already coalesces network work via `resolveCluster` caching.
+- Fix options: (a) wrap probe body in `Task.detached { … }.value` so blocking lives outside the cooperative pool, (b) switch to async pipe reading via `DispatchSource.makeReadSource(fileDescriptor:queue:)` or `for try await line in handle.bytes.lines`. Option (a) is one-line and good enough; (b) is correct but invasive. Same pattern recurs in: `Tagger`, `StillExtractor`, anywhere we use Process synchronously.
+
+### A6. VideoToolbox detection runs a subprocess per transcode — **Medium**
+- `Sources/Transcode/Transcoder.swift:126` (definition) and `:309` (`buildCommand`). `detectVideoToolbox()` shells out to `ffmpeg -encoders` and grep-parses the output. Called inside the hot path of every transcode.
+- Consequence: every file pays ~50–150 ms + a stderr-free Process for a fact that never changes per app run.
+- Fix: replace with `static let supportsVideoToolbox: Bool = detectVideoToolbox()` on `Transcoder` (or move into a launch-time capability struct alongside `FFmpegLocator`). One subprocess at first use, cached forever.
+
+### A7. probeOutputForDebug unconditional per output file — **Medium**
+- `Sources/Transcode/Transcoder.swift:565` calls `probeOutputForDebug(outputPath)` after every successful transcode; the function at `:570-591` shells out to ffprobe and writes per-stream lines to `DebugLog`. Comment at 561 calls it "temporary, for the binding bug" — that bug shipped in 0.6.0, this hasn't been retired.
+- Fix: gate behind `Tweaks.debug` (or remove). Cheap, but visible per-file overhead and noise in the debug log.
+
+### A8. Disk preflight is over-conservative for the streaming pipeline — **Medium (Mac side); spec-debate (device side)**
+- `Sources/Pipeline/PipelineStats.swift:123-147` requires `1.1 × sourceBytesTotal` free on **both** Mac temp and the device.
+- Mac side is over-conservative: `runPipelined` keeps ~1 transcoded output in flight at a time. The real requirement is `largest_single_output × 1.1 + headroom`, not the sum. Big drops (50+ files) can be rejected even when the pipeline would happily stream through with ~10 GB of free temp.
+- Device side is more subtle. The actual need is sum of *output* bytes, not source — and outputs often shrink after downscale / H.265 / AC3→AAC. But output size isn't known until after `evaluateCompatibility` per file. Today's 1.1×source is the safe pessimistic bound. Better: after analyze, sum `decision.predictedOutputBytes` (add field if missing) and use that × 1.05 as the device-side check.
+- Fix: split the preflight. Mac check on the largest source file; device check on sum of predicted outputs. Don't ship until you've cross-checked predicted vs actual on a real batch — under-estimating bites mid-sync.
+
+### A9. SwiftUI recomputes `clusterExtrasOrdered` every progress tick — **Low**
+- `App/Sources/ContentView.swift:21-33`. Computed property on the view referenced from `body`; filters `pipeline.clusterExtras`, lookups against `pipeline.tvShowResolutions`, sorts. SwiftUI re-invokes body on every `@Observable` change — `job.progress` ticks every 0.25 s during transcode/upload.
+- Small N: invisible. Large drop (50+ jobs, 8+ clusters): noticeable CPU during sync, plus more invalidations downstream than necessary.
+- Fix: cache the ordered list on the controller as `@Published var clusterExtrasOrdered: [(String, ReleaseExtras)]`, recompute only when `clusterExtras` / `jobs.count` / `tvShowResolutions` change. Or use `@State` on the view + `.onChange(of:)` of a stable derived key.
+
+### Cross-refs to existing plan items
+- **A5** is a refinement on shipped **P1.10 Parallel analyze** — the wave model works, but the worker still blocks a thread.
+- **A4** lands on shipped **P2.11e Pipeline integration — mux step** — fix is small.
+- **A3** lands on shipped **P1.8 Interleave registration with uploads** — the cancel-path cleanup needs a second pass.
+- **A8** revisits the 0.5.0 preflight (mentioned in `project_macapp_next_phases` memory).
+- **A1 / A2** are below the abstraction layer of any existing P-tier item; they're protocol-correctness gaps that surface as the rare "stuck SyncFinished" failure mode.
+
+### Suggested triage order if grouped
+1. **A1 + A2 + A3** as one session — all on the AFC/ATC reliability axis, all silent-failure modes that share testing infrastructure (force a mid-sync disconnect, observe that the device recovers).
+2. **A4** standalone, ~30 min — copy the stderr drainer pattern from Transcoder.
+3. **A6 + A7** as cleanup batch, ~15 min total.
+4. **A5** when ready — wrap in `Task.detached`, validate analyze wall time on a 20-file drop doesn't regress.
+5. **A8** after A5, since predicted-output-size requires the analyze decision to expose it.
+6. **A9** only if a large drop measurably stalls during sync.
+
+---
+
 ## Deferred / not planned (with reason)
 
 - **Multi-track HW transcode** — VideoToolbox media-engine count makes
