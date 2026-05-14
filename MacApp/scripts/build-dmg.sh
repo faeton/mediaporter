@@ -95,14 +95,16 @@ tell application "Finder"
         set current view of container window to icon view
         set toolbar visible of container window to false
         set statusbar visible of container window to false
-        set the bounds of container window to {200, 200, 740, 580}
+        -- Outer bounds include the title bar (≈28pt on modern macOS); to get
+        -- a 540×380 content area we need outer height 408 → bottom = 200+408.
+        set the bounds of container window to {200, 200, 740, 608}
         set theViewOptions to the icon view options of container window
         set arrangement of theViewOptions to not arranged
         set icon size of theViewOptions to 96
         set text size of theViewOptions to 12
         set background picture of theViewOptions to file ".background:background.png"
-        set position of item "MediaPorter.app" of container window to {140, 200}
-        set position of item "Applications" of container window to {400, 200}
+        set position of item "MediaPorter.app" of container window to {136, 185}
+        set position of item "Applications" of container window to {396, 185}
         close
         open
         update without registering applications
