@@ -39,13 +39,36 @@ enum Density: String, CaseIterable, Identifiable {
     var expandedPad: CGFloat { self == .compact ? 10 : 14 }
 }
 
+/// Tri-state appearance setting. `.auto` means "follow the system" — we don't
+/// override `.preferredColorScheme` so SwiftUI inherits from macOS.
+enum AppearanceMode: String, CaseIterable, Identifiable {
+    case auto, light, dark
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .auto: return "Auto"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+    /// Maps to SwiftUI's `.preferredColorScheme` argument. `nil` for auto
+    /// (no override; system decides).
+    var preferred: ColorScheme? {
+        switch self {
+        case .auto: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+
 @Observable
 final class Tweaks {
     var accentKey: AccentKey = .blue {
         didSet { UserDefaults.standard.set(accentKey.rawValue, forKey: Self.kAccent) }
     }
-    var dark: Bool = false {
-        didSet { UserDefaults.standard.set(dark, forKey: Self.kDark) }
+    var appearance: AppearanceMode = .auto {
+        didSet { UserDefaults.standard.set(appearance.rawValue, forKey: Self.kAppearance) }
     }
     var density: Density = .comfortable {
         didSet { UserDefaults.standard.set(density.rawValue, forKey: Self.kDensity) }
@@ -53,15 +76,34 @@ final class Tweaks {
 
     var accent: AccentKey { accentKey }
 
+    /// Resolves to a concrete light/dark for places that need a boolean —
+    /// `Theme(dark:)`, conditional palette logic. Callers pass the current
+    /// `@Environment(\.colorScheme)` so `.auto` follows the system.
+    func effectiveDark(systemColorScheme: ColorScheme) -> Bool {
+        switch appearance {
+        case .auto:  return systemColorScheme == .dark
+        case .light: return false
+        case .dark:  return true
+        }
+    }
+
     private static let kAccent = "tweaks.accent"
-    private static let kDark = "tweaks.dark"
+    private static let kAppearance = "tweaks.appearance"
     private static let kDensity = "tweaks.density"
+    // Legacy key — bool persisted by pre-AppearanceMode builds. Read once on
+    // first launch after upgrade and translate; never written again.
+    private static let kLegacyDark = "tweaks.dark"
 
     init() {
         if let raw = UserDefaults.standard.string(forKey: Self.kAccent),
            let a = AccentKey(rawValue: raw) { self.accentKey = a }
-        if UserDefaults.standard.object(forKey: Self.kDark) != nil {
-            self.dark = UserDefaults.standard.bool(forKey: Self.kDark)
+        if let raw = UserDefaults.standard.string(forKey: Self.kAppearance),
+           let m = AppearanceMode(rawValue: raw) {
+            self.appearance = m
+        } else if UserDefaults.standard.object(forKey: Self.kLegacyDark) != nil {
+            // Migrate the old tweaks.dark Bool into the new tri-state.
+            self.appearance = UserDefaults.standard.bool(forKey: Self.kLegacyDark) ? .dark : .light
+            UserDefaults.standard.removeObject(forKey: Self.kLegacyDark)
         }
         if let raw = UserDefaults.standard.string(forKey: Self.kDensity),
            let d = Density(rawValue: raw) { self.density = d }

@@ -21,7 +21,7 @@ struct MediaPorterApp: App {
             ContentView()
                 .environment(pipeline)
                 .environment(tweaks)
-                .preferredColorScheme(tweaks.dark ? .dark : .light)
+                .preferredColorScheme(tweaks.appearance.preferred)
                 .onAppear {
                     // Hand the delegate a reference so applicationShouldTerminate
                     // can check for in-flight work before honoring Cmd-Q.
@@ -106,7 +106,7 @@ struct MediaPorterApp: App {
             SettingsView()
                 .environment(pipeline)
                 .environment(tweaks)
-                .preferredColorScheme(tweaks.dark ? .dark : .light)
+                .preferredColorScheme(tweaks.appearance.preferred)
         }
     }
 }

@@ -66,9 +66,10 @@ struct SettingsView: View {
                 }
 
                 LabeledContent("Appearance") {
-                    Picker("", selection: $tweaks.dark) {
-                        Text("Light").tag(false)
-                        Text("Dark").tag(true)
+                    Picker("", selection: $tweaks.appearance) {
+                        ForEach(AppearanceMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()

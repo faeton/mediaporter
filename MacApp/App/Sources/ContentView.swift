@@ -8,11 +8,12 @@ import MediaPorterCore
 struct ContentView: View {
     @Environment(PipelineController.self) private var pipeline
     @Environment(Tweaks.self) private var tweaks
+    @Environment(\.colorScheme) private var systemColorScheme
     @State private var expanded: Set<UUID> = []
     @State private var isDroppingList = false
     @State private var isDroppingDevice = false
 
-    private var theme: Theme { Theme(dark: tweaks.dark) }
+    private var theme: Theme { Theme(dark: tweaks.effectiveDark(systemColorScheme: systemColorScheme)) }
     private var showEmpty: Bool { pipeline.jobs.isEmpty }
 
     /// Clusters with detected external tracks, ordered by show name for
