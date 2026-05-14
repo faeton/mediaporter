@@ -426,6 +426,14 @@ Cosmetic / packaging items captured against v0.6.1 shipping artifacts. Pull into
 
 **Want.** Surface the current `ffmpegSource` (`.bundled` / `.system` / `.missing`) in Settings → About or Settings → Diagnostics. Read off `Prerequisites.ffmpegSource`; the path resolution is already there. Free of code complexity — pure SwiftUI addition.
 
+### R4. USB-speed hint when connection is below device capability — **Low**
+
+**Idea (2026-05-14).** Detect the negotiated USB bus speed for the connected device. If we see 480 Mbps (USB 2) but the device is on Apple's USB-3-capable list (iPhone 15 Pro/Pro Max, all iPads since 2018 with USB-C, iPad Pro M4, iPad Air M2/M3), surface a one-line hint: *"This cable is limiting transfers to ~60 MB/s. A USB-C / Thunderbolt cable supports up to ~1 GB/s on this device."* Don't nag — show once per session, dismissible.
+
+**Why.** Most users plug whatever cable is in the drawer; a 2-hour anime drop becomes a 20-minute drop on a better cable. We already know the device model from AMDevice properties — adding speed detection is a few lines of IOKit (`IOUSBHostDevice` properties) or measuring effective throughput on the first uploaded MB and comparing against the device's known max.
+
+**Capability table.** Lightning iPhones (14 and older) cap at USB 2 — no hint there. iPhone 15 Pro/Max, all iPads with USB-C → USB 3+. iPad Pro M4 / Air M2+ → Thunderbolt-class. Maintain a small allow-list keyed by `ProductType` from AMDevice.
+
 ---
 
 ## Future / Platform expansion — research notes (not committed)
