@@ -406,13 +406,32 @@ Code-review pass against the shipping 0.6.0 codebase. Each item lists severity, 
 
 Cosmetic / packaging items captured against v0.6.1 shipping artifacts. Pull into the next release cycle.
 
-### R1. DMG window cosmetics — **Medium**
+### R1. DMG window cosmetics — pipeline shipped 2026-05-14 (cb1ad3b)
 
-**Today.** `release.sh::build_dmg` produces a default Finder DMG: stock background, default icon layout, generic mini-arrow Finder icon in the titlebar. Reference: porter.md/release v0.6.1 screenshot 2026-05-14.
+**Shipped.** `release.sh::build_dmg` now delegates to `MacApp/scripts/build-dmg.sh`:
+UDRW image → mount → Finder AppleScript (icon view, 96-pt icons, 540×380
+content area via outer bounds `{200,200,740,608}`, `.app` at `{136,185}`,
+`Applications` at `{396,185}`, background = `MacApp/Resources/dmg-background.png`)
+→ detach → UDZO convert. Mount-point parser switched from xmllint xpath to
+grep-the-string because xmllint choked on Apple's plist namespace.
 
-**Want.** A branded DMG window — background image with the porter.md mark + a positioned arrow from the `.app` icon to the `Applications` shortcut. Mirror Apple/Sketch/Transmission convention.
+**Constraint discovered.** Finder DMG windows can't be locked from resize —
+`resizable` is read-only on the Finder window class in AppleScript, no
+`.DS_Store` flag honors it, AXResizable is r/o through System Events.
+Accepted: every shipping Mac DMG installer has the same property.
 
-**How.** Either `create-dmg` (npm package, wraps `hdiutil` + AppleScript) or hand-roll AppleScript that runs after `hdiutil create` and before `hdiutil convert`. Background PNG should live at `MacApp/Resources/dmg-background.png` (or similar) and be referenced from release.sh. Brand assets in `brand/logo/` are SVG — pre-rasterize to PNG at 540×380 (standard DMG window size) + @2x.
+### R1b. Final DMG background design — **Low**
+
+**Today.** `MacApp/Resources/dmg-background.png` is a placeholder design
+(committed at cb1ad3b). Icon slot painted positions required manual y/x
+nudge in the AppleScript layout to align the real Finder icons inside the
+painted dashed slots. If the design is redrawn the positions will drift.
+
+**Want.** A final background where the dashed slot centers sit at exactly
+`{136, 185}` and `{396, 185}` in logical points (so the AppleScript is the
+source of truth and no per-release tuning is needed). PNG @2x with 144 DPI
+metadata; native canvas 1080×760. Keep the text panel above the slots so
+icon labels render on the well plates, footer at the bottom edge.
 
 ### R2. `.app` filename inside the DMG should be `MediaPorter.app` regardless of variant — **High**
 
