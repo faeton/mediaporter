@@ -77,6 +77,12 @@ public class PipelineController {
     /// the user can pick once for the whole cluster instead of N times.
     public var pendingShowPicks: [PendingShowPick] = []
 
+    /// Total picks queued in the current "batch" (one analyzeAll run can
+    /// surface several clusters with ambiguous TMDb matches). Stays constant
+    /// as the user resolves/skips picks, so the sheet can show "Pick 3 of 6".
+    /// Resets to 1 the next time a new pick is queued onto an empty list.
+    public var pendingShowPicksBatchTotal: Int = 0
+
     /// Latest known ffmpeg state. The ContentView banner observes this and
     /// stays visible while .missing; re-polls every 3s via the loop started
     /// in `startFFmpegMonitoring()` so a fresh `brew install ffmpeg`
@@ -755,6 +761,15 @@ public class PipelineController {
         if let idx = pendingShowPicks.firstIndex(where: { $0.id == clusterID }) {
             pendingShowPicks[idx] = pick
         } else {
+            // First pick after a drained queue starts a fresh batch.
+            // Subsequent picks while one is already on screen extend it,
+            // so the counter walks 1/N → 2/N → … N/N as the user steps
+            // through them.
+            if pendingShowPicks.isEmpty {
+                pendingShowPicksBatchTotal = 1
+            } else {
+                pendingShowPicksBatchTotal += 1
+            }
             pendingShowPicks.append(pick)
         }
     }
@@ -769,6 +784,7 @@ public class PipelineController {
         )
         tvShowResolutions[clusterID] = resolved
         pendingShowPicks.removeAll { $0.id == clusterID }
+        if pendingShowPicks.isEmpty { pendingShowPicksBatchTotal = 0 }
         await refreshEpisodes(in: clusterID, using: resolved)
     }
 
@@ -776,6 +792,7 @@ public class PipelineController {
     /// pick — the cluster's existing fallback ResolvedShow stays in place.
     public func dismissClusterPick(_ clusterID: String) {
         pendingShowPicks.removeAll { $0.id == clusterID }
+        if pendingShowPicks.isEmpty { pendingShowPicksBatchTotal = 0 }
     }
 
     /// Snapshot the user's current per-row selection on `job` as cluster

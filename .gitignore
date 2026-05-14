@@ -27,6 +27,13 @@ MacApp/Private/
 MacApp/MediaPorter/Resources/grappa.bin
 python-reference/src/mediaporter/sync/data/grappa.bin
 
+# Personal experiments / probe scripts / test-corpus generators. Anything
+# in a `local/` directory under scripts is considered local-only — handy
+# for one-off diagnostics and test-asset generators that shouldn't ship
+# with the repo.
+scripts/local/
+**/scripts/local/
+
 # site/ (Astro + Cloudflare Pages)
 site/node_modules/
 site/dist/

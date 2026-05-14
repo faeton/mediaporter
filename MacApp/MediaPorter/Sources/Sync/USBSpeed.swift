@@ -12,13 +12,22 @@ import IOKit.usb
 /// `serial` is matched against the USB Serial Number, case-insensitive,
 /// with hyphens stripped (iPhone 15+ encode UDID-like serials with a
 /// dash, USB Serial Number sometimes does and sometimes doesn't). When
-/// only one Apple device is plugged in we return its speed even without
+/// only one iPhone/iPad is plugged in we return its speed even without
 /// a serial match so the hint still shows for the common single-device
 /// case.
 ///
-/// Returns nil if no Apple USB device is present or the registry walk
-/// fails. Speeds map per Apple's IOUSBHostFamily: 2 = USB 2 (480 Mbps),
-/// 3 = USB 3 (5 Gbps), 4 = USB 3.1 (10 Gbps), 5 = USB 3.2 (20 Gbps).
+/// We filter the IOKit walk to ProductString "iPhone" / "iPad" because a
+/// typical Mac dev rig has 2-4 Apple USB devices (Magic Keyboard, Mouse,
+/// AirPods case, Studio Display); without the filter `appleCount > 1`
+/// pushed every lookup into strict-serial-match, which silently failed
+/// for the modern dashed-UDID format and gave an empty suffix in the
+/// connection pill.
+///
+/// Returns nil if no iPhone/iPad USB device is present or the registry
+/// walk fails. nil here is the signal "device isn't on USB" — caller can
+/// fall back to a Wi-Fi label. Speeds map per Apple's IOUSBHostFamily:
+/// 2 = USB 2 (480 Mbps), 3 = USB 3 (5 Gbps), 4 = USB 3.1 (10 Gbps),
+/// 5 = USB 3.2 (20 Gbps).
 public func queryUSBNegotiatedSpeedMbps(serial: String? = nil) -> Int? {
     guard let matching = IOServiceMatching("IOUSBHostDevice") else { return nil }
     var iter: io_iterator_t = 0
@@ -28,16 +37,17 @@ public func queryUSBNegotiatedSpeedMbps(serial: String? = nil) -> Int? {
     defer { IOObjectRelease(iter) }
 
     let wanted = serial?.lowercased().replacingOccurrences(of: "-", with: "")
-    var firstAppleSpeed: Int? = nil
-    var appleCount = 0
+    var firstMobileSpeed: Int? = nil
+    var mobileCount = 0
 
     while case let entry = IOIteratorNext(iter), entry != 0 {
         defer { IOObjectRelease(entry) }
         guard let vid = readUInt(entry, "idVendor"), vid == 0x05AC else { continue }
-        appleCount += 1
+        guard isAppleMobileDevice(entry) else { continue }
+        mobileCount += 1
         guard let speedCode = readUInt(entry, "Device Speed") else { continue }
         let mbps = mbpsForUSBSpeedCode(speedCode)
-        if firstAppleSpeed == nil { firstAppleSpeed = mbps }
+        if firstMobileSpeed == nil { firstMobileSpeed = mbps }
         if let want = wanted, let sn = readString(entry, "USB Serial Number") {
             let norm = sn.lowercased().replacingOccurrences(of: "-", with: "")
             if norm == want || want.contains(norm) || norm.contains(want) {
@@ -45,7 +55,47 @@ public func queryUSBNegotiatedSpeedMbps(serial: String? = nil) -> Int? {
             }
         }
     }
-    return appleCount == 1 ? firstAppleSpeed : nil
+    return mobileCount == 1 ? firstMobileSpeed : nil
+}
+
+/// Is there an iPhone/iPad on the USB bus? When `false` while our
+/// MobileDevice-side discovery still has the device, it's connected over
+/// the Wi-Fi tunnel (RemoteXPC). The connection pill uses this to choose
+/// between "over USB-C X.X" and "over Wi-Fi" suffixes.
+public func anyAppleMobileDeviceOnUSB() -> Bool {
+    guard let matching = IOServiceMatching("IOUSBHostDevice") else { return false }
+    var iter: io_iterator_t = 0
+    guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iter) == KERN_SUCCESS else {
+        return false
+    }
+    defer { IOObjectRelease(iter) }
+
+    while case let entry = IOIteratorNext(iter), entry != 0 {
+        defer { IOObjectRelease(entry) }
+        guard let vid = readUInt(entry, "idVendor"), vid == 0x05AC else { continue }
+        if isAppleMobileDevice(entry) { return true }
+    }
+    return false
+}
+
+/// Heuristic: is this Apple USB entry an iPhone or iPad (not a keyboard,
+/// mouse, AirPods case, or Studio Display)? Reads `kUSBProductString` /
+/// `USB Product Name` for a substring match; falls back to known iPhone /
+/// iPad USB PID ranges if the string property is missing (rare).
+private func isAppleMobileDevice(_ entry: io_registry_entry_t) -> Bool {
+    if let name = readString(entry, "USB Product Name")
+        ?? readString(entry, "kUSBProductString") {
+        let lower = name.lowercased()
+        if lower.contains("iphone") || lower.contains("ipad") || lower.contains("ipod") {
+            return true
+        }
+    }
+    if let pid = readUInt(entry, "idProduct") {
+        // Apple iPhone/iPad PID range. iPods/iPhones live around 0x1290-0x12AB;
+        // iPads share that band. Loose match is fine — we already gated VID.
+        if pid >= 0x1290 && pid <= 0x12FF { return true }
+    }
+    return false
 }
 
 /// Maximum USB negotiation this product is physically capable of, in Mbps.

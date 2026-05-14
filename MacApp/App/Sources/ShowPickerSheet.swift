@@ -45,8 +45,6 @@ struct ShowPickerSheet: View {
 
             candidatesList
 
-            Spacer(minLength: 0)
-
             HStack {
                 if isSearching {
                     ProgressView().controlSize(.small)
@@ -70,26 +68,95 @@ struct ShowPickerSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 520, height: 460)
-        .onAppear {
-            query = initialQuery
-            candidates = initialCandidates
-            selectedID = initialCandidates.first?.id
-            hasSearched = !initialCandidates.isEmpty
-            DispatchQueue.main.async { queryFocused = true }
-        }
+        .frame(width: 540, height: 520)
+        .onAppear { reset() }
+        // Sheet re-renders for the next PendingShowPick while staying mounted,
+        // which preserves @State. Without this onChange the search field and
+        // candidate list would still show the previous cluster's data even
+        // though the header (driven by `initialQuery`) updates correctly.
+        .onChange(of: clusterID) { _, _ in reset() }
+    }
+
+    private func reset() {
+        query = initialQuery
+        candidates = initialCandidates
+        selectedID = initialCandidates.first?.id
+        hasSearched = !initialCandidates.isEmpty
+        isSearching = false
+        DispatchQueue.main.async { queryFocused = true }
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(affectedCount > 1 ? "Pick show — applies to \(affectedCount) episodes"
-                                   : "Pick show")
-                .font(.system(size: 15, weight: .semibold))
-            Text("TMDb couldn't auto-match this show, or there are several plausible candidates. Pick one and the choice is reused for every episode in this cluster.")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Pick show — \(displayName)")
+                    .font(.system(size: 15, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 8)
+                if pipeline.pendingShowPicksBatchTotal > 1 {
+                    Text("\(batchPosition) of \(pipeline.pendingShowPicksBatchTotal)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(theme.canvas)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+            }
+            Text(affectedCount > 1
+                ? "Applies to \(affectedCount) episodes in this cluster:"
+                : "Applies to this episode:")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            affectedFilesList
+            Text("TMDb couldn't auto-match this show. Pick one — or Skip to keep the filename as the show name (synthetic poster only, no TMDb description).")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// Show name as parsed from the filename — what the search is keyed off.
+    /// Shown in the header so the user knows which show is being asked about.
+    private var displayName: String {
+        let q = initialQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        return q.isEmpty ? "(unknown)" : "\u{201C}\(q)\u{201D}"
+    }
+
+    /// 1-based position in the current batch. `pendingShowPicks.first` is the
+    /// one currently shown, so position = total - remaining + 1.
+    private var batchPosition: Int {
+        max(1, pipeline.pendingShowPicksBatchTotal - pipeline.pendingShowPicks.count + 1)
+    }
+
+    /// Current file names for this cluster, looked up live so they stay in
+    /// sync if the underlying jobs change while the sheet is open.
+    private var affectedFileNames: [String] {
+        pipeline.jobs
+            .filter { $0.clusterID == clusterID }
+            .map { $0.fileName }
+            .sorted()
+    }
+
+    @ViewBuilder
+    private var affectedFilesList: some View {
+        let names = affectedFileNames
+        let limit = 4
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(Array(names.prefix(limit).enumerated()), id: \.offset) { _, name in
+                Text("• \(name)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(theme.textDim)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            if names.count > limit {
+                Text("…and \(names.count - limit) more")
+                    .font(.system(size: 10))
+                    .foregroundStyle(theme.textDim)
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     @ViewBuilder
@@ -111,7 +178,7 @@ struct ShowPickerSheet: View {
                 }
             }
         }
-        .frame(minHeight: 220, maxHeight: 280)
+        .frame(minHeight: 200, maxHeight: .infinity)
         .background(theme.canvas)
         .overlay(
             RoundedRectangle(cornerRadius: 6)

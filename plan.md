@@ -468,6 +468,8 @@ Speculative work. Each item has a stated unknown that needs device verification 
 
 **Why we're not doing it.** USB wins on every axis and porter.md customers have the cable. Pull only if a segment shifts (untethered shoot floor, etc.).
 
+**UI signal already wired (2026-05-14).** `ConnectionPillView` now detects "device discovered but no iPhone/iPad on the USB bus" (via `USBSpeed.swift::anyAppleMobileDeviceOnUSB`) and shows `CONNECTED over Wi-Fi` + an amber warning hint that explains Wi-Fi sync isn't supported yet and the user needs a cable. When we ship F1 the hint just disappears — no other UI plumbing needed.
+
 ### F2. Apple Vision Pro support — researched 2026-05-14, conclusion: don't ship
 
 Two independent load-bearing blockers.

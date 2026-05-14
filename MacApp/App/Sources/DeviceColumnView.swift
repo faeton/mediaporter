@@ -658,6 +658,7 @@ private struct ConnectionPillView: View {
     let productType: String
     let udid: String
     @State private var negotiatedMbps: Int?
+    @State private var onUSB: Bool = true
 
     private let green = Color(red: 0.19, green: 0.82, blue: 0.35)
 
@@ -674,7 +675,7 @@ private struct ConnectionPillView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(green)
                 .fixedSize()
-            if let suffix = usbSuffix {
+            if let suffix = connectionSuffix {
                 Text("over")
                     .font(.system(size: 10, weight: .regular))
                     .foregroundStyle(green.opacity(0.7))
@@ -687,6 +688,10 @@ private struct ConnectionPillView: View {
                     SlowHint(theme: theme, tooltip: hintTooltip(capability: capability))
                         .fixedSize()
                 }
+                if !onUSB {
+                    WiFiNotReadyHint(theme: theme)
+                        .fixedSize()
+                }
             }
         }
         .lineLimit(1)
@@ -695,22 +700,33 @@ private struct ConnectionPillView: View {
         .overlay(Capsule().strokeBorder(green.opacity(0.3), lineWidth: 0.5))
         .fixedSize()
         .task(id: udid) {
-            negotiatedMbps = await Task.detached {
-                queryUSBNegotiatedSpeedMbps(serial: udid)
+            let probe = await Task.detached { () -> (Int?, Bool) in
+                let mbps = queryUSBNegotiatedSpeedMbps(serial: udid)
+                let hasUSB = mbps != nil || anyAppleMobileDeviceOnUSB()
+                return (mbps, hasUSB)
             }.value
+            negotiatedMbps = probe.0
+            onUSB = probe.1
         }
     }
 
-    private var usbSuffix: String? {
-        guard let mbps = negotiatedMbps, mbps > 0 else { return nil }
-        switch mbps {
-        case 480: return "USB-C 2.0"
-        case 5000: return "USB-C 3.0"
-        case 10000: return "USB-C 3.1"
-        case 20000: return "USB-C 3.2"
-        case 40000: return "Thunderbolt"
-        default: return nil
+    /// Suffix shown after "CONNECTED over". USB takes priority — if a
+    /// negotiated USB speed is known we show that. If no iPhone/iPad is on
+    /// the USB bus the device must be on the Wi-Fi tunnel (RemoteXPC),
+    /// which we surface as "Wi-Fi" + a not-ready hint (sync isn't wired
+    /// over the tunnel yet — see plan.md).
+    private var connectionSuffix: String? {
+        if let mbps = negotiatedMbps, mbps > 0 {
+            switch mbps {
+            case 480: return "USB-C 2.0"
+            case 5000: return "USB-C 3.0"
+            case 10000: return "USB-C 3.1"
+            case 20000: return "USB-C 3.2"
+            case 40000: return "Thunderbolt"
+            default: return nil
+            }
         }
+        return onUSB ? nil : "Wi-Fi"
     }
 
     private func hintTooltip(capability: Int) -> String {
@@ -768,6 +784,49 @@ private struct SlowHint: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(width: 260, alignment: .leading)
+                .padding(EdgeInsets(top: 12, leading: 14, bottom: 12, trailing: 14))
+            }
+    }
+}
+
+/// Amber warning rendered next to the "Wi-Fi" suffix when the device is
+/// discovered over the RemoteXPC tunnel rather than USB. Sync over the
+/// tunnel isn't wired up yet — the user needs a cable for the upload
+/// flow to work. Click for the popover explanation; tooltip mirrors it.
+private struct WiFiNotReadyHint: View {
+    let theme: Theme
+    @State private var showPopover = false
+
+    private let amber = Color(red: 0.96, green: 0.62, blue: 0.04)
+    private let message = """
+    Wi-Fi sync isn't supported yet.
+
+    Plug the device in with a USB-C cable to transfer files. We'll add Wi-Fi tunnel support in a future release.
+    """
+
+    var body: some View {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(amber)
+            .padding(.horizontal, 2)
+            .contentShape(Rectangle())
+            .help(message)
+            .onTapGesture { showPopover.toggle() }
+            .onHover { hovering in
+                if hovering { NSCursor.pointingHand.set() }
+                else { NSCursor.arrow.set() }
+            }
+            .popover(isPresented: $showPopover, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(message)
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(nil)
+                        .lineSpacing(3)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(width: 280, alignment: .leading)
                 .padding(EdgeInsets(top: 12, leading: 14, bottom: 12, trailing: 14))
             }
     }
