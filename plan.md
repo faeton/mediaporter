@@ -337,6 +337,18 @@ Matching rules (apply to both bulk-apply and external):
 
 Code-review pass against the shipping 0.6.0 codebase. Each item lists severity, file:line refs, root cause, and a fix sketch. Items aren't prioritized yet — promote into P0/P1 as you tackle them; close with a `*(shipped)*` line like the rest of the doc.
 
+### A0. Wrong insert_track key placement for TV episodes — **High** *(shipped 2026-05-15)*
+- Originally `Sources/Sync/ATCSession.swift` sent `tv_show_name` / `sort_tv_show_name` / `episode_number` at top-level of the `item` sub-dict. None of those keys exist anywhere in AMPDevicesAgent's parser. The first migration (2026-05-14) renamed them to `series_name` / `sort_series_name` / `episode` — still at item top-level. Live device DB confirmed those ALSO didn't populate (`item_artist.series_name` stayed empty for Chernobyl, The Bear, Succession, Veep across three sync attempts).
+- **Root cause** (2026-05-15, via AMPDevicesAgent strings cluster at 0x784603-0x784711, decoded by walking the string table by offset): the accepted insert_track key-cluster for `video_info` sub-dict is `has_alternate_audio`, `has_subtitles`, `characteristics_valid`, `is_hd`, `season_number`, `series_name`, `sort_series_name`, `episode_id`, `episode_sort_id`, `network_name`, `extended_content_rating`, `movie_info`. **These live in `video_info`, not item top-level.** Kebab `show-name` / `season-number` / `episode-number` exist at strings 0x770800 but are iTunes Store metadata keys (different code path — parsed when downloading purchased content), so sending them in our ATC plist did nothing.
+- **`episode_sort_id`** is in two places now: video_info cluster (legacy schema) AND `item` table top-level (current iOS — column migrated). We send it in both spots.
+- **Verified via Fleabag S01E02 drop**: `item_artist.series_name="Fleabag"`, `album.season_number=1`, `item_video.season_number=1`, `item_video.episode_id="S01E02"`, `item.episode_sort_id=2`. TV.app shows "Fleabag" header + "Season 1" + "Episode 2" titled row.
+- **Follow-up secondary fields worth adding** (in AMPDevicesAgent insert_track cluster, not yet sent):
+  - `description` / `description_long` — TMDb episode overview row on show-detail.
+  - `network_name` — TMDb show network ("HBO", "BBC One", etc.).
+  - `extended_content_rating` — TMDb content rating ("TV-MA", "TV-14").
+  These need TMDb plumbing (we don't currently pull overview/network/rating into `EpisodeMetadata`).
+- **Remaining show-detail bug**: big portrait poster slot shows the landscape episode still, not the show portrait. This is separate — needs `insert_album` + Airlock Album-class artwork upload to populate `album.artwork_token`. Track-class artwork (what we send now) only drives episode-row thumbs.
+
 ### A1. AFC upload silently accepts a truncated local read — **High**
 - `Sources/Sync/AFC.swift:102-117`. The `while sent < fileSize` loop reads from `InputStream`; on `read == 0` (EOF before fileSize) or `read < 0` (local read error) it just `break`s. After the loop it logs `"TRUNCATED"` but **returns success**.
 - Consequence: caller sends `FileComplete` for an incomplete file. medialibraryd binds a partial row; on device the file is corrupt but the TV-app row exists — worst possible state for diagnostics.

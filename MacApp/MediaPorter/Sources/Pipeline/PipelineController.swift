@@ -2351,10 +2351,17 @@ public class PipelineController {
             item.seasonNumber = e.season
             item.episodeNumber = e.episode
             item.episodeSortID = e.episode
-            item.artist = e.showName
-            item.sortArtist = e.showName.lowercased()
-            item.album = "\(e.showName), Season \(e.season)"
-            item.sortAlbum = "\(e.showName.lowercased()), season \(e.season)"
+            // Artist/album strings follow Apple's third-party-sync convention
+            // (Shogun 2024 reference at traces/MediaLibrary.sqlitedb):
+            //   item_artist = "<Show> season <N>"
+            //   album       = "<Show>"
+            // item_artist.series_name itself is set separately via the
+            // `series_name` wire key in the `video_info` sub-dict in
+            // ATCSession; album.season_number via video_info.season_number.
+            item.artist = "\(e.showName) season \(e.season)"
+            item.sortArtist = "\(e.showName.lowercased()) season \(e.season)"
+            item.album = e.showName
+            item.sortAlbum = e.showName.lowercased()
             item.albumArtist = e.showName
             item.sortAlbumArtist = e.showName.lowercased()
             // Per-episode landscape thumb (TMDb still / ffmpeg-extracted /

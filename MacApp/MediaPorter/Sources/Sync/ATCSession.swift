@@ -200,19 +200,69 @@ class ATCSession {
                 itemDict["album_artwork_cache_id"] = Int.random(in: 1...9999)
             }
 
+            // TV-episode fields live in `video_info` sub-dict, snake_case.
+            //
+            // Confirmed via AMPDevicesAgent binary string-table dump at
+            // 0x784603-0x784711 (the contiguous insert_track key cluster
+            // for video_info), 2026-05-15. Accepted keys in this dict:
+            //
+            //   has_alternate_audio  is_anamorphic   is_hd
+            //   has_subtitles        is_compressed   has_closed_captions
+            //   is_self_contained    characteristics_valid
+            //   season_number   ← drives album.season_number AND item_video.season_number
+            //   series_name     ← drives item_artist.series_name (TV.app header label!)
+            //   sort_series_name
+            //   episode_id      ← string "S03E07" style
+            //   episode_sort_id ← int
+            //   network_name    ← e.g. "HBO"
+            //   extended_content_rating
+            //   movie_info      ← TEXT column
+            //   audio_track_index audio_track_id
+            //   subtitle_track_index subtitle_track_id
+            //
+            // Earlier rounds we sent these at top of `item` dict (wrong
+            // level → silently dropped) and as kebab-case `show-name`/
+            // `season-number` (those are iTunes Store metadata keys at
+            // 0x770800, a different code path).
+            var videoInfoDict: [String: Any] = [
+                "has_alternate_audio": f.item.hasAlternateAudio,
+                "is_anamorphic": false,
+                "has_subtitles": f.item.hasSubtitles,
+                "is_hd": f.item.isHD,
+                "is_compressed": false,
+                "has_closed_captions": false,
+                "is_self_contained": false,
+                "characteristics_valid": false,
+            ]
+
             if f.item.isTVShow {
                 itemDict["is_tv_show"] = true
-                if let show = f.item.tvShowName { itemDict["tv_show_name"] = show }
-                if let v = f.item.sortTVShowName { itemDict["sort_tv_show_name"] = v }
-                if let s = f.item.seasonNumber { itemDict["season_number"] = s }
-                if let e = f.item.episodeNumber { itemDict["episode_number"] = e }
-                if let v = f.item.episodeSortID { itemDict["episode_sort_id"] = v }
                 if let v = f.item.artist { itemDict["artist"] = v }
                 if let v = f.item.sortArtist { itemDict["sort_artist"] = v }
                 if let v = f.item.album { itemDict["album"] = v }
                 if let v = f.item.sortAlbum { itemDict["sort_album"] = v }
                 if let v = f.item.albumArtist { itemDict["album_artist"] = v }
                 if let v = f.item.sortAlbumArtist { itemDict["sort_album_artist"] = v }
+                // `episode_sort_id` lives on `item` table in current iOS
+                // (older schema had it on video_info). Without it TV.app's
+                // episode-row label prefixes "0." to the title.
+                if let v = f.item.episodeSortID { itemDict["episode_sort_id"] = v }
+
+                if let show = f.item.tvShowName {
+                    videoInfoDict["series_name"] = show
+                }
+                if let v = f.item.sortTVShowName {
+                    videoInfoDict["sort_series_name"] = v
+                }
+                if let s = f.item.seasonNumber {
+                    videoInfoDict["season_number"] = s
+                }
+                if let e = f.item.episodeNumber, let s = f.item.seasonNumber {
+                    videoInfoDict["episode_id"] = String(format: "S%02dE%02d", s, e)
+                }
+                if let v = f.item.episodeSortID {
+                    videoInfoDict["episode_sort_id"] = v
+                }
             } else {
                 itemDict["is_movie"] = true
             }
@@ -229,16 +279,7 @@ class ATCSession {
                 "pid": f.assetID,
                 "item": itemDict,
                 "location": ["kind": "MPEG-4 video file"],
-                "video_info": [
-                    "has_alternate_audio": f.item.hasAlternateAudio,
-                    "is_anamorphic": false,
-                    "has_subtitles": f.item.hasSubtitles,
-                    "is_hd": f.item.isHD,
-                    "is_compressed": false,
-                    "has_closed_captions": false,
-                    "is_self_contained": false,
-                    "characteristics_valid": false,
-                ] as [String: Any],
+                "video_info": videoInfoDict,
                 "avformat_info": [
                     "bit_rate": 160,
                     "audio_format": 502,
