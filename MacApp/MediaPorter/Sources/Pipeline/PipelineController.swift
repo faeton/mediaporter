@@ -2364,19 +2364,16 @@ public class PipelineController {
             item.sortAlbum = e.showName.lowercased()
             item.albumArtist = e.showName
             item.sortAlbumArtist = e.showName.lowercased()
-            // Ship the show portrait as the track artwork (with landscape
-            // still as fallback for shows TMDb can't resolve). Album rows
-            // have no artwork of their own in modern iOS — they inherit
-            // their poster slot from `album.representative_item_pid → item
-            // → artwork`. TV.app's show-detail big-portrait header reads
-            // off that chain. Posting landscape here renders it squashed
-            // in the portrait frame; posting portrait gets the header
-            // right at the cost of episode-row thumbs becoming portrait
-            // tiles too. Empirically (2026-05-15) album-keyed Airlock
-            // upload at `/Airlock/Media/Artwork/<album_pid>` is silently
-            // ignored — medialibraryd has no asset_id for the album → no
-            // ingestion. Going through item artwork is the only path.
-            item.posterData = e.showPosterData ?? e.posterData
+            // Per-episode landscape thumb (TMDb still / ffmpeg-extracted /
+            // synthetic with badge stamp) goes to `posterData` → uploaded as
+            // /Airlock/Media/Artwork/<assetID> and rendered in the episode
+            // rows on the show-detail screen. Library home tile renders the
+            // album-level artwork (uploaded separately as `<assetID>_show`),
+            // so this assignment doesn't fight Library tile rendering.
+            // The previous override `posterData = showPosterData ?? posterData`
+            // forced the portrait show poster into the landscape episode
+            // slot — it rendered squashed.
+            item.posterData = e.posterData
             item.showPosterData = e.showPosterData
         }
         return item
