@@ -38,6 +38,7 @@ struct MediaPorterApp: App {
                     pipeline.openSubtitlesLanguages = ConfigLoader.openSubtitlesLanguages()
                     pipeline.hwAccel = ConfigLoader.hwAccelEnabled()
                     pipeline.airplayTo4K = ConfigLoader.airplayTo4K()
+                    MetricsCollector.bump("launches")
                     configureDiagnostics()
                 }
         }
@@ -187,8 +188,11 @@ private func configureDiagnostics() {
 
 /// Send a weekly anonymized heartbeat if the user has opted in. No-op when
 /// last-sent is < 7 days ago, when the user is opted out, or when no DSN is
-/// configured. Payload contains only app/OS/device-class — no UDIDs, no
-/// filenames, no event counts.
+/// configured. Payload contains only Sentry tags — app/OS info, the current
+/// settings snapshot, and bucketed counters drained from MetricsCollector.
+/// No UDIDs, no filenames, no per-event timestamps, no content. Counters are
+/// reset only on a 200 OK so a transient transport failure doesn't lose a
+/// week's worth of accumulated state.
 @MainActor
 private func maybeSendHeartbeat() {
     guard ConfigLoader.heartbeatOptIn(), BugsinkClient.isConfigured else { return }
@@ -203,13 +207,27 @@ private func maybeSendHeartbeat() {
     let arch = withUnsafePointer(to: &sysinfo.machine) {
         $0.withMemoryRebound(to: CChar.self, capacity: Int(_SYS_NAMELEN)) { String(cString: $0) }
     }
-    let tags: [String: String] = [
+    var tags: [String: String] = [
         "type": "heartbeat",
         "os_version": osVer,
         "arch": arch,
         "ffmpeg_source": Prerequisites.ffmpegSource.label,
         "locale": Locale.current.identifier,
+        // Settings snapshot — lets us tell "no opensubs fetches because no
+        // key configured" apart from "no opensubs fetches because they
+        // never tried" when fail-rate looks bad.
+        "tmdb_key":    ConfigLoader.tmdbAPIKey() != nil ? "set" : "none",
+        "os_key":      openSubtitlesConfigured() ? "set" : "none",
+        "hw_accel":    ConfigLoader.hwAccelEnabled() ? "on" : "off",
+        "airplay_4k":  ConfigLoader.airplayTo4K() ? "on" : "off",
     ]
+    // Bucketed counters drained from MetricsCollector. Buckets ("21-100",
+    // "500+") instead of raw values so an unusual count (287, week after
+    // week) isn't a stable per-user fingerprint.
+    let counters = MetricsCollector.snapshot()
+    for (name, value) in counters {
+        tags["c_\(name)"] = MetricsCollector.bucket(value)
+    }
     Task {
         do {
             _ = try await BugsinkClient.send(
@@ -218,12 +236,25 @@ private func maybeSendHeartbeat() {
                 tags: tags
             )
             UserDefaults.standard.set(now, forKey: key)
+            // Only reset on success — preserves the week's data if Bugsink
+            // is down or DNS fails. Next launch retries.
+            MetricsCollector.reset()
         } catch {
             // Silent — heartbeat is best-effort; failures don't matter.
             // The DebugLog.error inside BugsinkClient.send already captured
             // the reason, so log-stream users can still see it.
         }
     }
+}
+
+/// True when all three OpenSubtitles credentials are present. Mirrors the
+/// gate used inside PipelineController for `openSubtitlesReady`.
+@MainActor
+private func openSubtitlesConfigured() -> Bool {
+    guard let k = ConfigLoader.openSubtitlesAPIKey(), !k.isEmpty,
+          let u = ConfigLoader.openSubtitlesUsername(), !u.isEmpty,
+          let p = ConfigLoader.openSubtitlesPassword(), !p.isEmpty else { return false }
+    return true
 }
 
 @MainActor

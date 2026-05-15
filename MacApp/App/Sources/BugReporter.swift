@@ -70,6 +70,7 @@ func diagnosticInfoString(pipeline: PipelineController) -> String {
 /// the menu item never silently no-ops.
 @MainActor
 func sendDiagnostic(pipeline: PipelineController) {
+    MetricsCollector.bump("send_diag_opened")
     guard BugsinkClient.isConfigured else {
         reportBug(pipeline: pipeline)
         return

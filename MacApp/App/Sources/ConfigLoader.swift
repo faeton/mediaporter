@@ -6,6 +6,7 @@
 //   4. ~/.env
 
 import Foundation
+import MediaPorterCore
 
 enum ConfigLoader {
     /// UserDefaults key — set by the Settings window. Takes precedence over all other sources.
@@ -74,6 +75,13 @@ enum ConfigLoader {
 
     static func saveHeartbeatOptIn(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: heartbeatOptInDefaultsKey)
+        if !enabled {
+            // Opt-out drops locally accumulated counters so the next opt-in
+            // starts from zero rather than backfilling whatever ran while the
+            // user wasn't sending. Also: nothing should linger in storage
+            // once the user said no.
+            MetricsCollector.reset()
+        }
     }
 
     /// Best-effort TMDb API key discovery. Returns nil if nothing is found.

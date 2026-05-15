@@ -222,6 +222,9 @@ public class PipelineController {
         if selectedJobID == nil, let first = jobs.first {
             selectedJobID = first.id
         }
+        if !newJobs.isEmpty {
+            MetricsCollector.bump("files_added", by: newJobs.count)
+        }
 
         // Kick off analyze for any pending job without relying on the view's
         // kickOff path — that path is gated on !isRunning, so removing a file
@@ -761,6 +764,7 @@ public class PipelineController {
         if let idx = pendingShowPicks.firstIndex(where: { $0.id == clusterID }) {
             pendingShowPicks[idx] = pick
         } else {
+            MetricsCollector.bump(candidates.isEmpty ? "tmdb_no_match" : "tmdb_low_confidence")
             // First pick after a drained queue starts a fresh batch.
             // Subsequent picks while one is already on screen extend it,
             // so the counter walks 1/N → 2/N → … N/N as the user steps
@@ -785,6 +789,7 @@ public class PipelineController {
         tvShowResolutions[clusterID] = resolved
         pendingShowPicks.removeAll { $0.id == clusterID }
         if pendingShowPicks.isEmpty { pendingShowPicksBatchTotal = 0 }
+        MetricsCollector.bump("tmdb_user_picked")
         await refreshEpisodes(in: clusterID, using: resolved)
     }
 
@@ -793,6 +798,7 @@ public class PipelineController {
     public func dismissClusterPick(_ clusterID: String) {
         pendingShowPicks.removeAll { $0.id == clusterID }
         if pendingShowPicks.isEmpty { pendingShowPicksBatchTotal = 0 }
+        MetricsCollector.bump("tmdb_picker_dismissed")
     }
 
     /// Snapshot the user's current per-row selection on `job` as cluster
@@ -1331,12 +1337,14 @@ public class PipelineController {
                     )
                     if fetched.isEmpty {
                         DebugLog.notice("opensubs", "no matches for \(job.fileName)")
+                        MetricsCollector.bump("opensubs_no_match")
                     } else {
                         let picked = fetched.map(\.language).joined(separator: ",")
                         DebugLog.write("opensubs",
                             "\(job.fileName) — added \(fetched.count) track(s): \(picked)")
                         info.externalSubtitles.append(contentsOf: fetched)
                         job.mediaInfo = info
+                        MetricsCollector.bump("opensubs_fetched")
                     }
                 }
             }
@@ -1379,9 +1387,11 @@ public class PipelineController {
             }
 
             job.status = .analyzed
+            MetricsCollector.bump("analyses_ok")
         } catch {
             job.status = .failed
             job.error = error.localizedDescription
+            MetricsCollector.bump("analyses_fail")
         }
     }
 
@@ -1497,13 +1507,16 @@ public class PipelineController {
                     job.progress = 1.0
                     job.outputURL = outputURL
                     job.status = .ready
+                    MetricsCollector.bump("transcodes_ok")
                 } catch {
                     job.status = .failed
                     job.error = error.localizedDescription
+                    MetricsCollector.bump("transcodes_fail")
                 }
             } else {
                 job.outputURL = job.inputURL
                 job.status = .ready
+                MetricsCollector.bump("transcodes_copy_only")
             }
             overallProgress = Double(i + 1) / Double(toProcess.count)
         }
@@ -1589,9 +1602,11 @@ public class PipelineController {
                 if result.success {
                     readyJobs[i].status = .synced
                     readyJobs[i].progress = 1.0
+                    MetricsCollector.bump("syncs_ok")
                 } else {
                     readyJobs[i].status = .failed
                     readyJobs[i].error = result.error ?? "Sync failed"
+                    MetricsCollector.bump("syncs_fail")
                 }
             }
             let ok = results.filter(\.success).count
@@ -1602,6 +1617,7 @@ public class PipelineController {
                 job.status = .failed
                 job.error = error.localizedDescription
             }
+            MetricsCollector.bump("syncs_aborted")
             overallStatus = "Sync failed: \(error.localizedDescription)"
         }
 
@@ -2341,10 +2357,16 @@ public class PipelineController {
             item.sortAlbum = "\(e.showName.lowercased()), season \(e.season)"
             item.albumArtist = e.showName
             item.sortAlbumArtist = e.showName.lowercased()
-            // For TV the Library tile renders posterData. The episode still
-            // is landscape and looks wrong squished into a portrait slot —
-            // prefer the show portrait when we have one.
-            item.posterData = e.showPosterData ?? e.posterData
+            // Per-episode landscape thumb (TMDb still / ffmpeg-extracted /
+            // synthetic with badge stamp) goes to `posterData` → uploaded as
+            // /Airlock/Media/Artwork/<assetID> and rendered in the episode
+            // rows on the show-detail screen. Library home tile renders the
+            // album-level artwork (uploaded separately as `<assetID>_show`),
+            // so this assignment doesn't fight Library tile rendering.
+            // The previous override `posterData = showPosterData ?? posterData`
+            // forced the portrait show poster into the landscape episode
+            // slot — it rendered squashed.
+            item.posterData = e.posterData
             item.showPosterData = e.showPosterData
         }
         return item

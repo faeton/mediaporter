@@ -3,12 +3,14 @@
 // Triggered once per install by ContentView, gated on `welcomeShown`
 // (@AppStorage Bool). The sheet covers what the app actually does, where
 // ffmpeg comes from, what API keys are optional, and Mediaporter's
-// telemetry stance ("nothing automatic — Help → Send Diagnostic when you
-// want to report something").
+// telemetry stance (weekly anonymous heartbeat opt-in + on-demand Send
+// Diagnostic).
 //
-// The heartbeat opt-in lives at the bottom. Defaults to OFF — opt-in only,
-// no dark-pattern pre-checks. The toggle persists via ConfigLoader and is
-// also editable in Settings → Privacy.
+// The heartbeat toggle defaults to ON for new installs (only place we
+// pre-check it; existing users who already dismissed the welcome sheet
+// have welcomeShown=true and never see this view, so their explicit OFF
+// is preserved). Saved via ConfigLoader on Got-it, also editable any time
+// in Settings → Privacy.
 
 import SwiftUI
 import AppKit
@@ -17,7 +19,14 @@ import MediaPorterCore
 struct WelcomeSheet: View {
     let onDismiss: () -> Void
 
-    @State private var heartbeatOptIn: Bool = ConfigLoader.heartbeatOptIn()
+    @State private var heartbeatOptIn: Bool = {
+        // On the welcome sheet, default the toggle to ON for first-run
+        // (no stored value yet). If the user has already chosen, respect it.
+        if UserDefaults.standard.object(forKey: ConfigLoader.heartbeatOptInDefaultsKey) == nil {
+            return true
+        }
+        return ConfigLoader.heartbeatOptIn()
+    }()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -46,8 +55,8 @@ struct WelcomeSheet: View {
                     )
                     section(
                         icon: "shield",
-                        title: "Telemetry — nothing automatic",
-                        body: "Mediaporter does not send anything home in the background. When you hit a bug, use Help → Send Diagnostic to ship a report (with optional screenshot + log tail) to the developer's self-hosted server. You choose every time."
+                        title: "Telemetry — what gets sent",
+                        body: "No usage events, no filenames, no crash auto-upload. For bugs you press Help → Send Diagnostic and decide what goes in. The one background ping is the weekly heartbeat below — opt in, opt out, your call."
                     )
                     heartbeatRow
                 }
@@ -104,7 +113,7 @@ struct WelcomeSheet: View {
                 .onChange(of: heartbeatOptIn) { _, new in
                     ConfigLoader.saveHeartbeatOptIn(new)
                 }
-                Text("Lets the developer see how many active installs there are, on which macOS versions and device classes. No filenames, no UDIDs, no usage events. You can flip this any time in Settings → Privacy.")
+                Text("Once a week: app version, macOS version, CPU arch, ffmpeg source, locale, whether TMDb/OpenSubtitles keys are configured, and bucketed counts (\"6-20\", \"500+\") of common actions so the developer can tell a \"fetch failed\" from a \"no key configured.\" No filenames, no UDIDs, no titles, no timestamps per action. Flip it off here, or any time in Settings → Privacy.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

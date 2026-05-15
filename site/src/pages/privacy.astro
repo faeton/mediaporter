@@ -1,6 +1,6 @@
 ---
 import Base from "../layouts/Base.astro";
-const updated = "2026-05-11";
+const updated = "2026-05-15";
 ---
 <Base title="Privacy — MediaPorter" description="MediaPorter collects no personal data. This page explains what the app does, what it doesn't, and what third parties it talks to.">
   <section class="section">
@@ -11,8 +11,10 @@ const updated = "2026-05-11";
 
       <h2>The short version</h2>
       <p>
-        <strong>MediaPorter does not collect personal data.</strong> No telemetry, no analytics,
-        no crash reports, no "anonymous usage statistics," no account, no sign-in.
+        <strong>MediaPorter does not collect personal data.</strong> No account, no sign-in, no
+        usage events, no filenames, no device identifiers, no crash auto-upload. The only thing
+        the app ever sends home is an <strong>optional anonymous weekly heartbeat</strong> — you
+        see the toggle on first launch and you can flip it off any time in Settings → Privacy.
       </p>
 
       <h2>What the app talks to</h2>
@@ -28,21 +30,107 @@ const updated = "2026-05-11";
           query text and nothing that identifies you. We do not send your IP, device ID, or any
           stable identifier alongside these requests.
         </li>
+        <li>
+          <strong>OpenSubtitles</strong>, over HTTPS, only if you've added an API key in Settings
+          and asked the app to fetch subtitles. Requests carry the query (title, season, episode)
+          and your OpenSubtitles credentials — nothing else.
+        </li>
+        <li>
+          <strong>bugs.porter.md</strong> (our self-hosted Bugsink instance), only in two cases:
+          (a) if you've opted in to the weekly anonymous heartbeat (see below), or (b) when you
+          press <em>Help → Send Diagnostic</em> and confirm the report. We do not use a third-party
+          analytics provider.
+        </li>
       </ul>
+
+      <h2>Optional anonymous heartbeat</h2>
+      <p>
+        On first launch MediaPorter shows a welcome sheet with a single privacy toggle:
+        <em>"Send an anonymous weekly heartbeat."</em> When this is enabled, the app sends one
+        small HTTPS request per week to <code>bugs.porter.md</code>. The payload is a flat set
+        of tags — no filenames, no titles, no media metadata, no device UDID, no Mac serial, no
+        username, no file path, no per-action timestamps.
+      </p>
+      <p>The tags fall into three groups:</p>
+      <p><strong>Environment</strong> — describes the install:</p>
+      <ul>
+        <li>App version + build number (e.g. <code>mediaporter@0.6.2+87</code>)</li>
+        <li>macOS version string (e.g. <code>Version 14.5 (Build 23F79)</code>)</li>
+        <li>CPU architecture (<code>arm64</code> or <code>x86_64</code>)</li>
+        <li>Whether ffmpeg is bundled, found on $PATH, or missing</li>
+        <li>System locale (e.g. <code>en_US</code>, <code>ru_UA</code>)</li>
+      </ul>
+      <p>
+        <strong>Settings snapshot</strong> — whether you have certain options on or off, so we
+        can interpret the counters below correctly (e.g. tell <em>"subtitle fetch failed"</em>
+        apart from <em>"never set an OpenSubtitles key"</em>):
+      </p>
+      <ul>
+        <li><code>tmdb_key</code> — <code>set</code> or <code>none</code> (never the key itself)</li>
+        <li><code>os_key</code> — <code>set</code> or <code>none</code> (never the credentials)</li>
+        <li><code>hw_accel</code> — <code>on</code> or <code>off</code></li>
+        <li><code>airplay_4k</code> — <code>on</code> or <code>off</code></li>
+      </ul>
+      <p>
+        <strong>Bucketed activity counters</strong> — coarse counts of common actions and failures
+        accumulated over the week. Each counter is sent as a bucket label like <code>0</code>,
+        <code>1</code>, <code>2-5</code>, <code>6-20</code>, <code>21-100</code>,
+        <code>101-500</code>, or <code>500+</code> — never as a raw number, so an unusual count
+        doesn't become a stable fingerprint across weeks:
+      </p>
+      <ul>
+        <li><code>c_launches</code> — how many times the app started</li>
+        <li><code>c_files_added</code> — files you dragged into the queue</li>
+        <li><code>c_analyses_ok</code> / <code>c_analyses_fail</code> — ffprobe successes / failures</li>
+        <li><code>c_transcodes_ok</code> / <code>c_transcodes_fail</code> / <code>c_transcodes_copy_only</code> — transcode outcomes</li>
+        <li><code>c_syncs_ok</code> / <code>c_syncs_fail</code> / <code>c_syncs_aborted</code> — sync outcomes</li>
+        <li><code>c_tmdb_no_match</code> / <code>c_tmdb_low_confidence</code> — when TMDb auto-match needed a manual pick</li>
+        <li><code>c_tmdb_user_picked</code> / <code>c_tmdb_picker_dismissed</code> — what you did with the picker</li>
+        <li><code>c_opensubs_fetched</code> / <code>c_opensubs_no_match</code> — subtitle lookup outcomes</li>
+        <li><code>c_send_diag_opened</code> — how often <em>Help → Send Diagnostic</em> was opened</li>
+      </ul>
+      <p>
+        The counters are a proxy for app health. They never include filenames, show or movie
+        titles, file sizes, durations, codec details, device names, or anything else that could
+        describe the content you're working with. Counter values are reset on every successful
+        weekly send; if you opt out, MediaPorter discards any locally accumulated counters and
+        sends nothing thereafter.
+      </p>
+      <p>
+        The request lands on a self-hosted Bugsink server we run; we do not share it with any
+        third party. As with any HTTPS request the receiving server briefly observes the source
+        IP address to deliver the response. We do not store IP addresses alongside the payload
+        and never link a heartbeat to a person.
+      </p>
+      <p>
+        <strong>To turn it off:</strong> uncheck the toggle on the first-launch welcome sheet, or
+        open Settings → Privacy and flip <em>"Send anonymous weekly heartbeat"</em> off at any
+        time. When the toggle is off, the app sends zero background requests and any in-flight
+        counters are discarded.
+      </p>
+
+      <h2>On-demand diagnostic reports</h2>
+      <p>
+        Separately, <em>Help → Send Diagnostic</em> lets you ship a one-off bug report — with an
+        optional screenshot and the tail of the app's log — to the same Bugsink server. This is
+        always explicit: you press the menu item, see what's about to be sent, and confirm. We
+        never auto-upload crashes or logs.
+      </p>
 
       <h2>What stays on your Mac</h2>
       <ul>
         <li>Your media library and any files you drop onto MediaPorter.</li>
         <li>Cached posters, probe results, and metadata used to render the app's UI.</li>
         <li>App preferences (window size, last-used settings, recent device).</li>
+        <li>API keys you paste into Settings (TMDb, OpenSubtitles) — stored in macOS UserDefaults.</li>
       </ul>
       <p>None of the above ever leaves your machine.</p>
 
-      <h2>App Store privacy labels</h2>
+      <h2>Distribution</h2>
       <p>
-        On the App Store, MediaPorter is registered as <strong>Data Not Collected</strong> across
-        every category Apple offers. If that ever changes, this page changes first and a new app
-        version follows.
+        MediaPorter is distributed as a signed and notarized DMG from porter.md, not via the App
+        Store. There are no App Store privacy labels for this build. If we ever ship to the App
+        Store, the labels will reflect exactly what is described above.
       </p>
 
       <h2>Children</h2>

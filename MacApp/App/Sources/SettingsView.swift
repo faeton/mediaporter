@@ -64,7 +64,7 @@ struct SettingsView: View {
                     .onChange(of: heartbeatOptIn) { _, new in
                         ConfigLoader.saveHeartbeatOptIn(new)
                     }
-                Text("Once a week, Mediaporter sends app version, macOS version, and connected device class. No filenames, no UDIDs, no usage events. Lets the developer see active-install counts without per-action telemetry.")
+                Text("Once a week, Mediaporter sends app + macOS version, CPU arch, locale, whether TMDb/OpenSubtitles keys are configured, and coarse bucketed counts (\"6-20\", \"500+\") of common actions and failures — so the developer can tell a real fetch failure from \"no key set\". No filenames, no titles, no UDIDs, no per-event timestamps. Turning this off here also drops any locally accumulated counters.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
