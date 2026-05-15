@@ -256,6 +256,28 @@ Fix: `finishSync` (1) drops anything already in inbox on entry (stale upload-pha
 
 Likely also explains the open "re-uploaded deleted episode doesn't bind on first sync" item from commit 00450b4 — same family of symptoms, same root cause class.
 
+## 2026-05-15 — `insert_album`/`insert_artist` regression: file binding lost
+
+Symptom: dropped `Breaking.Bad.S01E02.mkv` after a build that added explicit `insert_artist` + `insert_album` ops (deterministic SHA-derived pids) ahead of `insert_track`, plus an Airlock JPEG upload at `/Airlock/Media/Artwork/<album_pid>` paired by `artwork_cache_id` in the album's `item` sub-dict. Goal: drive the TV.app show-detail big-portrait slot off our show-poster JPEG.
+
+What landed:
+- `series_name`, `season_number`, `episode_sort_id` all correct — header / "Season 1" / "2. Cat's in the Bag…" rendered cleanly.
+- Two album rows for the show: ours (`album_pid=83358639`, `season_number=1`, `sync_id=417498584087636346`) AND a stale auto-derived row (`album_pid=82795155`, `album="Breaking Bad, Season 1"`, `season_number=0`, `sync_id=0`).
+- `artwork_token` rows for our album entity (`entity_type=4`) but the token (`138`) is a dangling reference — NO `artwork` row → no blob ingested → portrait slot rendered empty (TV.app drew a black portrait frame with the latest episode's landscape preview centered, its "no album poster" fallback).
+- **`item.base_location_id = 0`** for the episode — the MP4 was uploaded but never bound to the row. Same class as the 2026-05-14 SyncAllowed-as-terminal bug, but post-fix this time: `finishSync` waited for the real `SyncFinished` and still didn't bind. Compare side-by-side with the prior Fleabag sync (before insert_album landed): `item.base_location_id=3848`, path `iTunes_Control/Music/F08` → file bound, plays. Identical handshake/upload/finishSync code path; only difference was the additional ops in the plist.
+
+What this rules out:
+- `kind: 8` for kAlbumKind_TVShow was an empirical guess, but the album row DID get created with the right shape, so it wasn't rejected outright.
+- `album_pid` linkage on insert_track DID land — track row points at our album.
+- Token=138 having no `artwork` row → the `/Airlock/Media/Artwork/<album_pid>` upload path is NOT how album artwork is sourced. AMPDevicesAgent strings only mention "getting artwork from track / playlist" — no "album" code path. Album/series artwork must be derived from a representative track's artwork via `album.representative_item_pid`.
+
+What probably caused base_location loss: the extra plist ops (insert_artist + insert_album) changed medialibraryd's commit ordering — by the time SyncFinished arrives, the new entity rows are committed but the per-file FileComplete → base_location bind is dropped on the floor. The exact mechanism is unconfirmed; reverted commit `fd07348` to restore single-op file binding.
+
+Future direction for portrait poster: don't go through insert_album. Track-class artwork is the only path that ingests blobs. To get a portrait in the album slot without breaking the episode-row thumb, the options are:
+1. Send portrait as the episode's `posterData` and accept that episode-row thumbs will also be portrait (UX tradeoff).
+2. Add a synthetic "show poster" virtual track with `base_location_id=0` and portrait artwork; set the album's `representative_item_pid` to it. Risk: TV.app may render it as a (broken) episode.
+3. Investigate `artwork_variant_type` — currently always 0 in the DB; maybe a non-zero variant on the same entity can hold portrait separately. No evidence yet that medialibraryd ingests multiple variants per entity.
+
 ## CLI Improvements (2026-04-10) — Python v0.3.1
 
 Real-world two-file run (Send.Help 4.7 GB + Avatar 15 GB) exposed and fixed:
