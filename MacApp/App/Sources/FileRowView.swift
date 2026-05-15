@@ -12,6 +12,7 @@ struct FileRowView: View {
     let onToggle: () -> Void
     let onRemove: () -> Void
     @Environment(PipelineController.self) private var pipeline
+    @Environment(\.openSettings) private var openSettings
     @State private var confirmTranscode = false
     @State private var isEditingTitle = false
     @State private var editedTitle = ""
@@ -224,11 +225,23 @@ struct FileRowView: View {
             }
             if !tmdbMatched {
                 MetaDot(theme: theme)
-                Text("no TMDb match")
-                    .font(.system(size: 10))
-                    .padding(.horizontal, 6).padding(.vertical, 1)
-                    .background(theme.chipSkip, in: RoundedRectangle(cornerRadius: 3))
-                    .foregroundStyle(theme.chipSkipText)
+                if tmdbKeyMissing {
+                    Button { openSettings() } label: {
+                        Text("no TMDb key")
+                            .font(.system(size: 10))
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(theme.chipSkip, in: RoundedRectangle(cornerRadius: 3))
+                            .foregroundStyle(theme.chipSkipText)
+                    }
+                    .buttonStyle(.plain)
+                    .help("TMDb API key not set — click to add one in Settings. Fallback poster generated for now.")
+                } else {
+                    Text("no TMDb match")
+                        .font(.system(size: 10))
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(theme.chipSkip, in: RoundedRectangle(cornerRadius: 3))
+                        .foregroundStyle(theme.chipSkipText)
+                }
             }
             if let extrasLabel = externalTracksLabel {
                 MetaDot(theme: theme)
@@ -268,6 +281,10 @@ struct FileRowView: View {
         case .movie(let mm): return mm.tmdbID != nil
         case .tvEpisode(let e): return e.tmdbShowID != nil
         }
+    }
+
+    private var tmdbKeyMissing: Bool {
+        pipeline.tmdbAPIKey.isEmpty
     }
 
     private var isActive: Bool {
@@ -724,6 +741,35 @@ struct FileRowView: View {
                     }
                     .buttonStyle(.plain)
                     .help("Search TMDb again with a different title")
+                } else if tmdbKeyMissing {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 11, weight: .regular))
+                        .foregroundStyle(theme.chipSkipText)
+                    Text("TMDb API key not set · using fallback poster")
+                        .font(.system(size: 12)).foregroundStyle(theme.textDim)
+                    Button { openSettings() } label: {
+                        Text("Add TMDb key…")
+                            .font(.system(size: 11))
+                            .padding(.horizontal, 8).padding(.vertical, 2)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .strokeBorder(theme.divider, lineWidth: 1)
+                            )
+                            .foregroundStyle(theme.text)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open Settings → Metadata to paste a free TMDb v3 key.")
+                    Button {
+                        NSWorkspace.shared.open(URL(string: "https://porter.md/setup#tmdb")!)
+                    } label: {
+                        Text("How to get one")
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.textDim)
+                            .underline()
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open the porter.md setup guide in your browser.")
                 } else {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: 11, weight: .regular))
