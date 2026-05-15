@@ -91,13 +91,47 @@ public enum TMDbClient {
     private static let backdropBaseURL = "https://image.tmdb.org/t/p/w780"
     private static let requestTimeout: TimeInterval = 10
 
-    /// Fetch JSON from a URL with an explicit timeout. URLSession.shared.data(from:)
-    /// uses the session's 60s default, which makes "Searching TMDb…" appear to hang
-    /// forever when the network is slow or blocked.
+    /// URLSession that honors `HTTPS_PROXY`/`HTTP_PROXY` env vars.
+    ///
+    /// `URLSession.shared` reads macOS System Settings → Network → Proxies but
+    /// ignores the env-var convention every CLI tool uses (curl, wget, git).
+    /// On networks where TMDb is reachable only through a tunneled proxy
+    /// (e.g. mainland China — api.themoviedb.org is on Facebook CloudFront
+    /// edge IPs that GFW blocks), the user typically already has a working
+    /// proxy exported in their shell. Picking that up here saves a separate
+    /// macOS Network-Settings setup step.
+    private static let session: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = requestTimeout
+        cfg.timeoutIntervalForResource = requestTimeout * 2
+        if let dict = proxyFromEnv() {
+            cfg.connectionProxyDictionary = dict
+        }
+        return URLSession(configuration: cfg)
+    }()
+
+    private static func proxyFromEnv() -> [AnyHashable: Any]? {
+        let env = ProcessInfo.processInfo.environment
+        let httpsRaw = env["HTTPS_PROXY"] ?? env["https_proxy"]
+        let httpRaw = env["HTTP_PROXY"] ?? env["http_proxy"]
+        let raw = httpsRaw ?? httpRaw
+        guard let raw, let url = URL(string: raw), let host = url.host else { return nil }
+        let port = url.port ?? (url.scheme == "https" ? 443 : 80)
+        return [
+            "HTTPSEnable": 1,
+            "HTTPSProxy": host,
+            "HTTPSPort": port,
+            "HTTPEnable": 1,
+            "HTTPProxy": host,
+            "HTTPPort": port,
+        ]
+    }
+
+    /// Fetch JSON from a URL with an explicit timeout.
     private static func getJSON(_ url: URL) async throws -> Any {
         var req = URLRequest(url: url, timeoutInterval: requestTimeout)
         req.setValue("MediaPorter/1.0", forHTTPHeaderField: "User-Agent")
-        let (data, _) = try await URLSession.shared.data(for: req)
+        let (data, _) = try await session.data(for: req)
         return try JSONSerialization.jsonObject(with: data)
     }
 
@@ -280,6 +314,6 @@ public enum TMDbClient {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         request.setValue("MediaPorter/1.0", forHTTPHeaderField: "User-Agent")
-        return try? await URLSession.shared.data(for: request).0
+        return try? await session.data(for: request).0
     }
 }
