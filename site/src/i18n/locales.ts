@@ -379,7 +379,7 @@ const en: Strings = {
     "Sign up at themoviedb.org — free, no credit card. A username and email is all it asks.",
     "Open your account → Settings → API.",
     "Click \"Request an API key\" → \"Developer.\" Use type: \"Personal,\" tick the terms.",
-    "Copy the v3 auth API key (a long hex string).",
+    "Copy the API Key under API Details — the short 32-character hex string. Do not copy the long API Read Access Token.",
     "In MediaPorter: Settings (⌘,) → Metadata → paste the key → Save.",
   ],
   setupTmdbFree:
@@ -632,7 +632,7 @@ const ru: Strings = {
     "Зарегистрируйтесь на themoviedb.org — бесплатно, без банковской карты. Нужны логин и email.",
     "Откройте свой аккаунт → Settings → API.",
     "Нажмите «Request an API key» → «Developer». Тип: «Personal», примите условия.",
-    "Скопируйте «API Key (v3 auth)» — длинная шестнадцатеричная строка.",
+    "Скопируйте поле «API Key» в разделе API Details — короткую 32-символьную hex-строку. Не копируйте длинный «API Read Access Token».",
     "В MediaPorter: Settings (⌘,) → Metadata → вставьте ключ → Save.",
   ],
   setupTmdbFree:
@@ -884,7 +884,7 @@ const zh: Strings = {
     "在 themoviedb.org 注册 —— 免费，无需信用卡。只需要用户名和邮箱。",
     "打开账号 → Settings → API。",
     "点击「Request an API key」→「Developer」。类型选「Personal」，勾选条款。",
-    "复制「API Key (v3 auth)」—— 一串很长的十六进制字符。",
+    "复制 API Details 下的「API Key」—— 较短的 32 字符十六进制字符串。不要复制很长的「API Read Access Token」。",
     "在 MediaPorter 中：Settings (⌘,) → Metadata → 粘贴密钥 → Save。",
   ],
   setupTmdbFree:
@@ -1137,7 +1137,7 @@ const ko: Strings = {
     "themoviedb.org에 가입 — 무료, 신용카드 불필요. 사용자 이름과 이메일만 있으면 됩니다.",
     "계정 → Settings → API.",
     "「Request an API key」→「Developer」 클릭. 유형은 「Personal」, 약관 동의.",
-    "「API Key (v3 auth)」 복사 — 긴 16진수 문자열.",
+    "API Details 아래의 「API Key」를 복사하세요 — 짧은 32자 16진수 문자열입니다. 긴 「API Read Access Token」은 복사하지 마세요.",
     "MediaPorter에서: Settings (⌘,) → Metadata → 키 붙여넣기 → Save.",
   ],
   setupTmdbFree:
