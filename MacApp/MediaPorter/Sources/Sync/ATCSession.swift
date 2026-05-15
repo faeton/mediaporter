@@ -2,7 +2,6 @@
 // Port of Python src/mediaporter/sync/atc.py
 
 import Foundation
-import CryptoKit
 
 // MARK: - Data types
 
@@ -37,11 +36,13 @@ struct SyncItem {
     /// `video_info.has_subtitles` so the sub picker appears.
     var hasSubtitles: Bool = false
     var posterData: Data?
-    /// Show portrait JPEG for TV episodes. Uploaded as a separate Airlock
-    /// file keyed by the album_pid (see ATCSession.albumPid), paired with
-    /// an `insert_album` op carrying `artwork_cache_id` so medialibraryd
-    /// associates the JPEG bytes with the album row. Drives TV.app's
-    /// show-detail header big-portrait slot.
+    /// Show portrait JPEG for TV episodes. Uploaded as a second Airlock
+    /// file at `/Airlock/Media/Artwork/<assetID>_show` and surfaced in
+    /// the insert_track plist via `album_artwork_cache_id`. medialibraryd
+    /// picks it up for the album row's poster slot — the Library list
+    /// shows the portrait instead of the rep episode's still.
+    /// (TV.app's show-detail hero is hardcoded 16:9 and still pulls an
+    /// episode still; that slot is not driven by this field.)
     var showPosterData: Data?
 }
 
@@ -180,92 +181,6 @@ class ATCSession {
             ]
         ]
 
-        // Per-show / per-(show, season) operations.
-        //
-        // medialibraryd auto-derives item_artist + album rows from track
-        // metadata, but it picks one of the inserted tracks as the album's
-        // representative_item_pid — i.e. the show-detail big-poster slot
-        // ends up showing that track's landscape still squashed into a
-        // portrait frame. Explicit `insert_artist` + `insert_album` ops
-        // with deterministic pids give us a stable row we can attach a
-        // portrait poster to via a dedicated Airlock upload (see
-        // register/prepareSync — file written to
-        // `/Airlock/Media/Artwork/<album_pid>`).
-        //
-        // Pids are SHA256(show / show+season) → Int64 so re-syncs bind
-        // to the same row instead of creating duplicates.
-        //
-        // Wire keys for insert_album are the cluster at AMPDevicesAgent
-        // 0x77537b (artwork_item_pid, all_compilations, store_link_url)
-        // plus shared item keys (album, sort_album, season_number,
-        // series_name, sort_series_name). kind=8 is kAlbumKind_TVShow —
-        // emitted so medialibraryd routes the row down the TV-show code
-        // path (binary references `dbAlbumInfo.albumKind == kAlbumKind_TVShow`).
-        var seenArtistPids = Set<Int64>()
-        var seenAlbumPids = Set<Int64>()
-        var albumArtworkCache: [Int64: Int] = [:]  // album_pid -> artwork_cache_id
-
-        for f in files where f.item.isTVShow {
-            guard let show = f.item.tvShowName,
-                  let season = f.item.seasonNumber else { continue }
-            let artistPid = ATCSession.artistPid(show: show)
-            let albumPid = ATCSession.albumPid(show: show, season: season)
-
-            if seenArtistPids.insert(artistPid).inserted {
-                var artistItem: [String: Any] = [
-                    "artist": show,
-                    "sort_artist": show.lowercased(),
-                    "album_artist": show,
-                    "sort_album_artist": show.lowercased(),
-                    "series_name": show,
-                    "sort_series_name": show.lowercased(),
-                ]
-                if let p = f.item.showPosterData, !p.isEmpty {
-                    // Same artwork as album — artist row reuses album's
-                    // poster via `artwork_album_pid`, but we still set
-                    // a cache_id in case medialibraryd needs it.
-                    artistItem["artwork_cache_id"] = Int.random(in: 1...9999)
-                }
-                operations.append([
-                    "operation": "insert_artist",
-                    "pid": artistPid,
-                    "item": artistItem,
-                    "artwork_album_pid": albumPid,
-                ] as [String: Any])
-                DebugLog.write("atc.insert_artist",
-                    "pid=\(artistPid) show=\"\(show)\" artwork_album_pid=\(albumPid)")
-            }
-
-            if seenAlbumPids.insert(albumPid).inserted {
-                var albumItem: [String: Any] = [
-                    "album": show,
-                    "sort_album": show.lowercased(),
-                    "album_artist": show,
-                    "sort_album_artist": show.lowercased(),
-                    "series_name": show,
-                    "sort_series_name": show.lowercased(),
-                    "season_number": season,
-                    "is_tv_show": true,
-                ]
-                var albumOp: [String: Any] = [
-                    "operation": "insert_album",
-                    "pid": albumPid,
-                    "all_compilations": false,
-                    "kind": 8,  // kAlbumKind_TVShow — empirical guess
-                ]
-                if let p = f.item.showPosterData, !p.isEmpty {
-                    let cacheID = Int.random(in: 1...9999)
-                    albumItem["artwork_cache_id"] = cacheID
-                    albumArtworkCache[albumPid] = cacheID
-                }
-                albumOp["item"] = albumItem
-                operations.append(albumOp)
-                DebugLog.write("atc.insert_album",
-                    "pid=\(albumPid) show=\"\(show)\" season=\(season) "
-                    + "artwork_cache_id=\(albumArtworkCache[albumPid] ?? 0)")
-            }
-        }
-
         for f in files {
             var itemDict: [String: Any] = [
                 "title": f.item.title,
@@ -278,6 +193,11 @@ class ATCSession {
 
             if f.item.posterData != nil {
                 itemDict["artwork_cache_id"] = Int.random(in: 1...9999)
+            }
+            // Pair to the second Airlock upload below. Drives the album-row
+            // poster on TV.app's Library list.
+            if f.item.showPosterData != nil {
+                itemDict["album_artwork_cache_id"] = Int.random(in: 1...9999)
             }
 
             // TV-episode fields live in `video_info` sub-dict, snake_case.
@@ -323,15 +243,6 @@ class ATCSession {
                 if let v = f.item.sortAlbum { itemDict["sort_album"] = v }
                 if let v = f.item.albumArtist { itemDict["album_artist"] = v }
                 if let v = f.item.sortAlbumArtist { itemDict["sort_album_artist"] = v }
-                // Link the track to the explicit album row we just emitted
-                // above so medialibraryd doesn't synthesize a duplicate.
-                // Without this, the device creates its own album row keyed
-                // by the (album, season, album_artist) tuple and our
-                // insert_album's pid orphans (no tracks reference it → no
-                // representative_item_pid → album.artwork_status stays 0).
-                if let show = f.item.tvShowName, let season = f.item.seasonNumber {
-                    itemDict["album_pid"] = ATCSession.albumPid(show: show, season: season)
-                }
                 // `episode_sort_id` lives on `item` table in current iOS
                 // (older schema had it on video_info). Without it TV.app's
                 // episode-row label prefixes "0." to the title.
@@ -514,15 +425,10 @@ class ATCSession {
                 log("  AFC: artwork -> \(artPath) (\(poster.count / 1024) KB)")
                 try afc.writeFile(artPath, data: poster)
             }
-            // Portrait show poster keyed by album_pid (one per show/season).
-            // Paired with the insert_album op's `artwork_cache_id` so the
-            // album row's poster slot resolves to this JPEG instead of
-            // representative_item_pid's landscape still.
-            if let showPoster = f.item.showPosterData,
-               let show = f.item.tvShowName, let season = f.item.seasonNumber {
-                let albumPid = ATCSession.albumPid(show: show, season: season)
-                let artPath = "/Airlock/Media/Artwork/\(albumPid)"
-                log("  AFC: album artwork -> \(artPath) (\(showPoster.count / 1024) KB)")
+            // Second Airlock artwork — show portrait for the album row.
+            if let showPoster = f.item.showPosterData {
+                let artPath = "/Airlock/Media/Artwork/\(f.assetID)_show"
+                log("  AFC: show artwork -> \(artPath) (\(showPoster.count / 1024) KB)")
                 try afc.writeFile(artPath, data: showPoster)
             }
 
@@ -727,14 +633,9 @@ class ATCSession {
             log("  AFC: artwork -> \(artPath) (\(poster.count / 1024) KB)")
             try afc.writeFile(artPath, data: poster)
         }
-        // Portrait album artwork keyed by album_pid. Same pid is computed
-        // by buildSyncPlist when emitting insert_album, so the cache_id
-        // there pairs with this Airlock JPEG.
-        if let showPoster = f.item.showPosterData,
-           let show = f.item.tvShowName, let season = f.item.seasonNumber {
-            let albumPid = ATCSession.albumPid(show: show, season: season)
-            let artPath = "/Airlock/Media/Artwork/\(albumPid)"
-            log("  AFC: album artwork -> \(artPath) (\(showPoster.count / 1024) KB)")
+        if let showPoster = f.item.showPosterData {
+            let artPath = "/Airlock/Media/Artwork/\(f.assetID)_show"
+            log("  AFC: show artwork -> \(artPath) (\(showPoster.count / 1024) KB)")
             try afc.writeFile(artPath, data: showPoster)
         }
 
@@ -957,30 +858,6 @@ class ATCSession {
 
     static func generateAssetID() -> Int {
         Int.random(in: 100_000_000_000_000_000..<999_999_999_999_999_999)
-    }
-
-    /// Deterministic 18-digit positive Int derived from SHA256 of `key`.
-    /// Matches the asset-id width used for track pids so medialibraryd
-    /// treats it as a normal entity pid. Same key → same pid → re-syncs
-    /// bind back to the same album/artist row instead of duplicating.
-    private static func deterministicPid(_ key: String) -> Int64 {
-        let hash = SHA256.hash(data: Data(key.utf8))
-        var v: UInt64 = 0
-        for byte in hash.prefix(8) {
-            v = (v << 8) | UInt64(byte)
-        }
-        // Mask off top bit so the result fits in Int64 positive range,
-        // then clamp into the 17-digit window we use for track ids.
-        let positive = v & 0x7FFF_FFFF_FFFF_FFFF
-        return Int64(positive % 900_000_000_000_000_000 + 100_000_000_000_000_000)
-    }
-
-    static func albumPid(show: String, season: Int) -> Int64 {
-        deterministicPid("album:\(show.lowercased())|s\(season)")
-    }
-
-    static func artistPid(show: String) -> Int64 {
-        deterministicPid("artist:\(show.lowercased())")
     }
 
     // MARK: - Private
