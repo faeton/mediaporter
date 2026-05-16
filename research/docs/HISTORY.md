@@ -278,6 +278,27 @@ Future direction for portrait poster: don't go through insert_album. Track-class
 2. Add a synthetic "show poster" virtual track with `base_location_id=0` and portrait artwork; set the album's `representative_item_pid` to it. Risk: TV.app may render it as a (broken) episode.
 3. Investigate `artwork_variant_type` — currently always 0 in the DB; maybe a non-zero variant on the same entity can hold portrait separately. No evidence yet that medialibraryd ingests multiple variants per entity.
 
+## 2026-05-16 — Phantom-rep_pid test matrix closed (T1–T5 done, approach dead)
+
+Full T-matrix run on device, branch `phantom-portrait-two-phase-delete`. Detail per test: `research/docs/PHANTOM_REP_PID_TESTS.md`. Strings-table evidence: `research/docs/AMPDEVICES_AGENT_STRINGS.md`.
+
+What we learned (key facts):
+- `album.representative_item_pid` IS settable via `insert_album` — the wire key is `artwork_item_pid` (NOT `representative_item_pid`; that name is silently dropped). Confirmed by literal `INSERT INTO album (pid, kind, artwork_status, artwork_item_pid, all_compilations, user_rating, name_order, season_number)` SQL mined out of AMPDevicesAgent at strings line 23125.
+- Wire pid ≠ DB pid. medialibraryd renumbers item pids on insert and maintains a *session-local* wire→DB resolution map for FK references in the same plist. `item` table has no `sync_id` column (unlike `album`/`item_artist`), so wire pids can't be reconciled across syncs — phantoms must SURVIVE in the item table for `artwork_item_pid` to bind.
+- T1 (.baseline, no phantom, no insert_album) — `album.representative_item_pid` AUTO-DERIVES to the first inserted item's DB pid. Album row gets created without any explicit op; `album.sync_id` reuses our prior wire pid.
+- T2 (.explicitAlbumOnly, no phantom, insert_album with rep_pid=real_ep) — explicit op honored, `representative_item_pid` lands correctly via wire-pid → DB-pid resolution.
+- T3 (.phantomNoDelete, phantom + insert_album rep_pid=phantom) — rep_pid binds to phantom's DB pid ✓, BUT `artwork_token` for `entity_type=4` (album) points at the REAL episode's token, not phantom's. TV.app show-detail header reads off album-level artwork → renders the landscape ep still letterboxed.
+- T3b (phantom `episode_sort_id=0` < real `episode_sort_id=1`) — album artwork NOW points at phantom's portrait token. Portrait renders correctly in show-detail. But phantom shows up in the episode list as a zero-sort sentinel row → cosmetically broken.
+- T4 (.phantomTwoPhase, same-plist `insert_track`+`delete_track`) — both phantom AND real episode missing in DB; real MP4 swept by GC. Same-plist delete corrupts the batch. Dead.
+- T5 (.phantomSeparateDelete, fresh session after main sync to delete phantom) — phantom deleted cleanly, BUT medialibraryd's daemon-layer rebind logic rewrites `album.artwork_token` to the surviving real episode's landscape token. `PRAGMA foreign_keys=0` doesn't matter — the rebind happens above SQL layer. Phantom's portrait blob becomes unreferenced and gets swept by background GC. Dead.
+
+Other findings from strings dump:
+- `insert_album` has NO `artwork_cache_id` and NO direct-blob path. Album artwork always routes through `artwork_item_pid` → an item that owns the JPEG. Earlier Codex/CigGenerator extract showing `artwork_cache_id` was correct that the literal exists but wrong about which dict it lives in (it's a track-level key).
+- `is_hidden` is playlist-only — silently dropped on `insert_track`. The viable item-level hiding candidates are `is_user_disabled`, `exclude_from_shuffle`, `chosen_by_auto_fill` — but TV.app's episode-list partial index `ItemSeries WHERE in_my_library` doesn't filter on those. `item.in_my_library` is set by trigger from `item_store.sync_in_my_library`; no wire key surfaced for `sync_in_my_library`.
+- `libts` is NOT an Apple service — zero hits in AirTrafficHost/AMPDevicesAgent/MobileDevice strings. Confirms libts/TSAppManagerImpl are Tenorshare vendor symbols (iCareFone), irrelevant to our reverse engineering.
+
+Decision: ship portrait via each episode's `posterData` (item.posterData = showPosterData ?? perEpisodeStill). Trade-off: episode-row thumbs are portrait tiles instead of landscape stills, but the show-detail big header renders correctly. This is option (1) from 2026-05-15; phantom approach (option 2) is closed.
+
 ## CLI Improvements (2026-04-10) — Python v0.3.1
 
 Real-world two-file run (Send.Help 4.7 GB + Avatar 15 GB) exposed and fixed:

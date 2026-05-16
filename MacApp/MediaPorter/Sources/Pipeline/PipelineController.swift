@@ -2364,16 +2364,24 @@ public class PipelineController {
             item.sortAlbum = e.showName.lowercased()
             item.albumArtist = e.showName
             item.sortAlbumArtist = e.showName.lowercased()
-            // Per-episode landscape thumb (TMDb still / ffmpeg-extracted /
-            // synthetic with badge stamp) goes to `posterData` → uploaded as
-            // /Airlock/Media/Artwork/<assetID> and rendered in the episode
-            // rows on the show-detail screen. Library home tile renders the
-            // album-level artwork (uploaded separately as `<assetID>_show`),
-            // so this assignment doesn't fight Library tile rendering.
-            // The previous override `posterData = showPosterData ?? posterData`
-            // forced the portrait show poster into the landscape episode
-            // slot — it rendered squashed.
-            item.posterData = e.posterData
+            // Ship the show portrait as the track artwork (with the
+            // per-episode landscape still as fallback when TMDb can't
+            // resolve a portrait). Album rows have no artwork of their
+            // own in modern iOS — they inherit their poster slot from
+            // `album.representative_item_pid → item → artwork`, and
+            // TV.app's show-detail big-portrait header reads off that
+            // chain. Per-episode landscape stills render squashed in
+            // the portrait frame; portrait gets the header right at the
+            // cost of episode-row thumbs becoming portrait tiles too.
+            // Empirics 2026-05-16 (PHANTOM_REP_PID_TESTS.md T1–T5):
+            // album-keyed Airlock upload at /Airlock/Media/Artwork/
+            // <album_pid> is silently ignored (no asset_id for album).
+            // Phantom-then-hide is dead — medialibraryd rebinds the
+            // album artwork_token to the surviving item the moment the
+            // phantom item disappears, regardless of PRAGMA
+            // foreign_keys=0. Going through item artwork on every
+            // episode is the only path that works today.
+            item.posterData = e.showPosterData ?? e.posterData
             item.showPosterData = e.showPosterData
         }
         return item
