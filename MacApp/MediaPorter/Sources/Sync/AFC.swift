@@ -7,6 +7,7 @@ enum AFCError: LocalizedError {
     case openFailed(String, Int32)
     case writeFailed(Int, Int32)
     case readFailed(Int, Int32)
+    case sizeMismatch(path: String, expected: Int64, actual: Int64)
     case cancelled
 
     var errorDescription: String? {
@@ -15,6 +16,8 @@ enum AFCError: LocalizedError {
         case .openFailed(let path, let rc): return "AFC open '\(path)' failed (error \(rc))"
         case .writeFailed(let offset, let rc): return "AFC write failed at offset \(offset) (error \(rc))"
         case .readFailed(let offset, let rc): return "AFC read failed at offset \(offset) (error \(rc))"
+        case .sizeMismatch(let path, let expected, let actual):
+            return "AFC upload size mismatch at \(path): expected \(expected) B, device reports \(actual) B"
         case .cancelled: return "Cancelled"
         }
     }

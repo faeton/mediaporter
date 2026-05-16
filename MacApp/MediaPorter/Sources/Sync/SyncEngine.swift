@@ -46,6 +46,16 @@ final class AFCUploader {
 
     /// Upload a single prepared file, reporting byte-level progress.
     /// The `isCancelled` closure is polled between 1 MB chunks.
+    ///
+    /// After AFC EOF, re-stats the remote path and compares to the local
+    /// file size. libimobiledevice + pymobiledevice3 both query st_size
+    /// after AFC write for the same reason: catch truncation / late AFC
+    /// failures BEFORE ATC `FileComplete` tries to bind a broken asset.
+    /// Throws `AFCError.sizeMismatch` on disagreement so the pipeline's
+    /// cleanup path will FileError(0) the asset and unblock SyncFinished.
+    /// A nil stat (afcd not reporting size on this iOS) is treated as
+    /// non-fatal and only logged — we don't want a flaky stat layer to
+    /// gate uploads that otherwise succeeded.
     func upload(
         _ file: PreparedSyncFile,
         progress: ((Int, Int) -> Void)? = nil,
@@ -58,6 +68,27 @@ final class AFCUploader {
             progress: progress,
             isCancelled: isCancelled
         )
+        let expected = Int64(
+            (try? FileManager.default.attributesOfItem(
+                atPath: file.item.fileURL.path)[.size] as? Int) ?? 0)
+        guard expected > 0 else {
+            DebugLog.write("afc.upload.verify",
+                "\(file.devicePath) skipped — local stat returned 0")
+            return
+        }
+        if let actual = afc.fileSize(file.devicePath) {
+            if actual != expected {
+                DebugLog.write("afc.upload.verify",
+                    "\(file.devicePath) MISMATCH expected=\(expected) actual=\(actual)")
+                throw AFCError.sizeMismatch(
+                    path: file.devicePath, expected: expected, actual: actual)
+            }
+            DebugLog.write("afc.upload.verify",
+                "\(file.devicePath) size=\(actual) OK")
+        } else {
+            DebugLog.write("afc.upload.verify",
+                "\(file.devicePath) stat returned nil after write (expected=\(expected)) — proceeding")
+        }
     }
 
     func close() { afc.close() }
