@@ -822,17 +822,27 @@ func runSmokeTest(fixturePath: String?, keep: Bool) -> Never {
             failures.append("DB query failed: \(error.localizedDescription)")
             return
         }
-        // Filter to the row we just synced (by title contains the file stem).
+        // Filter to the row we just synced. We require an explicit match
+        // — no `?? candidates.first` fallback — otherwise a phantom row
+        // from a previous abandoned smoke run could mask a true failure
+        // where our row never actually landed (codex review 2026-05-18).
+        //
+        // Match semantics: for TV `job.metadata?.title` returns showName
+        // ("Mediaporter Alpha") while the DB title is the episode label
+        // ("Mediaporter Alpha — S01E01") — the show name is a substring,
+        // so contains() catches it. For movies showName isn't applicable
+        // and metadata.title == DB title exactly. We also check the
+        // filename stem as a third anchor (covers off-format DB titles).
         let stem = url.deletingPathExtension().lastPathComponent
         let ours = candidates.filter { c in
-            // Either the DB title matches our synced title, or the file
-            // stem (Mediaporter.Alpha.S01E01) appears in the title.
-            c.title == syncedTitle || c.title.contains(stem)
-                || (c.mediaPath ?? "").contains(stem)
+            c.title == syncedTitle
+                || c.title.contains(syncedTitle)
+                || c.title.contains(stem)
         }
-        let target = ours.first ?? candidates.first
-        guard let cand = target else {
-            failures.append("row not found in MediaLibrary.sqlitedb (searched LIKE '%\(searchKey)%')")
+        guard let cand = ours.first else {
+            let titles = candidates.map { "\"\($0.title)\"" }.joined(separator: ", ")
+            failures.append(
+                "row not found: searched LIKE '%\(searchKey)%' and got \(candidates.count) match(es) [\(titles)] but none matched syncedTitle=\"\(syncedTitle)\" or stem=\"\(stem)\"")
             return
         }
         guard cand.syncID != 0 else {
@@ -852,6 +862,24 @@ func runSmokeTest(fixturePath: String?, keep: Bool) -> Never {
         guard let size = onDeviceSize else {
             failures.append("MP4 missing on device: \(path)")
             return
+        }
+        // Default fixture is a TV episode — kind 32 or 64 (per
+        // DeviceLibraryQuery + delete-command comment, 64 is the modern
+        // iOS 17+ value, 32 the legacy). A custom --fixture pointing at
+        // a movie would land kind 2; that's also fine. Reject only the
+        // "unknown" sentinel 0 and surface unexpected values explicitly.
+        let isDefaultFixture = (fixturePath == nil)
+        if isDefaultFixture {
+            guard cand.mediaKind == 32 || cand.mediaKind == 64 else {
+                failures.append(
+                    "TV fixture got unexpected media_kind=\(cand.mediaKind) — expected 32 or 64 (TV episode). Was the TV-vs-movie classifier broken upstream?")
+                return
+            }
+        } else {
+            guard cand.mediaKind != 0 else {
+                failures.append("custom fixture got media_kind=0 (unknown)")
+                return
+            }
         }
         print("  row: sync_id=\(cand.syncID) kind=\(cand.mediaKind) bound to \(path)")
         print("  file: \(size) bytes on device")

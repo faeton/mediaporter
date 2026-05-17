@@ -99,10 +99,15 @@ final class SyncPlistTests: XCTestCase {
         XCTAssertEqual(root["revision"] as? Int, 42)
         XCTAssertNotNil(root["timestamp"] as? Date)
 
+        // Wire contract: op[0] MUST be update_db_info (CLAUDE.md rule #13)
+        // and exactly one insert_track per file. We don't pin total count
+        // so a future required op doesn't break this test for no wire
+        // reason — but op[0] is load-bearing per the protocol.
         let ops = opsIn(root)
-        XCTAssertEqual(ops.count, 2, "1 update_db_info + 1 insert_track")
-        XCTAssertEqual(ops[0]["operation"] as? String, "update_db_info")
-        XCTAssertEqual(ops[1]["operation"] as? String, "insert_track")
+        XCTAssertEqual(ops[0]["operation"] as? String, "update_db_info",
+            "first op must be update_db_info — wire contract")
+        let inserts = ops.filter { ($0["operation"] as? String) == "insert_track" }
+        XCTAssertEqual(inserts.count, 1, "one insert_track per file")
     }
 
     func testMovieInsertTrackHasMovieFlagAndNoTVKeys() {
@@ -249,17 +254,86 @@ final class SyncPlistTests: XCTestCase {
         let inserts = ops.filter { ($0["operation"] as? String) == "insert_track" }
         XCTAssertEqual(inserts.count, 2)
 
-        let byPid = Dictionary(uniqueKeysWithValues: inserts.map {
-            ($0["pid"] as! Int, $0)
-        })
+        // Don't use Dictionary(uniqueKeysWithValues:) — a duplicate pid
+        // (a real wire bug we'd want to catch) would trap the test
+        // binary instead of producing a useful XCTFail. `.grouping`
+        // surfaces dupes naturally and lets us assert uniqueness.
+        let byPid = Dictionary(grouping: inserts) { $0["pid"] as! Int }
+        for (pid, list) in byPid {
+            XCTAssertEqual(list.count, 1, "duplicate pid \(pid) in batch")
+        }
 
-        let movieItem = byPid[100]!["item"] as! [String: Any]
-        XCTAssertEqual(movieItem["is_movie"] as? Bool, true)
-        XCTAssertNil(movieItem["episode_sort_id"])
+        let movieItem = byPid[100]?.first?["item"] as? [String: Any]
+        XCTAssertEqual(movieItem?["is_movie"] as? Bool, true)
+        XCTAssertNil(movieItem?["episode_sort_id"])
 
-        let tvItem = byPid[200]!["item"] as! [String: Any]
-        XCTAssertEqual(tvItem["is_tv_show"] as? Bool, true)
-        XCTAssertEqual(tvItem["episode_sort_id"] as? Int, 10001)
+        let tvItem = byPid[200]?.first?["item"] as? [String: Any]
+        XCTAssertEqual(tvItem?["is_tv_show"] as? Bool, true)
+        XCTAssertEqual(tvItem?["episode_sort_id"] as? Int, 10001)
+    }
+
+    // MARK: - currently-emitted-but-unpinned fields
+    //
+    // These fields are emitted by buildSyncPlist and matter on device,
+    // but weren't previously asserted. A struct refactor that silently
+    // zeros one of them (e.g. channels → 0, audio_format → 0) would
+    // pass every other test in this file while breaking TV.app metadata
+    // panels or audio routing. Per codex review 2026-05-18.
+
+    func testUpdateDbInfoShape() {
+        let session = makeSession()
+        let data = session.buildSyncPlist(files: [makeMovieFile()], anchor: 1)
+        let ops = opsIn(parsePlist(data))
+        // op[0] is contract per CLAUDE.md rule #13
+        let dbInfoOp = ops[0]
+        XCTAssertEqual(dbInfoOp["operation"] as? String, "update_db_info")
+        XCTAssertNotNil(dbInfoOp["pid"] as? Int, "update_db_info needs a pid")
+
+        let dbInfo = dbInfoOp["db_info"] as! [String: Any]
+        XCTAssertEqual(dbInfo["subtitle_language"] as? Int, -1)
+        XCTAssertEqual(dbInfo["audio_language"] as? Int, -1)
+        XCTAssertEqual(dbInfo["primary_container_pid"] as? Int, 0)
+    }
+
+    func testInsertTrackHasAvformatInfo() {
+        let session = makeSession()
+        let data = session.buildSyncPlist(
+            files: [makeEpisodeFile()], anchor: 1
+        )
+        let op = insertTrack(in: parsePlist(data))
+        let av = op["avformat_info"] as! [String: Any]
+        XCTAssertNotNil(av["bit_rate"] as? Int)
+        XCTAssertNotNil(av["audio_format"] as? Int)
+        XCTAssertEqual(av["channels"] as? Int, 6,
+            "channels from SyncItem.channels must reach avformat_info")
+    }
+
+    func testInsertTrackHasItemStatsDefaults() {
+        let session = makeSession()
+        let data = session.buildSyncPlist(files: [makeMovieFile()], anchor: 1)
+        let op = insertTrack(in: parsePlist(data))
+        let stats = op["item_stats"] as! [String: Any]
+        // Five defaults — a struct refactor that drops one would surface
+        // here. Don't pin specific values for play_counts (they're 0 on
+        // insert but could be initialized differently in future).
+        XCTAssertNotNil(stats["has_been_played"] as? Bool)
+        XCTAssertNotNil(stats["play_count_recent"] as? Int)
+        XCTAssertNotNil(stats["play_count_user"] as? Int)
+        XCTAssertNotNil(stats["skip_count_user"] as? Int)
+        XCTAssertNotNil(stats["skip_count_recent"] as? Int)
+    }
+
+    func testItemDictBaseFields() {
+        let session = makeSession()
+        let data = session.buildSyncPlist(files: [makeMovieFile()], anchor: 1)
+        let op = insertTrack(in: parsePlist(data))
+        let item = op["item"] as! [String: Any]
+        XCTAssertEqual(item["title"] as? String, "Test Movie")
+        XCTAssertEqual(item["sort_name"] as? String, "Test Movie")
+        XCTAssertEqual(item["total_time_ms"] as? Int, 7_200_000)
+        XCTAssertEqual(item["remember_bookmark"] as? Bool, true)
+        XCTAssertNotNil(item["date_created"] as? Date)
+        XCTAssertNotNil(item["date_modified"] as? Date)
     }
 
     // MARK: - buildDeletePlist
