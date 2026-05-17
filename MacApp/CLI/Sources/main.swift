@@ -3,7 +3,14 @@
 // Commands:
 //   devices                 — list connected iOS devices
 //   analyze <file>          — probe a file and print the transcode plan
-//   sync <file> [file...]   — (todo) full pipeline to connected device
+//   sync <file> [file...]   — full pipeline (transcode + upload + register)
+//                             to the connected device using defaults.
+//                             Movies + plain TV episodes work without
+//                             interactive input; TMDb enrichment is skipped
+//                             (no API key in CLI), filename-derived metadata
+//                             is used.
+//   bench-upload <file>     — measure AFC throughput at several chunk sizes
+//   recover / pull / ls / stat / gate-test / streaming-test — see -h
 //
 // Deliberately minimal. UI rework will come later on top of the same core.
 
@@ -20,7 +27,16 @@ func usage() -> Never {
     commands:
       devices                 list connected iOS devices
       analyze <file>          probe a file and print the transcode plan
-      sync <file> [file...]   (not implemented yet)
+      sync <file> [file...]   full pipeline (transcode + upload + register)
+                              for the given files. Uses defaults — no TMDb
+                              enrichment (no API key in CLI), no cluster-
+                              extras (sidecar dubs/subs), no interactive
+                              show-picker. Suitable for movies and simple
+                              TV files.
+      bench-upload <file>     measure AFC throughput at several chunk sizes
+                              (256K, 1M, 4M, 16M) and print the best fit.
+                              Each pass FileError(0)-cleans its own upload
+                              so the device isn't left with stale assets.
       recover                 register orphaned uploads on the device using
                               tagged .m4v files left in the system tempdir
       pull <remote> [local]   copy a file off the device via AFC. Default
@@ -52,8 +68,11 @@ case "analyze":
     guard argv.count >= 3 else { usage() }
     runAnalyze(path: argv[2])
 case "sync":
-    FileHandle.standardError.write(Data("sync: not implemented yet\n".utf8))
-    exit(2)
+    guard argv.count >= 3 else { usage() }
+    runSync(paths: Array(argv[2...]))
+case "bench-upload":
+    guard argv.count >= 3 else { usage() }
+    runBenchUpload(path: argv[2])
 case "recover":
     runRecover()
 case "pull":
@@ -394,5 +413,162 @@ func runRecover() {
         for t in report.registeredTitles {
             print("  - \(t)")
         }
+    }
+}
+
+// MARK: - sync (full pipeline, headless)
+
+/// Drives `PipelineController.runFullPipeline()` for one or more local
+/// video files. No interactive TMDb picker — tmdbAPIKey stays empty so
+/// metadata falls back to filename. AFC + ATC + transcode (when needed)
+/// run end-to-end against the connected device. Exit code 1 on any job
+/// failing or no device.
+///
+/// Uses `dispatchMain()` instead of a semaphore: PipelineController is
+/// `@MainActor`-isolated, so any property access or method call from
+/// another actor hops to the main queue. A semaphore on the main thread
+/// blocks the main queue and the hop never completes — the process
+/// hangs forever waiting on a Task that can't be scheduled. With
+/// `dispatchMain()`, main is given over to the dispatch runtime and
+/// MainActor work flows; we terminate via `exit()` from the task.
+func runSync(paths: [String]) -> Never {
+    let urls = paths.map { URL(fileURLWithPath: $0) }
+    for u in urls where !FileManager.default.fileExists(atPath: u.path) {
+        FileHandle.standardError.write(Data("not found: \(u.path)\n".utf8))
+        exit(1)
+    }
+    Task { @MainActor in
+        var exitCode: Int32 = 0
+        defer { exit(exitCode) }
+        let pc = PipelineController()
+
+        // Set deviceInfo directly — DeviceMonitor's 2 s polling loop would
+        // also work but adds startup latency we don't need for a one-shot
+        // CLI invocation.
+        do {
+            pc.deviceInfo = try discoverDevice()
+        } catch {
+            FileHandle.standardError.write(Data("no device: \(error.localizedDescription)\n".utf8))
+            exitCode = 1
+            return
+        }
+        print("Device: \(pc.deviceInfo!.displayName)")
+
+        // Append jobs directly — skip addFiles()'s auto-kickoff of
+        // analyzeAll() so we don't race with our own awaited call.
+        for u in urls { pc.jobs.append(FileJob(url: u)) }
+
+        // Live progress printer. Single-line in-place updates via "\r" so
+        // we don't flood the terminal during long uploads. Polls every
+        // 250 ms; finalizes with a newline on exit.
+        let printer = Task { @MainActor in
+            var lastLine = ""
+            while !Task.isCancelled {
+                let line: String = {
+                    if pc.overallProgress > 0 {
+                        let pct = Int(pc.overallProgress * 100)
+                        let bar = makeBar(pc.overallProgress, width: 24)
+                        return "\(bar) \(pct)%  \(pc.overallStatus)"
+                    } else {
+                        return pc.overallStatus
+                    }
+                }()
+                if line != lastLine {
+                    FileHandle.standardError.write(Data("\r\u{1b}[2K\(line)".utf8))
+                    lastLine = line
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+
+        await pc.runFullPipeline()
+
+        printer.cancel()
+        FileHandle.standardError.write(Data("\r\u{1b}[2K".utf8)) // clear status line
+
+        print("")
+        print("Result:")
+        var allOK = true
+        for job in pc.jobs {
+            let mark: String
+            switch job.status {
+            case .synced: mark = "OK"
+            default:
+                mark = "FAIL [\(job.status.rawValue)]"
+                allOK = false
+            }
+            print("  \(mark)  \(job.fileName)")
+            if let err = job.error { print("        \(err)") }
+        }
+        if !allOK { exitCode = 1 }
+        if let stats = pc.lastRunStats {
+            print("")
+            print(String(format: "Run: %.1fs total (%.1fs transcode, %.1fs upload)",
+                stats.totalWallSeconds, stats.totalTranscodeSeconds, stats.totalUploadSeconds))
+            if let avg = stats.avgUploadMBps {
+                print(String(format: "Avg upload: %.1f MB/s", avg))
+            }
+        }
+    }
+    dispatchMain()
+}
+
+private func makeBar(_ frac: Double, width: Int) -> String {
+    let clamped = max(0, min(1, frac))
+    let fill = Int(Double(width) * clamped)
+    return "[" + String(repeating: "#", count: fill)
+              + String(repeating: "-", count: max(0, width - fill)) + "]"
+}
+
+// MARK: - bench-upload (chunk-size benchmark, punch-list #3)
+
+func runBenchUpload(path: String) {
+    let url = URL(fileURLWithPath: path)
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        FileHandle.standardError.write(Data("not found: \(path)\n".utf8))
+        exit(1)
+    }
+    let sema = DispatchSemaphore(value: 0)
+    var thrown: Error?
+    var report: BenchUploadReport?
+    Task {
+        do {
+            report = try await benchUploadChunkSizes(fileURL: url) { line in
+                print(line)
+            }
+        } catch {
+            thrown = error
+        }
+        sema.signal()
+    }
+    sema.wait()
+
+    if let e = thrown {
+        FileHandle.standardError.write(Data("bench-upload failed: \(e.localizedDescription)\n".utf8))
+        exit(1)
+    }
+    guard let r = report else { return }
+
+    print("")
+    print("=== AFC chunk-size benchmark ===")
+    print(String(format: "File: %@ (%.1f MB)",
+        r.fileURL.lastPathComponent, Double(r.fileBytes) / 1_048_576))
+    print(String(format: "Warmup: %.2fs", r.warmupSeconds))
+    if let note = r.note { print("Note: \(note)") }
+    print("")
+    print("  chunk    median   MB/s")
+    for res in r.results {
+        let chunkLabel = res.chunkSizeBytes >= 1024 * 1024
+            ? "\(res.chunkSizeBytes / (1024 * 1024)) MB"
+            : "\(res.chunkSizeBytes / 1024) KB"
+        print(String(format: "  %-7s %5.2fs  %6.1f",
+            chunkLabel, res.medianSeconds, res.medianMBps))
+    }
+    if let best = r.best {
+        let label = best.chunkSizeBytes >= 1024 * 1024
+            ? "\(best.chunkSizeBytes / (1024 * 1024)) MB"
+            : "\(best.chunkSizeBytes / 1024) KB"
+        print("")
+        print(String(format: ">>> Winner: %@ at %.1f MB/s", label, best.medianMBps))
     }
 }
