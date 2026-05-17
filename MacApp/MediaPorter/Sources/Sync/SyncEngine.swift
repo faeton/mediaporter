@@ -270,9 +270,24 @@ final class RegisterSession {
         session?.close(); session = nil
     }
 
-    /// Tear down without waiting for SyncFinished. Used on hard failures
-    /// where the caller has already abandoned the remaining assets and
-    /// just wants to release the connections.
+    /// Cancel-path finalization. After the caller has abandoned every
+    /// in-flight / pending asset via `abandonAsset`, give medialibraryd
+    /// a short window to commit those FileError(0)s — without this, the
+    /// network buffer can carry our messages but `close()`'s
+    /// `ATH.invalidate` may tear the socket down before they're flushed.
+    /// Empirically a few seconds is enough; we cap at `deadlineSeconds`
+    /// so a cancelling user isn't stuck on the 120 s normal-path wait.
+    /// (#15 from research/docs/ATC_PIPELINE_OPTIMIZATION.md.)
+    func finishGraceful(deadlineSeconds: TimeInterval = 15) {
+        session?.finishSync(deadlineSeconds: deadlineSeconds)
+        afc?.close(); afc = nil
+        session?.close(); session = nil
+    }
+
+    /// Tear down without waiting for SyncFinished. Reserved for paths
+    /// where the session is already known to be unusable (handshake
+    /// failure, mid-handshake error) — for cancel/error AFTER a
+    /// successful open, prefer `finishGraceful` so abandons get flushed.
     func close() {
         afc?.close(); afc = nil
         session?.close(); session = nil

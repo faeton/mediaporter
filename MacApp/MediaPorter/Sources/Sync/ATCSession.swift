@@ -796,11 +796,11 @@ class ATCSession {
     /// 3. Fallback: if `SyncAllowed` arrives but no `SyncFinished` follows
     ///    within 30 s, accept it with a warning so we don't hang forever on
     ///    a misbehaving device.
-    func finishSync() {
+    func finishSync(deadlineSeconds: TimeInterval = 120) {
         log("  Waiting for SyncFinished...")
-        DebugLog.write("atc.finishSync.wait", "deadline=120s")
+        DebugLog.write("atc.finishSync.wait", "deadline=\(Int(deadlineSeconds))s")
         let start = Date()
-        let hardDeadline = start.addingTimeInterval(120)
+        let hardDeadline = start.addingTimeInterval(deadlineSeconds)
 
         // Drop pre-existing inbox entries — they're from the upload phase,
         // not commit signals for the just-finished file.
@@ -834,8 +834,8 @@ class ATCSession {
             }
             Thread.sleep(forTimeInterval: 0.2)
         }
-        log("  SyncFinished not received (120 s timeout)")
-        DebugLog.error("atc.finishSync.timeout", "elapsed=120s")
+        log("  SyncFinished not received (\(Int(deadlineSeconds)) s timeout)")
+        DebugLog.error("atc.finishSync.timeout", "elapsed=\(Int(deadlineSeconds))s")
         stopDrainer()
     }
 

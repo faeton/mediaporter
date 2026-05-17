@@ -2131,14 +2131,19 @@ public class PipelineController {
 
         if let err = workFailed {
             let wasCancel = cancelFlag.get()
-            overallStatus = wasCancel ? "Cancelled" : "Upload failed: \(err)"
+            overallStatus = wasCancel ? "Cancelled — finalizing…" : "Upload failed: \(err)"
             for (job, _) in preparedPairs
                 where job.status == .syncing || job.status == .uploaded
             {
                 job.status = .failed
                 job.error = wasCancel ? "Cancelled" : err
             }
-            registerSession.close()
+            // Short-deadline finishSync so the FileError(0) abandons sent
+            // in the `for i in registeredCount..<` loop above flush before
+            // the socket dies. (#15: prior `close()` here could orphan the
+            // device's pending-asset wait.)
+            registerSession.finishGraceful(deadlineSeconds: 15)
+            overallStatus = wasCancel ? "Cancelled" : "Upload failed: \(err)"
             isRunning = false
             lastRunStats = stats
             cancelFlag.set(false)
@@ -2146,14 +2151,15 @@ public class PipelineController {
         }
 
         if cancelFlag.get() {
-            overallStatus = "Cancelled"
+            overallStatus = "Cancelled — finalizing…"
             for (job, _) in preparedPairs
                 where job.status == .syncing || job.status == .uploaded || job.status == .transcoding
             {
                 job.status = .failed
                 job.error = "Cancelled"
             }
-            registerSession.close()
+            registerSession.finishGraceful(deadlineSeconds: 15)
+            overallStatus = "Cancelled"
             isRunning = false
             lastRunStats = stats
             cancelFlag.set(false)
