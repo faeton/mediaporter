@@ -25,13 +25,15 @@ enum AFCError: LocalizedError {
 
 class AFCClient {
     private var conn: UnsafeMutableRawPointer?
-    /// Bytes per AFC write call. 1 MB is the historical default — it
-    /// roughly matches what go-tunes / libimobiledevice use. Configurable
-    /// for the `bench-upload` benchmark (#3) so we can measure throughput
-    /// at other sizes without recompiling. Read once at init time so a
-    /// long-lived connection has a stable size.
+    /// Bytes per AFC write call. Bumped from 1 MB to 4 MB after the
+    /// 2026-05-17 `bench-upload` run against akm16pro: 4 MB sustained
+    /// 34.9 MB/s vs 33.1 at 1 MB and 30.6 at 256 KB. 16 MB tied with
+    /// 4 MB so 4 is the smaller of the two equally-fast options. The
+    /// curve is concave — too-small pays per-syscall overhead, too-large
+    /// wastes pipelining headroom. Configurable so the bench can sweep
+    /// without recompiling; read once at init.
     private let chunkSize: Int
-    public static let defaultChunkSize = 1_048_576
+    public static let defaultChunkSize = 4 * 1_048_576
 
     init(device: DeviceInfo, chunkSize: Int = AFCClient.defaultChunkSize) throws {
         self.chunkSize = chunkSize

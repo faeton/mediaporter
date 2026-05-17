@@ -279,6 +279,91 @@ final class RegisterSession {
     }
 }
 
+/// Remove previously-synced assets from the device's MediaLibrary.
+///
+/// Wire flow per codex review (2026-05-17) + T5 evidence in
+/// research/docs/PHANTOM_REP_PID_TESTS.md:
+///   1. ATC handshake.
+///   2. Write a delete-only sync plist (single `delete_track` op per
+///      `syncID`, no `update_db_info`) + CIG via AFC.
+///   3. Send `MetadataSyncFinished`. Drain Pings, accept AssetManifest
+///      if it shows up but DO NOT require it (delete-only sessions
+///      sometimes get no manifest and still commit).
+///   4. Wait for `SyncFinished`.
+///   5. AFC.remove the media file at each `mediaPath` and the
+///      `/Airlock/Media/Artwork/<syncID>` artwork blob. Missing files
+///      are tolerated (ENOENT = already gone, treat as success).
+///
+/// `syncIDs` MUST be `item_store.sync_id` from the on-device DB — the
+/// original wire pid from the original insert. Passing `item.item_pid`
+/// (the renumbered DB pid) silently no-ops because medialibraryd
+/// resolves deletes against `sync_id`.
+///
+/// Returns the number of media paths actually removed (i.e. existed at
+/// AFC level before the call).
+public struct DeleteResult: Sendable {
+    public let syncIDsSubmitted: Int
+    public let mediaFilesRemoved: Int
+    public let artworkBlobsRemoved: Int
+}
+
+public func deleteFromDevice(
+    syncIDs: [Int],
+    mediaPaths: [String],
+    artworkSyncIDs: [Int] = [],
+    verbose: Bool = false
+) throws -> DeleteResult {
+    guard !syncIDs.isEmpty else {
+        return DeleteResult(syncIDsSubmitted: 0, mediaFilesRemoved: 0, artworkBlobsRemoved: 0)
+    }
+    let device = try discoverDevice()
+
+    let session = ATCSession(device: device, verbose: verbose)
+    let (grappa, anchorStr) = try session.handshake()
+    let newAnchor = String(Int(anchorStr)! + 1)
+    let plistData = session.buildDeletePlist(syncIDs: syncIDs, anchor: Int(newAnchor)!)
+    let cigData = try session.computeCIG(deviceGrappa: grappa, plistData: plistData)
+
+    let afc = try AFCClient(device: device)
+    try session.prepareDelete(
+        afc: afc, plistData: plistData, cigData: cigData, anchor: newAnchor
+    )
+    session.finishSync()
+
+    // Now physical cleanup. Pure AFC; we tolerate ENOENT because the
+    // device may have already GC'd the file between our DB query and
+    // our delete.
+    var mediaRemoved = 0
+    for p in mediaPaths {
+        let rc = afc.removePath(p)
+        if rc == 0 {
+            mediaRemoved += 1
+            DebugLog.write("atc.delete.file", "removed \(p)")
+        } else {
+            DebugLog.notice("atc.delete.file", "remove \(p) rc=\(rc) (ignored — likely already gone)")
+        }
+    }
+    var artworkRemoved = 0
+    for sid in artworkSyncIDs {
+        let path = "/Airlock/Media/Artwork/\(sid)"
+        let rc = afc.removePath(path)
+        if rc == 0 {
+            artworkRemoved += 1
+            DebugLog.write("atc.delete.artwork", "removed \(path)")
+        } else {
+            DebugLog.notice("atc.delete.artwork", "remove \(path) rc=\(rc) (ignored — likely already gone)")
+        }
+    }
+
+    afc.close()
+    session.close()
+    return DeleteResult(
+        syncIDsSubmitted: syncIDs.count,
+        mediaFilesRemoved: mediaRemoved,
+        artworkBlobsRemoved: artworkRemoved
+    )
+}
+
 /// One-shot sync: upload all files, then register. Kept for non-pipelined callers.
 func syncFiles(
     items: [SyncItem],

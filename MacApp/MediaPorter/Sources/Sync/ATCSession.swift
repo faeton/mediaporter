@@ -329,6 +329,30 @@ class ATCSession {
         )
     }
 
+    /// Build a delete-only sync plist — single `delete_track` op per
+    /// `syncID`, no `update_db_info`. We intentionally skip
+    /// `update_db_info` because earlier traces showed it can trigger
+    /// unrelated library-wide rewrites that we don't want on a focused
+    /// delete. The pid we send IS the sync_id (the original wire pid
+    /// from the insert), not the renumbered DB `item_pid`. medialibraryd
+    /// resolves deletes by `item_store.sync_id`, not by `item.item_pid`
+    /// (codex review 2026-05-17 + research/docs/HISTORY.md 2026-05-16
+    /// on pid-renumbering semantics).
+    func buildDeletePlist(syncIDs: [Int], anchor: Int) -> Data {
+        let ops: [[String: Any]] = syncIDs.map { sid in
+            ["operation": "delete_track", "pid": sid]
+        }
+        let plist: [String: Any] = [
+            "revision": anchor,
+            "timestamp": Date(),
+            "operations": ops,
+        ]
+        DebugLog.write("atc.plist.delete",
+            "anchor=\(anchor) count=\(syncIDs.count) syncIDs=\(syncIDs.map { String($0) }.joined(separator: ","))")
+        return try! PropertyListSerialization.data(
+            fromPropertyList: plist, format: .binary, options: 0)
+    }
+
     func computeCIG(deviceGrappa: Data, plistData: Data) throws -> Data {
         var cigOut = [UInt8](repeating: 0, count: 21)
         var cigLen: Int32 = 21
@@ -589,6 +613,61 @@ class ATCSession {
 
         self.streamingAFC = afc
         self.ourAssetIDs = ourIDs
+        startDrainer()
+    }
+
+    /// Delete-only variant of `prepareSync`. Writes the delete plist +
+    /// CIG, sends MetadataSyncFinished, then drains any AssetManifest /
+    /// Ping that arrives (responding to Pings) but DOES NOT require an
+    /// AssetManifest — codex 2026-05-17 / T5 evidence (PHANTOM_REP_PID_TESTS
+    /// section "T5"): medialibraryd processes a delete-only plist and
+    /// commits the row removal even when no AssetManifest is emitted in
+    /// reply. Starts the Ping drainer so the caller can call
+    /// `finishSync()` straight after.
+    func prepareDelete(
+        afc: AFCClient,
+        plistData: Data, cigData: Data, anchor: String,
+        progress: ((String) -> Void)? = nil
+    ) throws {
+        progress?("Writing delete manifest to device…")
+        afc.makedirs("/iTunes_Control/Sync/Media")
+        let plistPath = String(
+            format: "/iTunes_Control/Sync/Media/Sync_%08d.plist", Int(anchor)!)
+        try afc.writeFile(plistPath, data: plistData)
+        try afc.writeFile(plistPath + ".cig", data: cigData)
+        log("  AFC: delete plist+CIG -> \(plistPath)")
+
+        log("  >> SendPowerAssertion")
+        check("SendPowerAssertion", ATH.sendPowerAssertion(conn!, kCFBooleanTrue))
+        log("  >> MetadataSyncFinished (anchor=\"\(anchor)\", delete-only)")
+        DebugLog.write("atc.MetadataSyncFinished", "anchor=\(anchor) mode=delete")
+        check("MetadataSyncFinished", ATH.sendMetadataSyncFinished(
+            conn!,
+            ["Keybag": 1, "Media": 1] as NSDictionary as CFDictionary,
+            ["Media": anchor] as NSDictionary as CFDictionary
+        ))
+
+        // Quick drain — if an AssetManifest comes we read past it but do
+        // NOT treat its absence as failure. Also catch an early
+        // SyncFinished so finishSync() exits immediately when the device
+        // is fast.
+        progress?("Waiting for device to acknowledge delete…")
+        for _ in 0..<10 {
+            let (_, name) = readMsg(timeout: 3)
+            guard let name else { break }
+            log("  << \(name)")
+            if name == "Ping" { sendPong(); continue }
+            if name == "SyncFailed" { throw SyncError.rejected }
+            if name == "AssetManifest" { break }
+            if name == "SyncFinished" {
+                // Stash for finishSync() to pick up.
+                inboxLock.lock(); inbox.append(name); inboxLock.unlock()
+                break
+            }
+        }
+
+        self.streamingAFC = afc
+        self.ourAssetIDs = []
         startDrainer()
     }
 

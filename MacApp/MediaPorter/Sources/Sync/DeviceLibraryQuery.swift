@@ -113,6 +113,113 @@ public func loadDeviceLibrary(device: DeviceInfo) throws -> [DeviceLibraryEntry]
     return entries
 }
 
+/// A row on the device that the user could ask us to delete. `syncID`
+/// is the load-bearing field for ATC `delete_track` — it's the original
+/// wire pid captured in `item_store.sync_id`, not the renumbered DB
+/// `item_pid`. `mediaPath` is what we'll `afc.remove(...)` after the
+/// ATC delete commits.
+public struct DeleteCandidate: Sendable {
+    public let itemPid: Int64       // for display only
+    public let syncID: Int64        // wire pid → what we send in delete_track
+    public let title: String
+    public let mediaPath: String?   // /iTunes_Control/Music/Fxx/yyyy.mp4 (nil if unbound)
+    public let mediaKind: Int       // 2 movie, 32 TV show
+    public let totalTimeMs: Int
+
+    public init(itemPid: Int64, syncID: Int64, title: String,
+                mediaPath: String?, mediaKind: Int, totalTimeMs: Int) {
+        self.itemPid = itemPid; self.syncID = syncID; self.title = title
+        self.mediaPath = mediaPath; self.mediaKind = mediaKind
+        self.totalTimeMs = totalTimeMs
+    }
+}
+
+/// Find delete candidates by title substring (case-insensitive). Pulls
+/// the device DB (+ WAL/SHM) and runs the codex-recommended join
+/// (item × item_extra × item_store × base_location).
+public func findDeleteCandidates(
+    titleLike: String, device: DeviceInfo
+) throws -> [DeleteCandidate] {
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("mp-delete-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let afc: AFCClient
+    do { afc = try AFCClient(device: device) }
+    catch { throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription) }
+    defer { afc.close() }
+
+    var mainPulled = false
+    for f in dbFiles {
+        do {
+            let data = try afc.readFile("\(dbDir)/\(f)")
+            try data.write(to: tmp.appendingPathComponent(f))
+            if f == dbFiles[0] { mainPulled = true }
+        } catch {
+            if f == dbFiles[0] {
+                throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription)
+            }
+        }
+    }
+    guard mainPulled else { return [] }
+
+    let dbPath = tmp.appendingPathComponent(dbFiles[0]).path
+    // We pass the pattern as a literal parameter via SQLite's `-cmd .param`
+    // dance — but sqlite3 CLI's parameter binding is awkward, so we use the
+    // simpler approach: escape single quotes in the pattern and embed it.
+    // Risk is purely local to this Mac process; no untrusted input.
+    let escaped = titleLike.replacingOccurrences(of: "'", with: "''")
+    let sql = """
+    SELECT
+      i.item_pid,
+      COALESCE(s.sync_id, 0),
+      e.title,
+      COALESCE(bl.path || '/' || e.location, ''),
+      COALESCE(e.media_kind, 0),
+      COALESCE(CAST(e.total_time_ms AS INTEGER), 0)
+    FROM item i
+    JOIN item_extra e ON e.item_pid = i.item_pid
+    LEFT JOIN item_store s ON s.item_pid = i.item_pid
+    LEFT JOIN base_location bl ON bl.base_location_id = i.base_location_id
+    WHERE LOWER(e.title) LIKE LOWER('%\(escaped)%');
+    """
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    proc.arguments = ["-readonly", "-separator", "\t", dbPath, sql]
+    let out = Pipe()
+    let err = Pipe()
+    proc.standardOutput = out
+    proc.standardError = err
+    do { try proc.run(); proc.waitUntilExit() }
+    catch { throw DeviceLibraryQueryError.queryFailed(error.localizedDescription) }
+    let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    guard proc.terminationStatus == 0 else {
+        throw DeviceLibraryQueryError.queryFailed("sqlite3 exit \(proc.terminationStatus): \(errText)")
+    }
+    let raw = out.fileHandleForReading.readDataToEndOfFile()
+    guard let text = String(data: raw, encoding: .utf8) else { return [] }
+
+    var candidates: [DeleteCandidate] = []
+    for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+        let parts = line.split(separator: "\t", maxSplits: 5,
+            omittingEmptySubsequences: false)
+        guard parts.count == 6,
+              let itemPid = Int64(parts[0]),
+              let syncID = Int64(parts[1]),
+              let kind = Int(parts[4]),
+              let dur = Int(parts[5]) else { continue }
+        let title = String(parts[2])
+        let pathFrag = String(parts[3])
+        let mediaPath: String? = pathFrag.isEmpty ? nil : "/\(pathFrag)"
+        candidates.append(DeleteCandidate(
+            itemPid: itemPid, syncID: syncID, title: title,
+            mediaPath: mediaPath, mediaKind: kind, totalTimeMs: dur
+        ))
+    }
+    return candidates
+}
+
 public extension Array where Element == DeviceLibraryEntry {
     /// True if any entry matches the given title (exact) within ±2 s of
     /// the given duration. Used by analyzeOne to flag duplicate jobs.

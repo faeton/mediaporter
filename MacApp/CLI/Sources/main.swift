@@ -33,6 +33,11 @@ func usage() -> Never {
                               extras (sidecar dubs/subs), no interactive
                               show-picker. Suitable for movies and simple
                               TV files.
+      delete <title> [--yes]  list device items whose title matches
+                              (case-insensitive substring) and remove
+                              them via ATC delete_track + AFC.remove of
+                              the underlying MP4 and Airlock artwork.
+                              Without --yes it lists candidates only.
       bench-upload <file>     measure AFC throughput at several chunk sizes
                               (256K, 1M, 4M, 16M) and print the best fit.
                               Each pass FileError(0)-cleans its own upload
@@ -70,6 +75,11 @@ case "analyze":
 case "sync":
     guard argv.count >= 3 else { usage() }
     runSync(paths: Array(argv[2...]))
+case "delete":
+    guard argv.count >= 3 else { usage() }
+    let confirm = argv.contains("--yes")
+    let pattern = argv[2]
+    runDelete(titleLike: pattern, confirm: confirm)
 case "bench-upload":
     guard argv.count >= 3 else { usage() }
     runBenchUpload(path: argv[2])
@@ -520,6 +530,103 @@ private func makeBar(_ frac: Double, width: Int) -> String {
               + String(repeating: "-", count: max(0, width - fill)) + "]"
 }
 
+// MARK: - delete (ATC delete_track + AFC remove)
+
+/// List items on the device whose title contains `titleLike` (case-
+/// insensitive substring). With `confirm=false` we just print the
+/// candidates and exit — operator inspects then re-runs with `--yes`.
+/// With `confirm=true` we issue a single delete-only ATC session
+/// covering every match and AFC.remove each media file + artwork blob.
+func runDelete(titleLike: String, confirm: Bool) {
+    let device: DeviceInfo
+    do { device = try discoverDevice() }
+    catch {
+        FileHandle.standardError.write(Data("no device: \(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+    print("Device: \(device.displayName)")
+
+    let candidates: [DeleteCandidate]
+    do {
+        candidates = try findDeleteCandidates(titleLike: titleLike, device: device)
+    } catch {
+        FileHandle.standardError.write(Data("query failed: \(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+    if candidates.isEmpty {
+        print("No items match \"\(titleLike)\".")
+        exit(0)
+    }
+    print("Found \(candidates.count) match(es):")
+    for c in candidates {
+        // media_kind on device: 2 = movie, 32/64 = TV episode (kind 64 is
+        // the modern value used on iOS 17+ — observed live on akm16pro
+        // 2026-05-17 for both Odd Taxi episodes and the Alpha test fixture).
+        let kindTag: String
+        switch c.mediaKind {
+        case 2: kindTag = "Movie"
+        case 32, 64: kindTag = "TV"
+        default: kindTag = "k=\(c.mediaKind)"
+        }
+        let path = c.mediaPath ?? "(unbound)"
+        let syncTag = c.syncID == 0 ? "sync_id=0 — UNDELETABLE" : "sync_id=\(c.syncID)"
+        print("  • [\(kindTag)] \"\(c.title)\"  \(syncTag)  \(path)")
+    }
+    let deletable = candidates.filter { $0.syncID != 0 }
+    if deletable.isEmpty {
+        print("\nEvery match has sync_id=0 (likely inserted by a non-ATC path or pre-")
+        print("upgrade row). medialibraryd resolves delete_track by sync_id, so we")
+        print("have no handle to remove these via ATC. Aborting.")
+        exit(1)
+    }
+    if !confirm {
+        print("\nDry run. Add --yes to delete the \(deletable.count) deletable row(s).")
+        exit(0)
+    }
+
+    print("\nDeleting…")
+    let syncIDs = deletable.map { Int($0.syncID) }
+    let mediaPaths = deletable.compactMap { $0.mediaPath }
+    let artworkSyncIDs = deletable.map { Int($0.syncID) }
+    do {
+        let result = try deleteFromDevice(
+            syncIDs: syncIDs,
+            mediaPaths: mediaPaths,
+            artworkSyncIDs: artworkSyncIDs,
+            verbose: false
+        )
+        print("Submitted \(result.syncIDsSubmitted) delete_track op(s)")
+        // medialibraryd usually cleans the bound MP4 and Airlock artwork
+        // itself as soon as the delete_track commits — when that happens
+        // our AFC.remove finds the path already gone (rc != 0) and the
+        // counts read 0. That's success, not failure; the post-delete
+        // stat / DB re-query is the real verification.
+        print("AFC cleanup: \(result.mediaFilesRemoved) media file(s) and \(result.artworkBlobsRemoved) artwork blob(s)")
+        if result.mediaFilesRemoved == 0 && !mediaPaths.isEmpty {
+            print("  (zero is normal — medialibraryd typically deletes the")
+            print("   bound file itself when delete_track commits)")
+        }
+    } catch {
+        FileHandle.standardError.write(Data("delete failed: \(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+
+    // Verify by re-querying. If any row survived (medialibraryd didn't
+    // commit the delete), report it.
+    do {
+        let after = try findDeleteCandidates(titleLike: titleLike, device: device)
+        let stillPresent = after.filter { c in deletable.contains(where: { $0.syncID == c.syncID }) }
+        if stillPresent.isEmpty {
+            print("Verified: 0 row(s) remain in MediaLibrary.sqlitedb.")
+        } else {
+            print("Warning: \(stillPresent.count) row(s) still present after delete:")
+            for c in stillPresent { print("  • \(c.title) (sync_id=\(c.syncID))") }
+        }
+    } catch {
+        FileHandle.standardError.write(Data("verify query failed: \(error.localizedDescription) (non-fatal)\n".utf8))
+    }
+}
+
 // MARK: - bench-upload (chunk-size benchmark, punch-list #3)
 
 func runBenchUpload(path: String) {
@@ -561,14 +668,17 @@ func runBenchUpload(path: String) {
         let chunkLabel = res.chunkSizeBytes >= 1024 * 1024
             ? "\(res.chunkSizeBytes / (1024 * 1024)) MB"
             : "\(res.chunkSizeBytes / 1024) KB"
-        print(String(format: "  %-7s %5.2fs  %6.1f",
-            chunkLabel, res.medianSeconds, res.medianMBps))
+        // `%s` in Swift String(format:) expects a C-string pointer — passing
+        // a Swift String segfaults inside _platform_strlen. Use interpolation
+        // for the label and only format the numerics.
+        let padded = chunkLabel.padding(toLength: 7, withPad: " ", startingAt: 0)
+        print("  \(padded) \(String(format: "%5.2fs  %6.1f", res.medianSeconds, res.medianMBps))")
     }
     if let best = r.best {
         let label = best.chunkSizeBytes >= 1024 * 1024
             ? "\(best.chunkSizeBytes / (1024 * 1024)) MB"
             : "\(best.chunkSizeBytes / 1024) KB"
         print("")
-        print(String(format: ">>> Winner: %@ at %.1f MB/s", label, best.medianMBps))
+        print(">>> Winner: \(label) at \(String(format: "%.1f", best.medianMBps)) MB/s")
     }
 }
