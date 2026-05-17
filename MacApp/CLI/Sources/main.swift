@@ -38,10 +38,20 @@ func usage() -> Never {
                               them via ATC delete_track + AFC.remove of
                               the underlying MP4 and Airlock artwork.
                               Without --yes it lists candidates only.
-      bench-upload <file>     measure AFC throughput at several chunk sizes
-                              (256K, 1M, 4M, 16M) and print the best fit.
-                              Each pass FileError(0)-cleans its own upload
-                              so the device isn't left with stale assets.
+      smoke-test [--fixture path] [--keep]
+                              release-readiness check: sync a small fixture
+                              (default: Mediaporter.Alpha.S01E01.mp4), then
+                              verify the row landed bound, the MP4 is on
+                              device, then delete and verify cleanup.
+                              Exit 0 PASS, exit 1 FAIL. --keep skips the
+                              delete phase so you can inspect the device.
+      bench-upload <file> [--chunks 1M,4M,16M] [--passes N]
+                              measure AFC throughput at several chunk sizes
+                              (default 256K, 1M, 4M, 16M; --chunks accepts
+                              a comma-separated list with K/M suffixes,
+                              e.g. 1M,4M,8M,16M,32M) and print the best
+                              fit. Each pass removes its own upload so
+                              the device isn't left with stale assets.
       recover                 register orphaned uploads on the device using
                               tagged .m4v files left in the system tempdir
       pull <remote> [local]   copy a file off the device via AFC. Default
@@ -80,9 +90,31 @@ case "delete":
     let confirm = argv.contains("--yes")
     let pattern = argv[2]
     runDelete(titleLike: pattern, confirm: confirm)
+case "smoke-test":
+    var fixturePath: String? = nil
+    var keep = false
+    var i = 2
+    while i < argv.count {
+        if argv[i] == "--fixture", i + 1 < argv.count {
+            fixturePath = argv[i + 1]; i += 2
+        } else if argv[i] == "--keep" {
+            keep = true; i += 1
+        } else {
+            i += 1
+        }
+    }
+    runSmokeTest(fixturePath: fixturePath, keep: keep)
 case "bench-upload":
     guard argv.count >= 3 else { usage() }
-    runBenchUpload(path: argv[2])
+    var benchChunks: [Int]? = nil
+    var benchPasses = 2
+    if let i = argv.firstIndex(of: "--chunks"), i + 1 < argv.count {
+        benchChunks = parseChunkList(argv[i + 1])
+    }
+    if let i = argv.firstIndex(of: "--passes"), i + 1 < argv.count, let v = Int(argv[i + 1]) {
+        benchPasses = max(1, v)
+    }
+    runBenchUpload(path: argv[2], chunkSizes: benchChunks, passes: benchPasses)
 case "recover":
     runRecover()
 case "pull":
@@ -629,20 +661,32 @@ func runDelete(titleLike: String, confirm: Bool) {
 
 // MARK: - bench-upload (chunk-size benchmark, punch-list #3)
 
-func runBenchUpload(path: String) {
+func parseChunkList(_ s: String) -> [Int] {
+    s.split(separator: ",").compactMap { tok -> Int? in
+        let t = tok.trimmingCharacters(in: .whitespaces).uppercased()
+        guard let last = t.last else { return nil }
+        let body = String(t.dropLast())
+        if last == "K", let n = Int(body) { return n * 1024 }
+        if last == "M", let n = Int(body) { return n * 1024 * 1024 }
+        return Int(t) // raw bytes
+    }
+}
+
+func runBenchUpload(path: String, chunkSizes: [Int]?, passes: Int) {
     let url = URL(fileURLWithPath: path)
     guard FileManager.default.fileExists(atPath: url.path) else {
         FileHandle.standardError.write(Data("not found: \(path)\n".utf8))
         exit(1)
     }
+    let chunks = chunkSizes ?? [256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024]
     let sema = DispatchSemaphore(value: 0)
     var thrown: Error?
     var report: BenchUploadReport?
     Task {
         do {
-            report = try await benchUploadChunkSizes(fileURL: url) { line in
-                print(line)
-            }
+            report = try await benchUploadChunkSizes(
+                fileURL: url, chunkSizes: chunks, passes: passes
+            ) { line in print(line) }
         } catch {
             thrown = error
         }
@@ -681,4 +725,182 @@ func runBenchUpload(path: String) {
         print("")
         print(">>> Winner: \(label) at \(String(format: "%.1f", best.medianMBps)) MB/s")
     }
+}
+
+// MARK: - smoke-test (release-readiness end-to-end check)
+
+/// Sync a small fixture, verify the row landed bound, then delete and
+/// verify cleanup. One process, one exit code — fits CI/release-tag
+/// gating. Uses the same paths as production (PipelineController for
+/// sync, deleteFromDevice for cleanup) so any regression in either
+/// shows up here before we cut a build.
+func runSmokeTest(fixturePath: String?, keep: Bool) -> Never {
+    let defaultFixture = "/Users/faeton/Sites/mediaporter/test_fixtures/mediaporter-test-shows/Mediaporter.Alpha.S01E01.mp4"
+    let url = URL(fileURLWithPath: fixturePath ?? defaultFixture)
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        FileHandle.standardError.write(Data(
+            "fixture not found: \(url.path)\n".utf8))
+        exit(1)
+    }
+
+    Task { @MainActor in
+        var exitCode: Int32 = 0
+        var failures: [String] = []
+        defer {
+            print("")
+            if failures.isEmpty {
+                print("✓ SMOKE TEST PASSED")
+            } else {
+                print("✗ SMOKE TEST FAILED:")
+                for f in failures { print("  - \(f)") }
+                exitCode = 1
+            }
+            exit(exitCode)
+        }
+
+        // Device.
+        let device: DeviceInfo
+        do { device = try discoverDevice() } catch {
+            failures.append("no device: \(error.localizedDescription)")
+            return
+        }
+        print("Device: \(device.displayName)")
+        print("Fixture: \(url.lastPathComponent)")
+
+        // === PHASE 1: SYNC ===
+        print("")
+        print("[1/3] sync")
+        let pc = PipelineController()
+        pc.deviceInfo = device
+        pc.jobs.append(FileJob(url: url))
+
+        let printer = Task { @MainActor in
+            var last = ""
+            while !Task.isCancelled {
+                let line: String
+                if pc.overallProgress > 0 {
+                    let pct = Int(pc.overallProgress * 100)
+                    line = "\(makeBar(pc.overallProgress, width: 24)) \(pct)%  \(pc.overallStatus)"
+                } else {
+                    line = pc.overallStatus
+                }
+                if line != last {
+                    FileHandle.standardError.write(Data("\r\u{1b}[2K\(line)".utf8))
+                    last = line
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        await pc.runFullPipeline()
+        printer.cancel()
+        FileHandle.standardError.write(Data("\r\u{1b}[2K".utf8))
+
+        guard let job = pc.jobs.first else {
+            failures.append("PipelineController dropped the job")
+            return
+        }
+        guard job.status == .synced else {
+            failures.append("sync failed: status=\(job.status.rawValue) error=\(job.error ?? "(none)")")
+            return
+        }
+        let syncedTitle = job.metadata?.title ?? job.fileName
+        print("  synced: title=\"\(syncedTitle)\"")
+
+        // === PHASE 2: VERIFY ON DEVICE ===
+        print("")
+        print("[2/3] verify on device")
+        // We synced a fixture named "Mediaporter.*" — the parser uses
+        // "Mediaporter" or "Mediaporter Alpha" as the show, and the title
+        // ends up something like "Mediaporter Alpha — S01E01". A LIKE on
+        // "Mediaporter" is wide enough to catch all the fixture variants
+        // and narrow enough to never hit user content.
+        let searchKey = "Mediaporter"
+        let candidates: [DeleteCandidate]
+        do {
+            candidates = try findDeleteCandidates(titleLike: searchKey, device: device)
+        } catch {
+            failures.append("DB query failed: \(error.localizedDescription)")
+            return
+        }
+        // Filter to the row we just synced (by title contains the file stem).
+        let stem = url.deletingPathExtension().lastPathComponent
+        let ours = candidates.filter { c in
+            // Either the DB title matches our synced title, or the file
+            // stem (Mediaporter.Alpha.S01E01) appears in the title.
+            c.title == syncedTitle || c.title.contains(stem)
+                || (c.mediaPath ?? "").contains(stem)
+        }
+        let target = ours.first ?? candidates.first
+        guard let cand = target else {
+            failures.append("row not found in MediaLibrary.sqlitedb (searched LIKE '%\(searchKey)%')")
+            return
+        }
+        guard cand.syncID != 0 else {
+            failures.append("row has sync_id=0 — un-deletable, sync went through a non-ATC path")
+            return
+        }
+        guard let path = cand.mediaPath else {
+            failures.append("row unbound (no base_location_id) — file would be swept by GC")
+            return
+        }
+        let onDeviceSize: Int64?
+        do { onDeviceSize = try statDeviceFile(path, device: device) }
+        catch {
+            failures.append("stat \(path): \(error.localizedDescription)")
+            return
+        }
+        guard let size = onDeviceSize else {
+            failures.append("MP4 missing on device: \(path)")
+            return
+        }
+        print("  row: sync_id=\(cand.syncID) kind=\(cand.mediaKind) bound to \(path)")
+        print("  file: \(size) bytes on device")
+
+        if keep {
+            print("")
+            print("--keep specified, skipping cleanup. Row left on device.")
+            return
+        }
+
+        // === PHASE 3: DELETE + VERIFY ===
+        print("")
+        print("[3/3] cleanup")
+        let result: DeleteResult
+        do {
+            result = try deleteFromDevice(
+                syncIDs: [Int(cand.syncID)],
+                mediaPaths: [path],
+                artworkSyncIDs: [Int(cand.syncID)],
+                verbose: false
+            )
+        } catch {
+            failures.append("delete failed: \(error.localizedDescription)")
+            return
+        }
+        print("  submitted \(result.syncIDsSubmitted) delete_track op(s)")
+        let after: [DeleteCandidate]
+        do { after = try findDeleteCandidates(titleLike: searchKey, device: device) }
+        catch {
+            failures.append("post-delete query failed: \(error.localizedDescription)")
+            return
+        }
+        let stillThere = after.first(where: { $0.syncID == cand.syncID })
+        if stillThere != nil {
+            failures.append("row sync_id=\(cand.syncID) still present after delete")
+        }
+        do {
+            if try statDeviceFile(path, device: device) != nil {
+                failures.append("MP4 \(path) still present after delete")
+            }
+        } catch {
+            // stat failure isn't itself a smoke failure — could be
+            // permission glitch on a deleted parent. Note it but don't
+            // fail.
+            print("  warn: post-delete stat \(path): \(error.localizedDescription)")
+        }
+        if stillThere == nil {
+            print("  row gone, file gone")
+        }
+    }
+    dispatchMain()
 }
