@@ -27,6 +27,10 @@ func usage() -> Never {
                               local path is the basename of the remote.
                               Useful for inspecting MediaLibrary.sqlitedb,
                               ArtworkDB, etc. without third-party tools.
+                              When the remote ends in .sqlitedb, auto-pulls
+                              -wal and -shm sidecars too so the local
+                              snapshot includes uncommitted WAL writes
+                              (missing sidecars are not fatal).
       gate-test <f1> <f2> [--sleep SECS]
                               plan #8 gating: upload two files, send
                               FileComplete #1, pull MediaLibrary.sqlitedb
@@ -186,6 +190,35 @@ func runPull(remote: String, local: String) {
     }
     let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
     print("\(remote) -> \(url.path) (\(size) bytes)")
+
+    // SQLite WAL safety net. iOS keeps MediaLibrary.sqlitedb in WAL
+    // journal_mode — the main file is the durable snapshot, the latest
+    // writes (often the just-bound base_location_id / location /
+    // file_size we want to inspect) live in -wal until checkpoint.
+    // Reading the main file alone gives a stale view and has fooled
+    // me into diagnosing a binding regression that didn't exist.
+    // Auto-pull -wal and -shm alongside whenever the remote ends in
+    // .sqlitedb so the sibling files sit next to the pulled main and
+    // sqlite3 picks them up. Missing siblings are NOT fatal — a fully
+    // checkpointed DB has empty/absent -wal, that's normal.
+    if remote.hasSuffix(".sqlitedb") {
+        for suffix in ["-wal", "-shm"] {
+            let sidecarRemote = remote + suffix
+            let sidecarLocal = url.deletingLastPathComponent()
+                .appendingPathComponent(url.lastPathComponent + suffix)
+            do {
+                try pullDeviceFile(remote: sidecarRemote, to: sidecarLocal, device: device)
+                let sz = (try? FileManager.default.attributesOfItem(
+                    atPath: sidecarLocal.path)[.size] as? Int) ?? 0
+                print("\(sidecarRemote) -> \(sidecarLocal.path) (\(sz) bytes)")
+            } catch {
+                // Sibling missing is expected for a checkpointed DB.
+                // Log to stderr so triage knows we tried but don't exit.
+                FileHandle.standardError.write(Data(
+                    "\(sidecarRemote): \(error.localizedDescription) (non-fatal)\n".utf8))
+            }
+        }
+    }
 }
 
 // MARK: - ls / stat
