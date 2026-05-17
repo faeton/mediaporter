@@ -338,3 +338,29 @@ Reference policy: land fixes in Python first, port to Swift after validation.
 - **Are media_type/media_kind settable via sync plists?** — YES, with `is_movie` + `location.kind`.
 - **Why do large file syncs fail?** — Two causes: (1) ATC session timeout if MetadataSyncFinished sent after long upload — send before. (2) Ping/Pong keepalive — must respond or session drops.
 - **Why does device never send SyncFinished?** — Stale pending assets. Device waits for ALL assets in AssetManifest. Send FileError for stale ones.
+
+## 2026-05-18 — AFC chunk-size bench at 1.21 GB + adaptive default
+
+Followup to the 2026-05-17 bench on a 139 MB file (4 MB chunk won at 34.9 MB/s, 16 MB tied at 34.8). Re-ran against `HBPD-2026-RU.mp4` (1.21 GB, akm16pro) with the wider sweep 4M/8M/16M/32M, 2 passes each:
+
+```
+chunk   median   MB/s
+4 MB    34.03s   35.6
+8 MB    34.08s   35.5
+16 MB   33.45s   36.2  ← winner
+32 MB   33.77s   35.8
+```
+
+16 MB beats 4 MB by **+1.7%** on a 1+ GB file but ties on a small file (~140 MB). 32 MB doesn't help — USB plateau at ~36 MB/s, consistent with the 30–40 MB/s Lightning cap from 2026-04-10 (akm16pro cable in use is Lightning-class — actual USB-3 cable should re-bench much higher per the line 317 note).
+
+Action: `AFCClient.recommendedChunkSize(forFileBytes:)` — ≥300 MB → 16 MB, else 4 MB. Wired into `writeFileStreaming` via per-call `chunkSizeOverride`, so a single long-lived AFC connection can pick the right chunk per file in a mixed batch. No regression on small files; +1.7% throughput on movies. Re-bench when a USB-3 cable is on the desk.
+
+## 2026-05-18 — Release-readiness test layer
+
+Added two pre-tag gates:
+
+1. **Plist invariant unit tests** (`Tests/MediaPorterCoreTests/SyncPlistTests.swift`, 12 tests). Pins CLAUDE.md rule #6 — TV-episode wire keys in `video_info` (`series_name`, `sort_series_name`, `season_number`, `episode_id`, `episode_sort_id`), `item` dict carries artist/album/album_artist/sort_* + `episode_sort_id` at item top-level (current iOS schema), no kebab-case keys anywhere, no snake-case TV keys at item top-level. Also pins `buildDeletePlist` to delete-only ops with no `update_db_info`. Runs in 5 ms with `swift test`, no device.
+
+2. **End-to-end smoke command** (`mediaporterctl smoke-test`). Sync the bundled fixture `Mediaporter.Alpha.S01E01.mp4` → verify the DB row landed bound with `base_location_id != 0` and the MP4 is on device → delete → verify the row + file are gone. One process, exit 0/1. Validates the full ATC + AFC + delete pipeline against a connected device. Verified PASS on akm16pro 2026-05-18.
+
+Release recipe in `research/docs/RELEASE_TESTING.md`.

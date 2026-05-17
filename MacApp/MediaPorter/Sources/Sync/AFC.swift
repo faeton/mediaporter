@@ -25,15 +25,27 @@ enum AFCError: LocalizedError {
 
 class AFCClient {
     private var conn: UnsafeMutableRawPointer?
-    /// Bytes per AFC write call. Bumped from 1 MB to 4 MB after the
-    /// 2026-05-17 `bench-upload` run against akm16pro: 4 MB sustained
-    /// 34.9 MB/s vs 33.1 at 1 MB and 30.6 at 256 KB. 16 MB tied with
-    /// 4 MB so 4 is the smaller of the two equally-fast options. The
-    /// curve is concave — too-small pays per-syscall overhead, too-large
-    /// wastes pipelining headroom. Configurable so the bench can sweep
-    /// without recompiling; read once at init.
+    /// Bytes per AFC write call. The size-adaptive default is in
+    /// `recommendedChunkSize(forFileBytes:)` below — the constant here
+    /// is the lower bound used when the file size isn't known. Read
+    /// once at init; configurable so the bench can sweep without
+    /// recompiling.
     private let chunkSize: Int
     public static let defaultChunkSize = 4 * 1_048_576
+
+    /// Pick an AFC chunk size based on the local file's byte count.
+    /// Bench against akm16pro (research/docs/HISTORY.md 2026-05-18):
+    ///   139 MB file: 4 MB and 16 MB tie at ~34.9 MB/s (noise floor 2.7%)
+    ///   1.21 GB file: 16 MB wins at 36.2 MB/s vs 35.6 for 4 MB (+1.7%)
+    /// USB-3 plateaus around 36 MB/s; 32 MB doesn't help further. The
+    /// threshold is conservative: below 300 MB the gain is in noise but
+    /// the memory cost of a 16 MB chunk is non-trivial on long-running
+    /// processes, above 300 MB the larger chunk amortizes per-write
+    /// overhead enough to show.
+    public static func recommendedChunkSize(forFileBytes bytes: Int64) -> Int {
+        if bytes >= 300 * 1_048_576 { return 16 * 1_048_576 }
+        return defaultChunkSize
+    }
 
     init(device: DeviceInfo, chunkSize: Int = AFCClient.defaultChunkSize) throws {
         self.chunkSize = chunkSize
@@ -88,11 +100,19 @@ class AFCClient {
         remotePath: String,
         localURL: URL,
         progress: ((Int, Int) -> Void)? = nil,
-        isCancelled: (() -> Bool)? = nil
+        isCancelled: (() -> Bool)? = nil,
+        chunkSizeOverride: Int? = nil
     ) throws {
         guard let c = conn else { return }
         let fileSize = try FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as! Int
-        DebugLog.write("afc.upload.begin", "\(localURL.path) (\(fileSize) B) -> \(remotePath)")
+        // Per-call chunk size lets one long-lived AFC connection upload
+        // a mix of small files (4 MB chunk — modest memory) and large
+        // files (16 MB chunk — better throughput on >300 MB). Without
+        // an override we use the instance default captured at init.
+        let effectiveChunk = chunkSizeOverride
+            ?? AFCClient.recommendedChunkSize(forFileBytes: Int64(fileSize))
+        DebugLog.write("afc.upload.begin",
+            "\(localURL.path) (\(fileSize) B) -> \(remotePath) chunk=\(effectiveChunk)")
 
         var handle: Int = 0
         let rc = MD.afcFileOpen(c, remotePath, 2, &handle)
@@ -109,12 +129,12 @@ class AFCClient {
         }
 
         var sent = 0
-        var buffer = [UInt8](repeating: 0, count: chunkSize)
+        var buffer = [UInt8](repeating: 0, count: effectiveChunk)
 
         while sent < fileSize {
             if isCancelled?() == true { throw AFCError.cancelled }
 
-            let read = stream.read(&buffer, maxLength: chunkSize)
+            let read = stream.read(&buffer, maxLength: effectiveChunk)
             guard read > 0 else { break }
 
             let wrc = buffer.withUnsafeBufferPointer { ptr in
