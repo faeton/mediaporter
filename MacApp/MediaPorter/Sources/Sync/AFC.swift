@@ -174,17 +174,26 @@ class AFCClient {
         return MD.afcRemove(c, path)
     }
 
-    /// Query st_size for a remote path. Returns nil if the path doesn't exist or
-    /// doesn't report a size field. Uses AFCFileInfoOpen which returns a key/value
-    /// dict with st_size, st_blocks, st_ifmt, st_nlink, st_mtime, st_birthtime.
-    func fileSize(_ path: String) -> Int64? {
-        guard let c = conn else { return nil }
+    /// Result of querying file info via `AFCFileInfoOpen`. Distinguishes the
+    /// three causes of a "no size known" outcome so log triage can tell flaky
+    /// afcd from missing file from genuine size feedback. The bare
+    /// `fileSize(_:)` wrapper collapses everything except .ok back to nil.
+    enum StatResult {
+        case ok(size: Int64)        // open succeeded, st_size present
+        case missingSize            // open succeeded, no st_size key in dict
+        case openFailed(rc: Int32)  // afcFileInfoOpen returned non-zero / null handle
+    }
+
+    /// Detailed st_size query. The dict returned by AFCFileInfoOpen contains
+    /// st_size, st_blocks, st_ifmt, st_nlink, st_mtime, st_birthtime — we
+    /// extract st_size and otherwise classify the failure cause.
+    func statResult(_ path: String) -> StatResult {
+        guard let c = conn else { return .openFailed(rc: -1) }
         var dictHandle: UnsafeMutableRawPointer?
         let rc = MD.afcFileInfoOpen(c, path, &dictHandle)
-        guard rc == 0, let dh = dictHandle else { return nil }
+        guard rc == 0, let dh = dictHandle else { return .openFailed(rc: rc) }
         defer { _ = MD.afcKeyValueClose(dh) }
 
-        var size: Int64?
         while true {
             var keyPtr: UnsafePointer<CChar>?
             var valPtr: UnsafePointer<CChar>?
@@ -192,11 +201,19 @@ class AFCClient {
             guard kv == 0, let kp = keyPtr, let vp = valPtr else { break }
             let key = String(cString: kp)
             if key.isEmpty { break }
-            if key == "st_size" {
-                size = Int64(String(cString: vp))
+            if key == "st_size", let size = Int64(String(cString: vp)) {
+                return .ok(size: size)
             }
         }
-        return size
+        return .missingSize
+    }
+
+    /// Convenience: return st_size if known, nil otherwise. Used by public
+    /// helpers and any caller that doesn't need to distinguish missing-file
+    /// from missing-key.
+    func fileSize(_ path: String) -> Int64? {
+        if case .ok(let size) = statResult(path) { return size }
+        return nil
     }
 
     func close() {

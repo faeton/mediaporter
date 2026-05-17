@@ -76,7 +76,8 @@ final class AFCUploader {
                 "\(file.devicePath) skipped — local stat returned 0")
             return
         }
-        if let actual = afc.fileSize(file.devicePath) {
+        switch afc.statResult(file.devicePath) {
+        case .ok(let actual):
             if actual != expected {
                 DebugLog.write("afc.upload.verify",
                     "\(file.devicePath) MISMATCH expected=\(expected) actual=\(actual)")
@@ -85,9 +86,20 @@ final class AFCUploader {
             }
             DebugLog.write("afc.upload.verify",
                 "\(file.devicePath) size=\(actual) OK")
-        } else {
+        case .missingSize:
+            // afcd opened the info dict but didn't return st_size. Not seen on
+            // shipping iOS; if it ever surfaces, surface it loudly here so we
+            // can decide whether to escalate to a fatal.
             DebugLog.write("afc.upload.verify",
-                "\(file.devicePath) stat returned nil after write (expected=\(expected)) — proceeding")
+                "\(file.devicePath) stat dict has no st_size key (expected=\(expected)) — proceeding non-fatal")
+        case .openFailed(let rc):
+            // The file we just wrote can't be re-opened for info. Suspicious
+            // but treat as non-fatal — usbmuxd / afcd hiccups happen, and
+            // failing the upload here turns a noisy transient into a hard
+            // user-visible error. Distinct log line so triage can tell this
+            // from a genuine missing-key case.
+            DebugLog.write("afc.upload.verify",
+                "\(file.devicePath) stat open failed rc=\(rc) (expected=\(expected)) — proceeding non-fatal")
         }
     }
 
