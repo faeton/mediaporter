@@ -1840,6 +1840,12 @@ public class PipelineController {
         }
 
         var prevWork: Task<Void, Error>? = nil
+        // Track the asset_id detached into prevWork so that if the task
+        // throws (upload, size-verify, or completeFile), we can FileError(0)
+        // exactly that asset. The for-loop pre-increments `registeredCount`
+        // right after scheduling the detached task, so the failed asset is
+        // NOT covered by the post-loop cleanup range.
+        var prevAssetID: Int? = nil
         var workFailed: String? = nil
         var registeredCount = 0
 
@@ -1966,7 +1972,18 @@ public class PipelineController {
             // FileBegin/FileComplete, both must be used in order.
             if let prev = prevWork {
                 do { try await prev.value }
-                catch { workFailed = error.localizedDescription }
+                catch {
+                    workFailed = error.localizedDescription
+                    // FileError(0) the asset that just blew up inside the
+                    // detached task — without this the device's pending
+                    // manifest still references it and SyncFinished blocks.
+                    // Covers AFC writeFailed, sizeMismatch, completeFile
+                    // throw, and any future error class thrown after
+                    // FileBegin was already sent.
+                    if let failedID = prevAssetID {
+                        registerSession.abandonAsset(assetID: failedID)
+                    }
+                }
             }
             if workFailed != nil {
                 registerSession.abandonAsset(assetID: pair.prepared.assetID)
@@ -2054,12 +2071,23 @@ public class PipelineController {
                     stats.timingsByFile[capJob.fileName] = t
                 }
             }
+            prevAssetID = capPrepared.assetID
             registeredCount = idx + 1
         }
 
         if let prev = prevWork {
             do { try await prev.value }
-            catch { workFailed = error.localizedDescription }
+            catch {
+                workFailed = error.localizedDescription
+                // Same abandon-on-detached-throw guarantee for the FINAL
+                // file as for in-loop iterations — without it the last
+                // failed asset slips past the cleanup range and SyncFinished
+                // blocks waiting for an asset the host has already given up
+                // on.
+                if let failedID = prevAssetID {
+                    registerSession.abandonAsset(assetID: failedID)
+                }
+            }
         }
         diskPoller.cancel()
         // Prefer the disk-full message when both fired — the underlying AFC
