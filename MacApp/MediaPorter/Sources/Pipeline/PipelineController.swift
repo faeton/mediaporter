@@ -809,7 +809,30 @@ public class PipelineController {
     /// adopt the intent but already-analyzed ones stay untouched.
     public func captureClusterSelection(from job: FileJob, propagate: Bool) {
         guard let cid = job.clusterID else { return }
-        let sel = ClusterSelection.capture(from: job)
+        var sel = ClusterSelection.capture(from: job)
+        // Cluster-wide external-track intent (includedDubStudios /
+        // includedSubLabels / defaultAudioStudio) is set by the cluster-
+        // extras UI section, not derivable from any single job's per-row
+        // state. capture() builds a fresh ClusterSelection and zeros
+        // these out — writing it back as-is would wipe the cluster-extras
+        // membership for the whole cluster, and apply()'s else branch on
+        // externalTracksToMux would silently drop every sibling's sidecar
+        // dub/sub. Carry the cluster-only fields over from the existing
+        // selection so apply-to-all only overwrites the per-row parts.
+        // (2026-05-17 Odd Taxi report: external rus.srt added for ep10
+        // via cluster-extras → apply-to-all from ep1 dropped it.)
+        if let existing = clusterSelections[cid] {
+            sel.includedDubStudios = existing.includedDubStudios
+            sel.includedSubLabels = existing.includedSubLabels
+            sel.defaultAudioStudio = existing.defaultAudioStudio
+            // burnInSubLang can be cluster-extras-derived (a lang only
+            // present in extras.subs). Don't let a job whose own burn-in
+            // we couldn't resolve overwrite a working cluster-extras
+            // burn-in to nil.
+            if sel.burnInSubLang == nil {
+                sel.burnInSubLang = existing.burnInSubLang
+            }
+        }
         clusterSelections[cid] = sel
         if propagate {
             let extras = clusterExtras[cid]
