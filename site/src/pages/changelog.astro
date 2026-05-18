@@ -4,6 +4,21 @@ import Base from "../layouts/Base.astro";
 // Keeping it static now to avoid coupling the site build to source layout changes in MacApp/.
 const releases = [
   {
+    version: "0.7.0",
+    date: "2026-05-18",
+    notes: [
+      "TV.app finally renders TV episodes correctly. `series_name` / `season_number` / `episode_sort_id` moved from the `item` top-level (where they were silently dropped) into the `video_info` sub-dict, per the AMPDevicesAgent canonical key cluster. Header now shows the show name, season cards no longer read \"Season 0\", and episode rows lose the spurious `0.` prefix.",
+      "Show portrait per episode. Each episode ships the show's portrait poster as `item.posterData` (per-episode landscape still as fallback). The TV.app show-detail hero renders correctly; episode-row thumbs are portrait tiles. Phantom-`representative_item_pid` approach explored and closed — research log in `PHANTOM_REP_PID_TESTS.md`.",
+      "Pipeline reliability: remote AFC size verified before `FileComplete` (catches truncation before the row binds and the file gets swept), `FileError(0)` for thrown assets so they don't block `SyncFinished`, graceful cancel that flushes pending abandons before tearing down the session.",
+      "Adaptive AFC chunk size — `recommendedChunkSize(forFileBytes:)` picks 16 MB on files ≥ 300 MB and 4 MB below. Bench on a 1.21 GB file: +1.7% throughput at 16 MB. Lightning cable plateau ~36 MB/s — USB-3 cable should re-bench higher.",
+      "New `mediaporterctl` CLI: `sync <file>` (full pipeline with live progress), `delete <title>` (ATC `delete_track` + AFC remove), `bench-upload` with sweepable chunk sizes, `smoke-test` (release-readiness end-to-end check on a connected device). 75/75 unit tests; smoke verified on iPhone.",
+      "Send Diagnostic + anonymous heartbeat now route to self-hosted Bugsink at `bugs.porter.md`. Default-on, toggleable in Settings. Privacy doc rewritten with the full inventory of what's sent.",
+      "Cluster-extras (external dub/sub tracks) now survive Apply-to-all + re-analyze. Previously a TMDb pick or show rename wiped the per-job picks because cluster intent only captured audio / sub indexes. Regression tests added.",
+      "TMDb client honors `HTTPS_PROXY` / `HTTP_PROXY`, banners distinguish \"no API key\" from \"no match\", show-picker keyboard-navigates with Enter-to-confirm.",
+      "USB pill iPhone-filter: the Wi-Fi sync hint only shows for iPhones; iPads get the right copy. Release-readiness recipe in `research/docs/RELEASE_TESTING.md`.",
+    ],
+  },
+  {
     version: "0.6.2",
     date: "2026-05-14",
     notes: [

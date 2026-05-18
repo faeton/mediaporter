@@ -2,6 +2,38 @@
 
 The Swift MacApp under `MacApp/` is the shipping target. Versions starting with 0.4.0 track the MacApp; the 0.1.x – 0.3.x entries describe the now-frozen Python CLI under `python-reference/`.
 
+## 0.7.0 — 2026-05-18
+
+Minor release. TV-episode metadata finally renders correctly (series name, season number, episode order), pipeline reliability gets stat-verify + graceful cancel + adaptive AFC chunk on big files, and a new `mediaporterctl` CLI plus end-to-end smoke test add the first release-readiness gate.
+
+### Fixed
+
+- **TV.app header / season / episode-row prefix** — `series_name`, `sort_series_name`, `season_number`, `episode_id`, `episode_sort_id` now live in the `video_info` sub-dict of `insert_track` (snake_case), per the AMPDevicesAgent string-table cluster at 0x784603-0x784711. Previously these keys sat at `item` top-level and were silently dropped: TV.app header label went blank, every season card read "Season 0", and episode rows were prefixed `0.`. `item.episode_sort_id` is also emitted at item top-level (current iOS schema needs the duplicate). The kebab variants `show-name` / `season-number` route through a different code path (iTunes Store metadata, 0x770800) and are now explicitly avoided. Detail: CLAUDE.md rule #6 + `research/docs/HISTORY.md` 2026-05-15.
+- **Unbound row → swept file** — `AFCUploader.upload` now re-stats the remote path after AFC write and throws `AFCError.sizeMismatch` if the device reports a different size than the local file. The pipeline catches that and emits `FileError(0)` for the asset, unblocking `SyncFinished` and preventing a broken row from binding. Matches the post-write verification in libimobiledevice / pymobiledevice3.
+- **Detached-task assets blocked `SyncFinished`** — when the upload task threw inside the detached helper (e.g. `AFCError.sizeMismatch`, `cancelled`), the asset stayed in the device's pending-manifest forever and the foreground flow's `finishSync` timed out at 120 s. Now the catch path emits `FileError(0)` for that asset before propagating the error.
+- **Cluster-extras lost on Apply-to-all** — re-analyzing a TV cluster after a metadata change (TMDb pick, show rename) wiped each job's `selectedExternalSubs` / `externalTracksToMux` / `burnInSubLang` because the captured `ClusterSelectionState` only stored audio + sub indexes. Cluster intent now snapshots the full extras set and restores it post-resolve. Regression tests in `ClusterSelectionCaptureTests`.
+
+### New
+
+- **Show portrait per-episode** — TV episodes now ship the show's portrait poster as `item.posterData` (falling back to the per-episode landscape still). The TV.app show-detail hero renders the portrait correctly; episode-row thumbs become portrait tiles. Phantom-`representative_item_pid` approach explored and closed — `research/docs/PHANTOM_REP_PID_TESTS.md` documents the T1–T5 matrix.
+- **Graceful cancel finalization** — Cancel during a sync now flushes pending `FileError(0)` abandons through a short-deadline `finishSync` before tearing down the ATC session. Previously the session closed with abandoned assets still pending, which left the device's drainer thread waiting on a `SyncFinished` that never arrived for the next session.
+- **Adaptive AFC chunk size** — `AFCClient.recommendedChunkSize(forFileBytes:)` picks 16 MB for files ≥ 300 MB, 4 MB below. Bench on a 1.21 GB file (akm16pro, 2026-05-18): 16 MB chunk wins at 36.2 MB/s vs 35.6 for 4 MB. Plateau ~36 MB/s — Lightning cap; USB-3 cable should re-bench higher. Per-call override on `writeFileStreaming` so one long-lived AFC connection picks the right chunk per file in a mixed batch.
+- **`mediaporterctl` CLI** — new headless driver for the core pipeline. Commands: `sync <file>` (full transcode + upload + register, live progress bar), `delete <title> [--yes]` (lists matches by title-LIKE, deletes via `delete_track` + AFC remove), `bench-upload <file> [--chunks 1M,4M,16M,32M] [--passes N]` (AFC throughput sweep), `smoke-test [--fixture path] [--keep]` (release-readiness end-to-end check), `pull <remote>` (now auto-pulls `-wal` / `-shm` sidecars when remote ends `.sqlitedb`), plus existing `devices`, `analyze`, `recover`, `ls`, `stat`, `gate-test`, `streaming-test`.
+- **TMDb proxy support** — the TMDb client honors `HTTPS_PROXY` / `HTTP_PROXY` env vars so users behind corporate proxies or geo-restricted networks can reach `api.themoviedb.org`. Set via launchd plist, shell profile, or `launchctl setenv`.
+- **TMDb missing-key vs no-match** — banners now distinguish "no API key configured" from "key valid but no match", so users with a blank Settings field stop chasing a "the show doesn't exist" path.
+- **Show-picker UX polish** — the multi-choice TMDb show picker scrolls with the keyboard, lands focus on the first row, and Enter confirms. USB pill filter now suppresses the iPhone-only Wi-Fi hint when the attached device is an iPad; iPhone-attached users get the right copy.
+
+### Diagnostics
+
+- **Send Diagnostic → self-hosted Bugsink** — Help → Send Diagnostic uploads the debug log tail + device + OS + ffmpeg-source to `https://bugs.porter.md` (self-hosted Bugsink). Default-on, toggleable in Settings. Replaces the GitHub-issue prefill path for bug triage. Privacy doc lists exactly what's sent.
+- **Anonymous heartbeat** — bucketed daily counters (sync attempts, success/fail tallies, transcode-vs-copy split, device class) sent to the same Bugsink endpoint. No file names, no titles, no UDIDs. Default-on toggle in Settings. Privacy doc rewritten with the full data inventory.
+- **Release-readiness test layer** — `swift test` now covers `buildSyncPlist` / `buildDeletePlist` wire-key invariants (12 new tests, run in 5 ms, no device). `mediaporterctl smoke-test` runs the full sync → verify → delete → verify cycle against a connected iPhone and exits 0/1. Recipe in `research/docs/RELEASE_TESTING.md`. 75/75 unit tests green; smoke verified PASS on akm16pro.
+
+### Polish
+
+- **CLI `pull` auto-pulls SQLite WAL/SHM** — when the remote is `.sqlitedb`, also fetches `-wal` and `-shm` siblings so the local snapshot reflects uncommitted writes. WAL is iOS MediaLibrary's journal mode; reading the main file alone gives a stale view.
+- **Plan + research docs** — `research/docs/AMPDEVICES_AGENT_STRINGS.md` (canonical insert_track key cluster), `research/docs/ATC_PIPELINE_OPTIMIZATION.md` (punch-list vs external implementations), `research/docs/PHANTOM_REP_PID_TESTS.md` (show-detail header investigation), `research/docs/RELEASE_TESTING.md` (pre-tag recipe).
+
 ## 0.6.2 — 2026-05-14
 
 Patch release. Phantom-device fix + observability overhaul + the long tail of post-0.6.1 polish: folder drops, AVI passthrough, USB-speed hint, "Auto" appearance, ffmpeg source in Settings, and Cyrillic / CJK audio-language inference for embedded AVI dubs.

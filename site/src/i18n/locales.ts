@@ -326,7 +326,7 @@ const en: Strings = {
   downloadTitle: "Get MediaPorter.",
   downloadBody:
     "Signed and notarized by Apple. Pick the build that fits — both ship the same app, the only difference is whether ffmpeg comes inside the bundle.",
-  downloadVersion: "v0.6.2 · 2026-05-14",
+  downloadVersion: "v0.7.0 · 2026-05-18",
   downloadRequires: "# Requires macOS 14+ · Apple Silicon",
   downloadBundledTag: "## with-ffmpeg",
   downloadBundledTitle: "MediaPorter + ffmpeg",
@@ -579,7 +579,7 @@ const ru: Strings = {
   downloadTitle: "Получить MediaPorter.",
   downloadBody:
     "Подписано и нотаризовано Apple. Выберите сборку — приложение одинаковое, отличается только тем, лежит ли ffmpeg внутри бандла.",
-  downloadVersion: "v0.6.2 · 2026-05-14",
+  downloadVersion: "v0.7.0 · 2026-05-18",
   downloadRequires: "# Требуется macOS 14+ · Apple Silicon",
   downloadBundledTag: "## with-ffmpeg",
   downloadBundledTitle: "MediaPorter + ffmpeg",
@@ -831,7 +831,7 @@ const zh: Strings = {
   downloadTitle: "获取 MediaPorter。",
   downloadBody:
     "已由 Apple 签名并公证。两种构建里跑的是同一个应用——区别只在于 ffmpeg 是否打包在应用内。",
-  downloadVersion: "v0.6.2 · 2026-05-14",
+  downloadVersion: "v0.7.0 · 2026-05-18",
   downloadRequires: "# 需要 macOS 14+ · Apple Silicon",
   downloadBundledTag: "## with-ffmpeg",
   downloadBundledTitle: "MediaPorter + ffmpeg",
@@ -1084,7 +1084,7 @@ const ko: Strings = {
   downloadTitle: "MediaPorter 받기.",
   downloadBody:
     "Apple 서명 및 공증 완료. 빌드 두 가지 모두 동일한 앱이며, 차이는 ffmpeg가 번들에 포함되어 있는지 여부뿐입니다.",
-  downloadVersion: "v0.6.2 · 2026-05-14",
+  downloadVersion: "v0.7.0 · 2026-05-18",
   downloadRequires: "# macOS 14+ · Apple Silicon 필요",
   downloadBundledTag: "## with-ffmpeg",
   downloadBundledTitle: "MediaPorter + ffmpeg",
