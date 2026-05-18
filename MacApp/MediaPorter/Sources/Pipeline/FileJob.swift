@@ -112,6 +112,16 @@ public class FileJob: Identifiable {
     // Output
     public var outputURL: URL?
 
+    /// Wire pid shipped in `insert_track.pid` and stored verbatim by iOS
+    /// in `item_store.sync_id`. Generated client-side in
+    /// `ATCSession.generateAssetID()` before upload, then surfaced on the
+    /// job at the moment `runFullPipeline` flips it to `.synced`. Lets
+    /// post-sync verifiers (smoke-test) query the exact row by `sync_id`
+    /// instead of fuzzy title-LIKE matching, which is brittle across
+    /// metadata churn and TV-vs-movie title shape differences. nil until
+    /// the job has actually synced.
+    public var syncedAssetID: Int?
+
     public init(url: URL) {
         self.inputURL = url
         self.fileName = url.lastPathComponent

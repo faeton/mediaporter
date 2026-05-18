@@ -803,50 +803,33 @@ func runSmokeTest(fixturePath: String?, keep: Bool) -> Never {
             failures.append("sync failed: status=\(job.status.rawValue) error=\(job.error ?? "(none)")")
             return
         }
-        let syncedTitle = job.metadata?.title ?? job.fileName
-        print("  synced: title=\"\(syncedTitle)\"")
+        guard let assetID = job.syncedAssetID else {
+            failures.append("PipelineController didn't expose syncedAssetID for a .synced job — internal regression in runFullPipeline")
+            return
+        }
+        print("  synced: asset_id=\(assetID)")
 
         // === PHASE 2: VERIFY ON DEVICE ===
         print("")
         print("[2/3] verify on device")
-        // We synced a fixture named "Mediaporter.*" — the parser uses
-        // "Mediaporter" or "Mediaporter Alpha" as the show, and the title
-        // ends up something like "Mediaporter Alpha — S01E01". A LIKE on
-        // "Mediaporter" is wide enough to catch all the fixture variants
-        // and narrow enough to never hit user content.
-        let searchKey = "Mediaporter"
-        let candidates: [DeleteCandidate]
+        // Direct sync_id lookup. We generated `assetID` in
+        // `ATCSession.generateAssetID()` and shipped it as
+        // `insert_track.pid`; iOS stores it verbatim in
+        // `item_store.sync_id`. Querying by it sidesteps title-shape
+        // drift (showName vs episode-label vs filename stem) and is
+        // also immune to phantom rows from previous abandoned runs
+        // — no other row on the device can have the same 18-digit
+        // wire pid.
+        let cand: DeleteCandidate
         do {
-            candidates = try findDeleteCandidates(titleLike: searchKey, device: device)
+            guard let c = try findDeleteCandidate(bySyncID: Int64(assetID), device: device) else {
+                failures.append(
+                    "row not found: no item_store row has sync_id=\(assetID). We generated this id, shipped it in insert_track.pid, and the pipeline reported .synced — so medialibraryd either didn't accept the insert or renumbered the sync_id (would be a protocol regression).")
+                return
+            }
+            cand = c
         } catch {
             failures.append("DB query failed: \(error.localizedDescription)")
-            return
-        }
-        // Filter to the row we just synced. We require an explicit match
-        // — no `?? candidates.first` fallback — otherwise a phantom row
-        // from a previous abandoned smoke run could mask a true failure
-        // where our row never actually landed (codex review 2026-05-18).
-        //
-        // Match semantics: for TV `job.metadata?.title` returns showName
-        // ("Mediaporter Alpha") while the DB title is the episode label
-        // ("Mediaporter Alpha — S01E01") — the show name is a substring,
-        // so contains() catches it. For movies showName isn't applicable
-        // and metadata.title == DB title exactly. We also check the
-        // filename stem as a third anchor (covers off-format DB titles).
-        let stem = url.deletingPathExtension().lastPathComponent
-        let ours = candidates.filter { c in
-            c.title == syncedTitle
-                || c.title.contains(syncedTitle)
-                || c.title.contains(stem)
-        }
-        guard let cand = ours.first else {
-            let titles = candidates.map { "\"\($0.title)\"" }.joined(separator: ", ")
-            failures.append(
-                "row not found: searched LIKE '%\(searchKey)%' and got \(candidates.count) match(es) [\(titles)] but none matched syncedTitle=\"\(syncedTitle)\" or stem=\"\(stem)\"")
-            return
-        }
-        guard cand.syncID != 0 else {
-            failures.append("row has sync_id=0 — un-deletable, sync went through a non-ATC path")
             return
         }
         guard let path = cand.mediaPath else {
@@ -906,13 +889,12 @@ func runSmokeTest(fixturePath: String?, keep: Bool) -> Never {
             return
         }
         print("  submitted \(result.syncIDsSubmitted) delete_track op(s)")
-        let after: [DeleteCandidate]
-        do { after = try findDeleteCandidates(titleLike: searchKey, device: device) }
+        let stillThere: DeleteCandidate?
+        do { stillThere = try findDeleteCandidate(bySyncID: cand.syncID, device: device) }
         catch {
             failures.append("post-delete query failed: \(error.localizedDescription)")
             return
         }
-        let stillThere = after.first(where: { $0.syncID == cand.syncID })
         if stillThere != nil {
             failures.append("row sync_id=\(cand.syncID) still present after delete")
         }

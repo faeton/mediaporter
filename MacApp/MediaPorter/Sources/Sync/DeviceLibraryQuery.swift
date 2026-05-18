@@ -220,6 +220,91 @@ public func findDeleteCandidates(
     return candidates
 }
 
+/// Look up the row whose `item_store.sync_id` matches a wire pid we
+/// generated and shipped. Returns nil if no row carries that sync_id,
+/// throws if the DB pull or query itself fails.
+///
+/// Preferred over `findDeleteCandidates(titleLike:)` for verification
+/// after a sync the caller performed: titles come from metadata and can
+/// shape-shift between code paths (TV episode title vs. movie title vs.
+/// filename stem), while `sync_id` is the value we locally generated in
+/// `ATCSession.generateAssetID()` and iOS stores verbatim. Same DB-pull
+/// mechanic as the title-LIKE variant (main + WAL + SHM).
+public func findDeleteCandidate(bySyncID syncID: Int64, device: DeviceInfo) throws -> DeleteCandidate? {
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("mp-syncid-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    let afc: AFCClient
+    do { afc = try AFCClient(device: device) }
+    catch { throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription) }
+    defer { afc.close() }
+
+    var mainPulled = false
+    for f in dbFiles {
+        do {
+            let data = try afc.readFile("\(dbDir)/\(f)")
+            try data.write(to: tmp.appendingPathComponent(f))
+            if f == dbFiles[0] { mainPulled = true }
+        } catch {
+            if f == dbFiles[0] {
+                throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription)
+            }
+        }
+    }
+    guard mainPulled else { return nil }
+
+    let dbPath = tmp.appendingPathComponent(dbFiles[0]).path
+    let sql = """
+    SELECT
+      i.item_pid,
+      COALESCE(s.sync_id, 0),
+      e.title,
+      COALESCE(bl.path || '/' || e.location, ''),
+      COALESCE(e.media_kind, 0),
+      COALESCE(CAST(e.total_time_ms AS INTEGER), 0)
+    FROM item_store s
+    JOIN item i ON i.item_pid = s.item_pid
+    JOIN item_extra e ON e.item_pid = i.item_pid
+    LEFT JOIN base_location bl ON bl.base_location_id = i.base_location_id
+    WHERE s.sync_id = \(syncID)
+    LIMIT 1;
+    """
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    proc.arguments = ["-readonly", "-separator", "\t", dbPath, sql]
+    let out = Pipe()
+    let err = Pipe()
+    proc.standardOutput = out
+    proc.standardError = err
+    do { try proc.run(); proc.waitUntilExit() }
+    catch { throw DeviceLibraryQueryError.queryFailed(error.localizedDescription) }
+    let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    guard proc.terminationStatus == 0 else {
+        throw DeviceLibraryQueryError.queryFailed("sqlite3 exit \(proc.terminationStatus): \(errText)")
+    }
+    let raw = out.fileHandleForReading.readDataToEndOfFile()
+    guard let text = String(data: raw, encoding: .utf8), !text.isEmpty else { return nil }
+
+    for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+        let parts = line.split(separator: "\t", maxSplits: 5, omittingEmptySubsequences: false)
+        guard parts.count == 6,
+              let itemPid = Int64(parts[0]),
+              let sid = Int64(parts[1]),
+              let kind = Int(parts[4]),
+              let dur = Int(parts[5]) else { continue }
+        let title = String(parts[2])
+        let pathFrag = String(parts[3])
+        let mediaPath: String? = pathFrag.isEmpty ? nil : "/\(pathFrag)"
+        return DeleteCandidate(
+            itemPid: itemPid, syncID: sid, title: title,
+            mediaPath: mediaPath, mediaKind: kind, totalTimeMs: dur
+        )
+    }
+    return nil
+}
+
 public extension Array where Element == DeviceLibraryEntry {
     /// True if any entry matches the given title (exact) within ±2 s of
     /// the given duration. Used by analyzeOne to flag duplicate jobs.

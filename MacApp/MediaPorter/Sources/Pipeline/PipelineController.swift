@@ -2086,6 +2086,11 @@ public class PipelineController {
 
                 await MainActor.run { [weak self] in
                     capJob.status = .synced
+                    // Surface the wire pid the pipeline shipped — the
+                    // smoke test and any post-sync verifier looks up the
+                    // landed row by `item_store.sync_id = <this>` rather
+                    // than guessing from titles.
+                    capJob.syncedAssetID = capPrepared.assetID
                     var t = self?.lastRunStats?.timingsByFile[capJob.fileName]
                         ?? stats.timingsByFile[capJob.fileName]
                         ?? PipelineStats.FileTiming()
