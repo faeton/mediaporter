@@ -40,3 +40,8 @@ site/dist/
 site/.astro/
 site/.wrangler/
 site/.dev.vars
+
+# codanna code-intelligence index (machine-specific abs paths + large index; regenerate with `codanna index`)
+# .codannaignore is committed (ignore rules travel with the repo); .codanna/ is not.
+.codanna/
+.fastembed_cache
