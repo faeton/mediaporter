@@ -122,7 +122,28 @@ public enum Transcoder {
         ActiveProcesses.shared.cancelAll()
     }
 
-    /// Detect if VideoToolbox HEVC encoder is available.
+    private static let vtCacheLock = NSLock()
+    private static var vtCache: (path: String, available: Bool)?
+
+    /// Cached VideoToolbox HEVC availability (A6). Keyed by the resolved ffmpeg
+    /// path so a runtime ffmpeg swap (`FFmpegLocator.invalidateCache()`) forces
+    /// a re-probe, but the common case avoids spawning `ffmpeg -encoders` on
+    /// every transcode job. The lock is held across the first probe so
+    /// concurrent lookahead jobs serialize onto one subprocess, not N.
+    static func videoToolboxAvailable() -> Bool {
+        let path = FFmpegLocator.ffmpeg?.path ?? ""
+        vtCacheLock.lock()
+        defer { vtCacheLock.unlock() }
+        if let c = vtCache, c.path == path { return c.available }
+        let available = detectVideoToolbox()
+        vtCache = (path, available)
+        DebugLog.write("transcode.vt",
+                       "hevc_videotoolbox \(available ? "available" : "unavailable") (ffmpeg=\(path.isEmpty ? "none" : path))")
+        return available
+    }
+
+    /// Detect if VideoToolbox HEVC encoder is available. Spawns ffmpeg; callers
+    /// should go through `videoToolboxAvailable()` for the cached result.
     static func detectVideoToolbox() -> Bool {
         guard let ffmpeg = FFmpegLocator.ffmpeg else { return false }
         let proc = Process()
@@ -307,7 +328,7 @@ public enum Transcoder {
                     }
                 }
 
-                if hwAccel && detectVideoToolbox() {
+                if hwAccel && videoToolboxAvailable() {
                     // iOS HEVC decoder is strict: without yuv420p + Main profile +
                     // colour metadata the file decodes to black on device (valid
                     // container, no frames rendered). VideoToolbox defaults to
@@ -570,12 +591,17 @@ public enum Transcoder {
         // Post-transcode introspection — temporary, for the binding bug. We
         // need to know the *actual* codec_tag, profile, and pix_fmt of the
         // file we hand to iOS, not what we asked ffmpeg for (VideoToolbox
-        // and -c copy paths produce surprises).
+        // and -c copy paths produce surprises). DEBUG-only (A7): the release
+        // DMG skips this extra per-output ffprobe subprocess. Re-enable in the
+        // field by dropping the `#if DEBUG` guard.
+        #if DEBUG
         probeOutputForDebug(outputPath)
+        #endif
 
         return outputPath
     }
 
+    #if DEBUG
     private static func probeOutputForDebug(_ url: URL) {
         let ffprobe = (FFmpegLocator.ffmpeg?.deletingLastPathComponent().appendingPathComponent("ffprobe")) ?? URL(fileURLWithPath: "/opt/homebrew/bin/ffprobe")
         guard FileManager.default.isExecutableFile(atPath: ffprobe.path) else { return }
@@ -598,4 +624,5 @@ public enum Transcoder {
             }
         } catch {}
     }
+    #endif
 }
