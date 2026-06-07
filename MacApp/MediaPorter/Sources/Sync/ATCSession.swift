@@ -866,6 +866,15 @@ class ATCSession {
                 guard let msg = ATH.readMessage(c) else {
                     // nil = conn invalidated (close called) or transport
                     // error. Either way, drainer is done.
+                    //
+                    // A2 telemetry (Phase 2): this is the AUTHORITATIVE peer-death
+                    // signal — earlier than finishSync's 120s deadline. drainerStop
+                    // distinguishes expected teardown (stopDrainer flipped it) from
+                    // unexpected death (mid-sync yank / Wi-Fi drop). Phase 4's
+                    // connectionDead flag will be set right here, on the
+                    // drainerStop==false branch.
+                    DebugLog.notice("atc.drainer.eof",
+                                    "readMessage nil — connection invalidated/transport error (drainerStop=\(self.drainerStop))")
                     return
                 }
                 guard let nameCF = ATH.messageName(msg) else { continue }
@@ -1022,6 +1031,15 @@ class ATCSession {
 
     @discardableResult
     private func check(_ tag: String, _ rc: Int32) -> Int32 {
+        // A2 telemetry (Phase 2): record EVERY send's rc — successes too — so a
+        // device-session capture (good sync / Wi-Fi sync / mid-sync USB yank)
+        // tells us what "success" looks like per message type BEFORE we convert
+        // any must-ack send to throw. HISTORY shows rc!=0 is not uniformly fatal
+        // (post-SyncFinished sends "return 1"; framework failures 0x80f20840),
+        // so we need the convention, not a guess. .notice → survives `log show`.
+        // Throwaway instrumentation; removed when Phase 4 lands checkOrThrow.
+        DebugLog.notice("atc.send.rc",
+                        "\(tag) rc=\(rc) (0x\(String(format: "%08x", UInt32(bitPattern: rc)))) conn=\(conn != nil ? "live" : "nil")")
         if rc != 0 { log("  !! \(tag) returned status \(rc)") }
         return rc
     }
