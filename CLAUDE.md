@@ -42,6 +42,8 @@ Needs `ffmpeg` on `$PATH` (`brew install ffmpeg`; release builds bundle it). Pyt
 
 Optional but recommended for navigation. `codanna serve --watch` (user-scope MCP) re-indexes EDITS to known files automatically, but does NOT discover newly added files/dirs and does NOT full-scan on startup (verified codanna 0.9.22). So: `codanna init` once → `codanna index .` baseline → re-run `codanna index .` after ADDING/renaming/moving files. A local `.git/hooks/post-commit` runs `codanna index .` for you — set it up per clone (it's not tracked). `.codannaignore` is committed; `.codanna/` is gitignored (holds absolute machine paths). Treat any codanna "no results" as suspect — confirm with grep before assuming code is unused.
 
+The `search_documents`/`semantic_search_docs` MCP tools need a separate **document collection** (markdown isn't covered by `codanna index .`). Set up per clone: `codanna documents add-collection research research/docs` + `codanna documents add-collection planning . --pattern "*.md"`, then `codanna documents index` (re-run after editing `.md` files). Config lands in gitignored `.codanna/settings.toml`.
+
 ## Where things live
 
 - `MacApp/MediaPorter/` — Swift core: `Sync/` (ATC + AFC + framework loading), `Pipeline/`, `Transcode/`, `Analysis/`, `Metadata/`, `Tagger/`
@@ -58,3 +60,4 @@ Optional but recommended for navigation. `codanna serve --watch` (user-scope MCP
 - Shipped per version → `CHANGELOG.md`
 - Sync wire detail + message dicts → `research/docs/ATC_SYNC_FLOW.md`, `research/docs/IMPLEMENTATION_GUIDE.md`
 - Chronological findings → `research/docs/HISTORY.md`
+- On-device test harness (screenshot + tap/Play a real iPhone to verify a sync) → `research/docs/IOS_TEST_HARNESS.md` + `scripts/ios/mp-ios.sh`

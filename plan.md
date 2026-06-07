@@ -6,18 +6,45 @@ steps mirrors the P0/P1 items in tighter form.
 
 ---
 
+## Readiness snapshot — 2026-06-07
+
+Shipping target is **0.7.0** (tagged 2026-05-18; `MediaLibrary` wire-key fix +
+streaming-register reliability + `mediaporterctl` smoke-test gate). Working tree
+clean, 75/75 unit tests green at last release, smoke-test PASS on akm16pro.
+
+**Ship-readiness: good.** All P0/P1 engine work is shipped and on-device-verified.
+The reconciliation below (verified against code 2026-06-07) closed several items
+this doc still listed as open: **P0 #1** (episode-still poster order), **#12**
+recommendation rework (bitrate sub-item remains), **#13** zombie sweep, **A1**,
+**A3** (mitigated), **A4**, **R2**, **R3**.
+
+**What's actually left** (none block a release; all are polish/hardening):
+- **A2 — High, the one real gap.** ATC `check()` still never throws, so a dead
+  mid-session connection is logged-then-ignored. Rare but it's the "stuck
+  SyncFinished" failure mode. Top of the next-work list.
+- **A6 / A7 — Medium, ~15 min cleanup.** Cache VideoToolbox detection; gate the
+  per-output debug probe behind `Tweaks.debug`.
+- **A5 / A8 — Medium.** `probeFile` blocks a cooperative-pool thread; disk
+  preflight is over-conservative (`1.1 × source` instead of predicted output).
+- **A9 — Low.** `clusterExtrasOrdered` recomputes every progress tick.
+- **#12 bitrate hint, R1b DMG background, P0 #4 device-verify of the no-TMDb /
+  no-API-key poster fallbacks** — cosmetic / verification tail.
+
+See "Next plan" framing in the audit triage order (updated 2026-06-07).
+
+---
+
 ## P0 — Ship now (small, isolated, high impact)
 
-### 1. Episode-still artwork bug
-- `MetadataLookup.swift:20` returns `e.showPosterData ?? e.posterData`, so the
-  show portrait wins for both Airlock artwork upload (`ATCSession.swift:319`)
-  and the embedded MP4 poster atom (`Tagger.swift:33`). TV.app then squishes
-  the 500×750 portrait into the 16:9 episode tile — visible bug.
-- Fix: flip to `e.posterData ?? e.showPosterData` (per-episode still wins).
+### 1. Episode-still artwork bug *(shipped)*
+- `MetadataLookup.swift:20` now returns `e.posterData ?? e.showPosterData`
+  (per-episode still wins) for the device-bound `posterData` path. The
+  separate `tagPosterData` accessor (`:34`) intentionally keeps the show
+  portrait for the embedded MP4 atom. Show-portrait-specific reads
+  (`showPosterData` at `:50`, episode still at `:56`) are isolated accessors,
+  so the flip didn't regress the two-artwork sync.
 - Mirrors Python's `src/mediaporter/metadata.py:175`
   (`poster_url=ep_still_url or show_poster_url`).
-- Audit every read of `ResolvedMetadata.posterData` to confirm none want the
-  show portrait specifically.
 
 ### 2. ffmpeg still fallback for episodes *(shipped)*
 - `StillExtractor.swift` extracts 1280×720 JPEG: skip 5%, sample 3 frames
@@ -297,26 +324,19 @@ Matching rules (apply to both bulk-apply and external):
 - Downloading missing tracks from external sources.
 - Bulk-apply across different clusters in one drop.
 
-### 12. Recommendation rework
-- Banner today (`DeviceColumnView.swift::recommendationCard`) makes a flat
-  "1080p is the sweet spot for this device's display" claim. Misleads users
-  who AirPlay/HDMI to a 4K TV; ignores storage axis; resolution alone isn't
-  the real space lever.
-- Decisions:
-  - Keep on-device-display framing as default copy.
-  - Add Settings toggle "I AirPlay/cast to a 4K TV" → flips
-    `suggestedResolution` to `.original` (or `.uhd4k`) and rewrites banner.
-  - Storage-aware: when `deviceFreeBytes` >> incoming library (e.g. >3×),
-    bias toward keeping originals; when tight, push downscale harder. Banner
-    reflects which mode it's in.
-  - Surface bitrate alongside resolution. Add a bitrate hint to the banner;
-    show source bitrate in the per-file row in `FileRowView`.
+### 12. Recommendation rework *(mostly shipped 2026-05-14)*
+- Default on-device-display framing kept; Settings toggle "I AirPlay/cast to a
+  4K display" flips the banner to keep-originals copy
+  (`DeviceColumnView.swift::recommendationCopy`, `pipeline.airplayTo4K`).
+  Storage-aware banner shipped in 0.6.0.
+- **Remaining**: surface bitrate alongside resolution — a bitrate hint in the
+  banner and source bitrate in the per-file row (`FileRowView`). Not yet wired.
 
-### 13. Zombie ffmpeg sweep at launch
-- `ActiveProcesses.cancelAll()` (Transcoder.swift:104) only fires on graceful
-  Swift exit. SIGKILL/crash leaves orphan ffmpeg children writing to temp.
-- On launch, find ffmpeg processes whose CWD is our temp dir and whose parent
-  PID is gone; terminate.
+### 13. Zombie ffmpeg sweep at launch *(shipped 0.6.0)*
+- `ZombieSweep.sweep()` runs at launch (`App.swift:138`,
+  `Sources/Transcode/ZombieSweep.swift`): SIGKILLs orphan ffmpeg processes whose
+  command line references the app's temp prefix. Recovers from a prior
+  SIGKILL/panic that bypassed `ActiveProcesses.cancelAll()`.
 
 
 ---
@@ -349,68 +369,88 @@ Code-review pass against the shipping 0.6.0 codebase. Each item lists severity, 
   These need TMDb plumbing (we don't currently pull overview/network/rating into `EpisodeMetadata`).
 - **Remaining show-detail bug**: big portrait poster slot shows the landscape episode still, not the show portrait. This is separate — needs `insert_album` + Airlock Album-class artwork upload to populate `album.artwork_token`. Track-class artwork (what we send now) only drives episode-row thumbs.
 
-### A1. AFC upload silently accepts a truncated local read — **High**
-- `Sources/Sync/AFC.swift:102-117`. The `while sent < fileSize` loop reads from `InputStream`; on `read == 0` (EOF before fileSize) or `read < 0` (local read error) it just `break`s. After the loop it logs `"TRUNCATED"` but **returns success**.
-- Consequence: caller sends `FileComplete` for an incomplete file. medialibraryd binds a partial row; on device the file is corrupt but the TV-app row exists — worst possible state for diagnostics.
-- Fix: distinguish `read == 0` before EOF (truncation of local file mid-upload) vs `read < 0` (`stream.streamError`). Throw `AFCError.readFailed(sent, …)` / `AFCError.truncated(expected, got)`. Caller propagates → `runPipelined` abandons the asset.
+### A1. AFC upload silently accepts a truncated local read — **High** *(shipped 0.7.0)*
+- Closed by the post-write verification path: `AFCUploader.upload` re-stats the
+  remote file after the AFC write and throws `AFCError.sizeMismatch` if the
+  device-reported size ≠ local file size (`AFC.swift:170` adds
+  `AFCError.readFailed` for local read errors; `:10` adds `.sizeMismatch`). The
+  pipeline catches both and emits `FileError(0)` for the asset, so a truncated
+  upload can no longer bind a partial row. Detail: CHANGELOG 0.7.0 "Unbound row
+  → swept file". The original mid-loop `break` still logs `"TRUNCATED"` at
+  `:149` but the post-write stat now backstops it.
 
-### A2. ATC send failures swallowed by `check()` — **High**
-- `Sources/Sync/ATCSession.swift:838`. `check(_ tag:, _ rc:)` only logs `rc != 0` and returns `rc`. Used by `beginFile` (567), `completeFile` (594, 603), `abandonAsset` (625), and others. These functions are marked `throws` but `check()` never throws.
+### A2. ATC send failures swallowed by `check()` — **High** *(STILL OPEN — verified 2026-06-07)*
+- `Sources/Sync/ATCSession.swift:1024`. `check(_ tag:, _ rc:)` still only logs `rc != 0` and returns `rc`. `beginFile` (`:686`) and `completeFile` (`:704`) are marked `throws` but call the non-throwing `check()` for their `FileBegin`/`FileProgress`/`FileComplete` sends, so a dead ATC connection mid-session is logged-then-ignored. This is the top remaining reliability gap.
 - Consequence: if ATC connection dies mid-session (drainer-detected or transport-level), every subsequent send returns nonzero and gets logged-then-ignored. We keep uploading bytes over AFC, send `FileComplete` into the void, and only notice on `finishSync` timeout. Rows from after the drop are unbound.
 - Fix: convert `check` for the `FileBegin`/`FileComplete`/`FileError`/`FileProgress` callsites into `try checkOrThrow(...) throws -> Void`. Other ATC sends (`PowerAssertion`, `MetadataSyncFinished`) where rc != 0 isn't necessarily fatal can keep the logging-only variant under a different name.
 
-### A3. Off-by-one in `registeredCount` skips abandon for in-flight failures — **High**
-- `Sources/Pipeline/PipelineController.swift:1626-1688`. `registeredCount = idx + 1` is set **immediately after** dispatching the detached task that does `beginFile` + AFC upload + `completeFile`. If that task fails between `FileBegin` and `FileComplete`, the cleanup loop `for i in registeredCount..<preparedPairs.count` skips this index — no `abandonAsset` is sent.
-- Secondary: the status filter at 1684 (`!= .syncing && != .uploaded`) also excludes a job that *did* enter the loop range, so even reaching the abandon branch wouldn't fire for a freshly-failed in-flight upload.
-- Consequence: device gets `FileBegin` without `FileComplete` and without `FileError`. medialibraryd waits forever; `SyncFinished` never arrives. Exactly the failure mode CLAUDE.md #8 warns against.
-- Fix: rename to `dispatchedCount` and track a separate `completedCount` flipped from inside the detached task after `completeFile` returns. Cleanup loop iterates `dispatchedCount..<preparedPairs.count` to abandon never-started items, plus inspects each dispatched task's outcome to abandon any that failed mid-flight before `FileComplete`. Status filter needs to keep `.failed` / mid-flight jobs in scope.
+### A3. Off-by-one in `registeredCount` skips abandon for in-flight failures — **High** *(mitigated 0.7.0; structural fix deferred)*
+- The acute failure mode (detached task throws between `FileBegin` and
+  `FileComplete` → asset never abandoned → `SyncFinished` blocks forever) is now
+  covered: the detached task's catch path sends `FileError(0)` for its own asset
+  (commit c73e141, `PipelineController.swift:1964–2031`), and the graceful-cancel
+  flush drains pending abandons through a short-deadline `finishSync` (0.7.0).
+- **Remaining (Low)**: the `registeredCount = idx + 1` bookkeeping at `:2103`
+  was never renamed to the cleaner `dispatchedCount` / `completedCount` split.
+  Functionally redundant now that each task self-abandons, but the variable
+  still reads as an off-by-one trap for the next editor. Cosmetic cleanup.
 
-### A4. ExternalMux deadlock on stderr-heavy ffmpeg runs — **High**
-- `Sources/Transcode/ExternalMux.swift:158-174` (`mux`) and `:177-194` (`convertAssToSrt`). `errPipe` is a `Pipe`; `proc.run()` + `proc.waitUntilExit()` runs first, then `readDataToEndOfFile()` is called **after exit only on the failure path** (`guard … else { let data = … }`).
-- macOS pipe buffer is ~64 KB. ffmpeg verbose stderr (especially with `-v info`, complex filtergraphs, ASS parse warnings) can fill this. Once full, ffmpeg blocks on write → `waitUntilExit` blocks → entire pipeline thread parks. Directly violates CLAUDE.md #12 ("drain stderr in a thread").
-- Note about the "blocks UI" framing in the original finding: `mux` is a free `async throws` function, not `@MainActor`-isolated. Swift hops the await off MainActor onto the cooperative pool, so the main thread isn't pinned. What hangs is a cooperative-pool worker plus the upstream `Task` awaiting it — pipeline progress freezes, UI stays responsive.
-- Fix: install `readabilityHandler` on `errPipe.fileHandleForReading` before `proc.run()`, append to a tail-only buffer (last ~8 KB), clear the handler after `waitUntilExit`, drain remainder. Pattern already used correctly in `Transcoder.swift` main path — copy it.
+### A4. ExternalMux deadlock on stderr-heavy ffmpeg runs — **High** *(shipped 0.6.2)*
+- Fixed exactly as sketched: `ExternalMux.mux` now installs a `readabilityHandler`
+  on `errPipe.fileHandleForReading` before `proc.run()`, accumulates into a
+  `StderrTail` (last ~8 KB), resolves via a `terminationHandler`-driven
+  continuation (not `waitUntilExit`), clears the handler, then drains the
+  remainder (`ExternalMux.swift:212–236`). Same pattern as `Transcoder`'s main
+  path. CHANGELOG 0.6.2 "External-mux failure tail".
 
-### A5. probeFile blocks a cooperative-pool thread (not MainActor) — **Medium**
-- `Sources/Analysis/Probe.swift:126`. Synchronous `proc.run()` + `readDataToEndOfFile()` + `waitUntilExit()`. Called from `PipelineController.analyzeOne` (`PipelineController.swift:989`) which is `@MainActor`-isolated; called concurrently up to 4× by the TaskGroup at 956.
+### A5. probeFile blocks a cooperative-pool thread (not MainActor) — **Medium** *(open — verified 2026-06-07)*
+- `Sources/Analysis/Probe.swift:126`. Still synchronous `proc.run()` + `readDataToEndOfFile()` (`:145`) + `waitUntilExit()` (`:146`). Called from `PipelineController.analyzeOne` (`PipelineController.swift:989`) which is `@MainActor`-isolated; called concurrently up to 4× by the TaskGroup at 956.
 - Important correction to the original finding's framing: `probeFile` is a *nonisolated* `async` function. Swift 5.7+ hops nonisolated async calls off the caller's actor onto the generic cooperative executor. So UI does **not** freeze. What suffers: 4 concurrent probes each pin a cooperative-pool worker (pool size ≈ `activeProcessorCount`). On a quad-core MBA that's all of them; other concurrency (TMDb fetches, OpenSubtitles, file scanning) gets queued behind them.
 - Consequence: parallel analyze is parallel, but during the probe window other async work in the app stalls. Not catastrophic — the analyze wave already coalesces network work via `resolveCluster` caching.
 - Fix options: (a) wrap probe body in `Task.detached { … }.value` so blocking lives outside the cooperative pool, (b) switch to async pipe reading via `DispatchSource.makeReadSource(fileDescriptor:queue:)` or `for try await line in handle.bytes.lines`. Option (a) is one-line and good enough; (b) is correct but invasive. Same pattern recurs in: `Tagger`, `StillExtractor`, anywhere we use Process synchronously.
 
-### A6. VideoToolbox detection runs a subprocess per transcode — **Medium**
-- `Sources/Transcode/Transcoder.swift:126` (definition) and `:309` (`buildCommand`). `detectVideoToolbox()` shells out to `ffmpeg -encoders` and grep-parses the output. Called inside the hot path of every transcode.
+### A6. VideoToolbox detection runs a subprocess per transcode — **Medium** *(open — verified 2026-06-07)*
+- `Sources/Transcode/Transcoder.swift:126` (definition), still called at `:310` inside the per-transcode hot path. Not yet cached as a `static let`.
 - Consequence: every file pays ~50–150 ms + a stderr-free Process for a fact that never changes per app run.
 - Fix: replace with `static let supportsVideoToolbox: Bool = detectVideoToolbox()` on `Transcoder` (or move into a launch-time capability struct alongside `FFmpegLocator`). One subprocess at first use, cached forever.
 
-### A7. probeOutputForDebug unconditional per output file — **Medium**
-- `Sources/Transcode/Transcoder.swift:565` calls `probeOutputForDebug(outputPath)` after every successful transcode; the function at `:570-591` shells out to ffprobe and writes per-stream lines to `DebugLog`. Comment at 561 calls it "temporary, for the binding bug" — that bug shipped in 0.6.0, this hasn't been retired.
+### A7. probeOutputForDebug unconditional per output file — **Medium** *(open — verified 2026-06-07)*
+- `Sources/Transcode/Transcoder.swift:574` still calls `probeOutputForDebug(outputPath)` unconditionally after every successful transcode (function at `:579`). Not gated behind `Tweaks.debug`.
 - Fix: gate behind `Tweaks.debug` (or remove). Cheap, but visible per-file overhead and noise in the debug log.
 
-### A8. Disk preflight is over-conservative for the streaming pipeline — **Medium (Mac side); spec-debate (device side)**
-- `Sources/Pipeline/PipelineStats.swift:123-147` requires `1.1 × sourceBytesTotal` free on **both** Mac temp and the device.
+### A8. Disk preflight is over-conservative for the streaming pipeline — **Medium (Mac side); spec-debate (device side)** *(open — verified 2026-06-07)*
+- `Sources/Pipeline/PipelineStats.swift:129` still computes `required = sourceBytesTotal × 1.1` for both Mac temp and the device; no `predictedOutputBytes` field yet.
 - Mac side is over-conservative: `runPipelined` keeps ~1 transcoded output in flight at a time. The real requirement is `largest_single_output × 1.1 + headroom`, not the sum. Big drops (50+ files) can be rejected even when the pipeline would happily stream through with ~10 GB of free temp.
 - Device side is more subtle. The actual need is sum of *output* bytes, not source — and outputs often shrink after downscale / H.265 / AC3→AAC. But output size isn't known until after `evaluateCompatibility` per file. Today's 1.1×source is the safe pessimistic bound. Better: after analyze, sum `decision.predictedOutputBytes` (add field if missing) and use that × 1.05 as the device-side check.
 - Fix: split the preflight. Mac check on the largest source file; device check on sum of predicted outputs. Don't ship until you've cross-checked predicted vs actual on a real batch — under-estimating bites mid-sync.
 
-### A9. SwiftUI recomputes `clusterExtrasOrdered` every progress tick — **Low**
-- `App/Sources/ContentView.swift:21-33`. Computed property on the view referenced from `body`; filters `pipeline.clusterExtras`, lookups against `pipeline.tvShowResolutions`, sorts. SwiftUI re-invokes body on every `@Observable` change — `job.progress` ticks every 0.25 s during transcode/upload.
+### A9. SwiftUI recomputes `clusterExtrasOrdered` every progress tick — **Low** *(open — verified 2026-06-07)*
+- `App/Sources/ContentView.swift:27` is still a computed property on the view, re-invoked from `body` (`:157`) on every `@Observable` tick. Not cached on the controller. SwiftUI re-invokes body on every `@Observable` change — `job.progress` ticks every 0.25 s during transcode/upload.
 - Small N: invisible. Large drop (50+ jobs, 8+ clusters): noticeable CPU during sync, plus more invalidations downstream than necessary.
 - Fix: cache the ordered list on the controller as `@Published var clusterExtrasOrdered: [(String, ReleaseExtras)]`, recompute only when `clusterExtras` / `jobs.count` / `tvShowResolutions` change. Or use `@State` on the view + `.onChange(of:)` of a stable derived key.
 
 ### Cross-refs to existing plan items
 - **A5** is a refinement on shipped **P1.10 Parallel analyze** — the wave model works, but the worker still blocks a thread.
-- **A4** lands on shipped **P2.11e Pipeline integration — mux step** — fix is small.
-- **A3** lands on shipped **P1.8 Interleave registration with uploads** — the cancel-path cleanup needs a second pass.
+- **A4** *(shipped 0.6.2)* landed on **P2.11e Pipeline integration — mux step**.
+- **A3** *(mitigated 0.7.0)* landed on **P1.8 Interleave registration with uploads** — only the cosmetic `registeredCount` rename remains.
 - **A8** revisits the 0.5.0 preflight (mentioned in `project_macapp_next_phases` memory).
-- **A1 / A2** are below the abstraction layer of any existing P-tier item; they're protocol-correctness gaps that surface as the rare "stuck SyncFinished" failure mode.
+- **A2** is the last open protocol-correctness gap below the P-tier abstraction layer; it surfaces as the rare "stuck SyncFinished" failure mode (**A1** now closed by the post-write size verify).
 
-### Suggested triage order if grouped
-1. **A1 + A2 + A3** as one session — all on the AFC/ATC reliability axis, all silent-failure modes that share testing infrastructure (force a mid-sync disconnect, observe that the device recovers).
-2. **A4** standalone, ~30 min — copy the stderr drainer pattern from Transcoder.
-3. **A6 + A7** as cleanup batch, ~15 min total.
-4. **A5** when ready — wrap in `Task.detached`, validate analyze wall time on a 20-file drop doesn't regress.
-5. **A8** after A5, since predicted-output-size requires the analyze decision to expose it.
-6. **A9** only if a large drop measurably stalls during sync.
+### Suggested triage order if grouped *(updated 2026-06-07)*
+Resolved since the audit: **A1** (post-write size verify), **A3** (per-task
+self-abandon), **A4** (stderr drainer). Remaining, in order:
+1. **A2** — the last open High. Convert the `FileBegin`/`FileComplete`/`FileError`
+   callsites to a `try checkOrThrow(...)` so a dead mid-session ATC connection
+   fails loudly instead of uploading into the void. Pairs naturally with the
+   A3 `dispatchedCount`/`completedCount` cosmetic rename. Test with a forced
+   mid-sync disconnect.
+2. **A6 + A7** as a cleanup batch, ~15 min total — cache `detectVideoToolbox()`
+   as a `static let`, gate `probeOutputForDebug` behind `Tweaks.debug`.
+3. **A5** — wrap the `probeFile` body in `Task.detached { … }.value`; validate
+   analyze wall time on a 20-file drop doesn't regress.
+4. **A8** after A5, since the device-side check wants `predictedOutputBytes`
+   exposed from the analyze decision.
+5. **A9** only if a large drop measurably stalls during sync.
 
 ---
 
@@ -445,17 +485,13 @@ source of truth and no per-release tuning is needed). PNG @2x with 144 DPI
 metadata; native canvas 1080×760. Keep the text panel above the slots so
 icon labels render on the well plates, footer at the bottom edge.
 
-### R2. `.app` filename inside the DMG should be `MediaPorter.app` regardless of variant — **High**
+### R2. `.app` filename inside the DMG should be `MediaPorter.app` regardless of variant — **Done 2026-05-14 (0.6.2)**
 
-**Today.** `release.sh::build_dmg` does `ditto "$app" "$staging/$(basename "$app")"` — so the with-ffmpeg DMG shows `MediaPorter-with-ffmpeg.app` in the window. End-user-visible artifact name. The DMG filename can keep `-with-ffmpeg` for downloads, but the contained `.app` must be `MediaPorter.app` either way (otherwise the install shortcut copies an unusual name into /Applications).
+**Shipped.** Both DMG variants now contain `MediaPorter.app`; the DMG filename keeps `-with-ffmpeg` for download discoverability. Install shortcut and Spotlight see one canonical name. CHANGELOG 0.6.2 "In-DMG `.app` name".
 
-**Fix.** One-liner — replace the basename call with the literal `MediaPorter.app`. Both variants ship the same Swift binary; the variant is fully captured by the presence/absence of `Contents/Helpers/ffmpeg`.
+### R3. Show "bundled vs system ffmpeg" inside the app, not in the DMG name — **Done 2026-05-14 (0.6.2)**
 
-### R3. Show "bundled vs system ffmpeg" inside the app, not in the DMG name — **Low**
-
-**Today.** Users see the variant in the DMG filename, but once `MediaPorter.app` is moved to /Applications that hint is gone. The `MissingFFmpegBanner` only surfaces when ffmpeg is *unavailable*.
-
-**Want.** Surface the current `ffmpegSource` (`.bundled` / `.system` / `.missing`) in Settings → About or Settings → Diagnostics. Read off `Prerequisites.ffmpegSource`; the path resolution is already there. Free of code complexity — pure SwiftUI addition.
+**Shipped.** Settings → FFmpeg source shows `.bundled` / `.system` / `.missing` with a stateful icon, the resolved ffmpeg path (monospaced, truncating middle), and a `How to install ffmpeg` link to porter.md/setup#ffmpeg when missing. CHANGELOG 0.6.2.
 
 ### R4. USB-speed hint when connection is below device capability — **Done 2026-05-14**
 
@@ -474,11 +510,27 @@ Speculative work. Each item has a stated unknown that needs device verification 
 **Hypothesis.** AMDevice handles Wi-Fi pairing transparently — same `AMDeviceConnect` / `AMDeviceStartService` calls should work if the device is Wi-Fi-paired. Throughput will drop (per-`FileProgress` ack RTT over Wi-Fi), but small files should complete.
 
 **Unknowns to verify.**
-- Whether `AirTrafficHost.framework` opens ATC channels the same way over Wi-Fi-only `AMDevice` handles.
-- Real upload rate vs USB baseline (~30 MB/s today).
-- Whether Ping/Pong keepalive cadence (CLAUDE.md #9) survives Wi-Fi jitter on long uploads.
+- Whether `AirTrafficHost.framework` opens ATC channels the same way over Wi-Fi-only `AMDevice` handles. — *open*
+- Real upload rate vs USB baseline (~30 MB/s today). — *open*
+- Whether Ping/Pong keepalive cadence (CLAUDE.md #9) survives Wi-Fi jitter on long uploads. — *open*
 
-**Why we're not doing it.** USB wins on every axis and porter.md customers have the cable. Pull only if a segment shifts (untethered shoot floor, etc.).
+**Partial validation (2026-06-07).** Took the first real steps (full writeup:
+`research/docs/IOS_TEST_HARNESS.md` → "F1"). On akm16pro: enable network sync via
+`pymobiledevice3 lockdown wifi-connections --state on` (one-time over USB), put
+the Mac + device on one subnet (a Personal Hotspot is a single subnet, so Bonjour
+works), and:
+- `idevice_id -n` lists the device + it advertises `_apple-mobdev2._tcp`.
+- `ideviceinfo -n` (network interface only) returns lockdown values → **classic
+  lockdown sessions open over Wi-Fi**. Strong signal AFC+ATC will too.
+- The attach callback (`Sync/Device.swift:388`) already has no USB-only filter, so
+  a Wi-Fi device flows straight into the device list — the "implicitly assumes
+  USB" note above is about the *session*, not enumeration.
+Remaining: a full AFC upload + ATC sync with **USB unplugged** to confirm the
+session opens/holds over Wi-Fi (the three unknowns above). A broken-USB-port
+device can't be a target — initial pairing requires USB.
+
+**Why it was deferred.** USB wins on every axis and porter.md customers have the
+cable. Now partly de-risked; pull if a segment shifts (untethered shoot floor).
 
 **UI signal already wired (2026-05-14).** `ConnectionPillView` now detects "device discovered but no iPhone/iPad on the USB bus" (via `USBSpeed.swift::anyAppleMobileDeviceOnUSB`) and shows `CONNECTED over Wi-Fi` + an amber warning hint that explains Wi-Fi sync isn't supported yet and the user needs a cable. When we ship F1 the hint just disappears — no other UI plumbing needed.
 
