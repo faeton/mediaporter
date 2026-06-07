@@ -743,14 +743,20 @@ public class PipelineController {
     ) async -> Data? {
         let badge = MetadataLookup.episodeBadgeFormat(season: season, episode: episode)
         if let stillURL, let data = await TMDbClient.downloadPoster(urlString: stillURL) {
+            DebugLog.notice("poster.episode", "S\(season)E\(episode): TMDb still (\(data.count)B)")
             return EpisodeStillStamper.stamp(data, label: badge)
         }
         if let sourceURL, let duration,
            let extracted = await StillExtractor.extract(from: sourceURL, duration: duration) {
+            DebugLog.notice("poster.episode", "S\(season)E\(episode): ffmpeg-extract fallback (\(extracted.count)B) — no TMDb still")
             return EpisodeStillStamper.stamp(extracted, label: badge)
         }
         let label = String(format: "%@ S%02dE%02d", showName, season, episode)
-        guard let synthetic = PosterGenerator.generateLandscape(title: label) else { return nil }
+        guard let synthetic = PosterGenerator.generateLandscape(title: label) else {
+            DebugLog.error("poster.episode", "S\(season)E\(episode): all fallbacks failed — no poster")
+            return nil
+        }
+        DebugLog.notice("poster.episode", "S\(season)E\(episode): synthetic landscape fallback (\(synthetic.count)B) — no TMDb still, no extractable frame")
         return EpisodeStillStamper.stamp(synthetic, label: badge)
     }
 

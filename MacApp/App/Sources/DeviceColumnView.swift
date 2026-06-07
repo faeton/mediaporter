@@ -233,16 +233,36 @@ struct DeviceColumnView: View {
             return "Keeping originals — you AirPlay/cast to a 4K display, so the \(deviceLabel)'s panel size doesn't constrain quality. Heavy files just need the disk space."
         }
 
+        // Measured average source bitrate across the files about to sync — the
+        // concrete "why downscale" signal (#12). Only appended when ffprobe
+        // gave us numbers and a downscale is actually on the table.
+        let bitrateHint: String = {
+            guard info.suggestedResolution != .original, let avg = incomingAvgBitrate() else { return "" }
+            return " These files run ~\(fmtBitrate(avg)) at full resolution."
+        }()
+
         let incomingBytes = jobs
             .filter { ![.synced, .failed].contains($0.status) }
             .reduce(0) { $0 + Int64($1.fileSizeMB) * 1024 * 1024 }
         if let free = pipeline.deviceFreeBytes,
            incomingBytes > 0,
            incomingBytes > free / 2 {
-            return "Library is tight against free space (\(ByteFormat.short(free)) left). Downscaling to \(recLabel) for this \(deviceLabel)'s screen frees a lot of room with no visible loss."
+            return "Library is tight against free space (\(ByteFormat.short(free)) left). Downscaling to \(recLabel) for this \(deviceLabel)'s screen frees a lot of room with no visible loss.\(bitrateHint)"
         }
 
-        return "\(recLabel) is the sweet spot for this \(deviceLabel)'s display. AirPlaying to a 4K TV instead? Flip the toggle in Settings → Appearance to keep originals."
+        return "\(recLabel) is the sweet spot for this \(deviceLabel)'s display.\(bitrateHint) AirPlaying to a 4K TV instead? Flip the toggle in Settings → Appearance to keep originals."
+    }
+
+    /// Average overall source bitrate (bits/sec) of the not-yet-synced jobs,
+    /// or nil when none have a probed bitrate. Mirrors the per-row `fmtBitrate`
+    /// figure so banner and row agree.
+    private func incomingAvgBitrate() -> Int? {
+        let rates = jobs
+            .filter { ![.synced, .failed].contains($0.status) }
+            .compactMap { $0.mediaInfo?.bitRate }
+            .filter { $0 > 0 }
+        guard !rates.isEmpty else { return nil }
+        return rates.reduce(0, +) / rates.count
     }
 
     private func recommendedLabel(_ r: ResolutionLimit) -> String {

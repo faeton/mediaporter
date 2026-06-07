@@ -18,16 +18,19 @@ this doc still listed as open: **P0 #1** (episode-still poster order), **#12**
 recommendation rework (bitrate sub-item remains), **#13** zombie sweep, **A1**,
 **A3** (mitigated), **A4**, **R2**, **R3**.
 
-**Shipped since (2026-06-07):** ✅ **A2** (1810ae0 — checkOrThrow aborts fast on
-drainer-observed connection death; rc proven meaningless), ✅ **A6/A7** (b2f131f),
+**Shipped since (2026-06-07):** ✅ **A2** (1810ae0), ✅ **A6/A7** (b2f131f),
 ✅ **F1 Wi-Fi sync** (a18dcf9), ✅ **multi-device USB/Wi-Fi picker** (36df5c6),
-✅ **A5/A8/A9 + F1 follow-ups** (f7c5c28).
+✅ **A5/A8/A9 + F1 follow-ups** (f7c5c28), ✅ **review follow-ups** (d1fd593).
 
-**What's actually left** (none block a release; all are polish/hardening):
-- **#12 bitrate hint, R1b DMG background, P0 #4 device-verify of the no-TMDb /
-  no-API-key poster fallbacks** — cosmetic / verification tail.
+**Tail closed (2026-06-08, → 0.8.0):** ✅ **#12 bitrate hint** (per-row source
+bitrate already wired; added the aggregate "~N Mbps at full resolution" hint to
+the recommendation banner), ✅ **P0 #4 poster fallback** (verified end-to-end on
+akm16pro: a no-TMDb-match episode took the synthetic-landscape branch, 37 KB
+poster generated + stamped + uploaded on a successful sync; branch logging
+added), ✅ **R1b DMG background** (superseded — plain no-background install
+window is the shipped design; orphaned placeholder PNG removed).
 
-See "Next plan" framing in the audit triage order (updated 2026-06-07).
+**Nothing tracked open below P-tier.** Next: cut **0.8.0** (Wi-Fi sync headline).
 
 ---
 
@@ -58,9 +61,14 @@ See "Next plan" framing in the audit triage order (updated 2026-06-07).
 - `swift build` clean.
 - Sync 3 AoT episodes → distinct 16:9 stills in TV.app. **2026-05-10: confirmed
   per-episode tiles are now distinct.** Side-effect surfaced as P0.5 #6 below.
-- Still pending: episode-without-TMDb-still and no-API-key fallbacks not yet
-  observed end-to-end on device. Code path exists; verify next time a JJK-style
-  release is loaded (TMDb anime stills are sparse — a natural test case).
+- ✅ **VERIFIED 2026-06-08.** Synced the synthetic `Mediaporter.Alpha.S01E01`
+  fixture (no TMDb match → no still, and its test-pattern frames aren't
+  extractable) to akm16pro: the poster resolver took the
+  **synthetic-landscape** branch, generated a 37 KB 1280×720 poster, stamped the
+  S01E01 badge, and uploaded it on a clean sync. Branch logging added to
+  `resolveEpisodePoster` (`poster.episode` tag) so the chosen fallback is now
+  observable in `/tmp/mediaporter-debug.log`. Covers both the
+  episode-without-TMDb-still and no-API-key cases (same code path).
 
 ### 5. Transcoder `waitUntilExit` hang + Stop escalation *(shipped 2026-05-10)*
 - Wedge observed live: ffmpeg exited cleanly but Foundation's
@@ -326,8 +334,12 @@ Matching rules (apply to both bulk-apply and external):
   4K display" flips the banner to keep-originals copy
   (`DeviceColumnView.swift::recommendationCopy`, `pipeline.airplayTo4K`).
   Storage-aware banner shipped in 0.6.0.
-- **Remaining**: surface bitrate alongside resolution — a bitrate hint in the
-  banner and source bitrate in the per-file row (`FileRowView`). Not yet wired.
+- ✅ **DONE 2026-06-08.** Source bitrate shows in the per-file row
+  (`FileRowView` — `fmtBitrate(job.mediaInfo.bitRate)`, was already wired), and
+  the recommendation banner (`DeviceColumnView.recommendationCopy`) now appends
+  "These files run ~N Mbps at full resolution" — the measured average across
+  incoming jobs — when a downscale is on the table. The concrete "why downscale"
+  signal.
 
 ### 13. Zombie ffmpeg sweep at launch *(shipped 0.6.0)*
 - `ZombieSweep.sweep()` runs at launch (`App.swift:138`,
@@ -498,18 +510,21 @@ grep-the-string because xmllint choked on Apple's plist namespace.
 `.DS_Store` flag honors it, AXResizable is r/o through System Events.
 Accepted: every shipping Mac DMG installer has the same property.
 
-### R1b. Final DMG background design — **Low**
+### R1b. Final DMG background design — ✅ RESOLVED (superseded) 2026-06-08
 
-**Today.** `MacApp/Resources/dmg-background.png` is a placeholder design
-(committed at cb1ad3b). Icon slot painted positions required manual y/x
-nudge in the AppleScript layout to align the real Finder icons inside the
-painted dashed slots. If the design is redrawn the positions will drift.
+**Outcome: no background.** The painted-background approach was abandoned —
+`build-dmg.sh` ships an intentionally **plain** install window (icon view,
+96-pt icons, `.app` at `{136,185}` + `Applications` at `{396,185}`, no
+background image; see its header comment "No background — install window is
+intentionally plain"). The AppleScript is the sole source of truth for icon
+positions, which sidesteps the slot-alignment drift that made the placeholder
+fragile. So there is nothing to redraw.
 
-**Want.** A final background where the dashed slot centers sit at exactly
-`{136, 185}` and `{396, 185}` in logical points (so the AppleScript is the
-source of truth and no per-release tuning is needed). PNG @2x with 144 DPI
-metadata; native canvas 1080×760. Keep the text panel above the slots so
-icon labels render on the well plates, footer at the bottom edge.
+The orphaned placeholder `MacApp/Resources/dmg-background.png` (committed at
+cb1ad3b, 1 MB, referenced by no script/Swift/plist after the plain-window
+switch) was removed as cleanup. Recoverable from cb1ad3b if a branded
+background is ever wanted again. *(R1's shipped-notes above still mention the
+old background= arg; that arg is gone from the current build-dmg.sh.)*
 
 ### R2. `.app` filename inside the DMG should be `MediaPorter.app` regardless of variant — **Done 2026-05-14 (0.6.2)**
 
