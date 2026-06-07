@@ -2,6 +2,38 @@
 
 The Swift MacApp under `MacApp/` is the shipping target. Versions starting with 0.4.0 track the MacApp; the 0.1.x – 0.3.x entries describe the now-frozen Python CLI under `python-reference/`.
 
+## 0.8.0 — 2026-06-08
+
+Minor release. **Sync over Wi-Fi** — no cable required — plus a multi-device picker that shows each attached iPhone/iPad's transport, a batch of pipeline reliability and performance hardening (fast abort on mid-sync connection loss, smarter disk preflight, probe/analyze no longer starves the async pool), and UI polish (bitrate hints, verified poster fallbacks). Every change was verified on-device (akm16pro) over both USB and Wi-Fi.
+
+### New
+
+- **Wi-Fi sync (USB-less)** — the full transcode → upload → register flow now works with the device on Wi-Fi, no cable. The blocker was a single API choice: the legacy `AMDeviceStartService` skips the SSL service handshake that network lockdown sessions require (`0xE8000012` over Wi-Fi). `AFCClient.init` now uses a three-step secure path — `AMDeviceSecureStartService` for the SSL handshake, `AFCConnectionOpen` on the service connection's socket fd (not the ref — that yields AFC error 11), and `AFCConnectionSetSecureContext` to route AFC I/O through the SSL context (without it Wi-Fi I/O stalls 60 s; over USB the context is nil so one code path serves both transports). Verified end-to-end over Wi-Fi via `mediaporterctl smoke-test`. Note: a sleeping device stops advertising `_apple-mobdev2._tcp` and drops off Wi-Fi within ~2 min.
+- **Multi-device USB/Wi-Fi picker** — when more than one iPhone/iPad is attached, the device column shows a picker; each device carries a real per-transport badge (USB / Wi-Fi) from `AMDeviceGetInterfaceType`, replacing the old global USB heuristic. `DeviceMonitor` tracks transports per UDID (prefers USB, promotes Wi-Fi if USB drops). The incorrect "Wi-Fi not supported" hint is gone. `mediaporterctl devices` lists every attached device with its transport.
+- **Bitrate hints (#12)** — the per-file row shows the measured source bitrate, and the recommendation banner now adds "These files run ~N Mbps at full resolution" when a downscale is on the table — the concrete "why downscale" signal.
+
+### Fixed
+
+- **Mid-sync connection loss now aborts fast (A2)** — the ATC send return code was proven meaningless as a liveness signal (must-ack sends return wild nonzero codes on perfectly successful syncs). The session now keys on the drainer thread observing transport death and aborts the next must-ack send (`checkOrThrow`) instead of uploading into a dead connection and stalling 120 s.
+- **Disk preflight no longer over-rejects, and accounts for the real footprint (A8)** — copy-only files (which stream straight from the source) are excluded from the Mac-temp requirement; transcode/mux outputs are summed (they all coexist until end-of-run) with a separate reserve for the transient mux intermediates; the device side is sized on predicted *output* bytes (downscale/HEVC/AC3→AAC shrink them), backstopped by the existing per-file mid-sync poll. Also fixes a false "Not enough free space on Mac" when `volumeAvailableCapacityForImportantUsage` flakily reported 0 on a near-full volume.
+- **Analyze no longer starves other async work (A5)** — `probeFile` ran its blocking ffprobe subprocess on a Swift cooperative-pool worker; four concurrent probes pinned the whole pool on a quad-core. It now runs off-pool, and a cancellation handler terminates the ffprobe child when analyze is cancelled.
+
+### Performance
+
+- **VideoToolbox capability is probed once, not per file (A6)** — the hardware-encoder check is cached for the app run instead of spawning a subprocess on every transcode.
+- **Debug-only output probe gated (A7)** — the post-transcode `ffprobe` that fed the debug log is compiled out of release builds.
+- **Cluster-extras list cached (A9)** — the show-extras sections no longer re-sort (locale-aware compare) on every 0.25 s progress tick; they recompute only when their content actually changes.
+
+### Diagnostics
+
+- **`bench-upload` reports the transport** — so a Wi-Fi-vs-USB throughput comparison self-labels. Measured on akm16pro: ~56–63 MB/s over Wi-Fi (1 MB chunk), above the older ~30 MB/s USB-2 baseline.
+- **Poster-fallback branch logging** — `resolveEpisodePoster` logs which artwork branch fired (TMDb still / ffmpeg-extract / synthetic landscape). Verified end-to-end on device that a no-TMDb-match episode falls through to a generated synthetic landscape poster.
+- **Faster Wi-Fi discovery** — `discoverDevice` waits longer for a Bonjour re-announce (15 s vs 5 s; USB still resolves in the first 100 ms) and returns the always-on monitor's device the moment it appears.
+
+### Packaging
+
+- **Plain DMG install window** — the install DMG ships an intentionally plain, background-free Finder window with the AppleScript as the single source of truth for icon positions; the unused placeholder background asset was removed.
+
 ## 0.7.0 — 2026-05-18
 
 Minor release. TV-episode metadata finally renders correctly (series name, season number, episode order), pipeline reliability gets stat-verify + graceful cancel + adaptive AFC chunk on big files, and a new `mediaporterctl` CLI plus end-to-end smoke test add the first release-readiness gate.
