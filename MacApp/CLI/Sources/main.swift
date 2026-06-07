@@ -147,18 +147,44 @@ default:
 // MARK: - devices
 
 func runDevices() {
-    do {
-        let device = try discoverDevice()
-        print("UDID:           \(device.udid)")
-        print("Name:           \(device.deviceName)")
-        print("Model:          \(device.displayName)")
-        print("Class:          \(device.deviceClass)")
-        print("Screen:         \(device.screenDescription)")
-        print("Suggested:      \(device.suggestedResolution.rawValue)")
-    } catch {
-        FileHandle.standardError.write(Data("no device: \(error)\n".utf8))
-        exit(1)
+    // Start the full monitor so we enumerate ALL attached devices (USB + Wi-Fi)
+    // and exercise the per-UDID dedup (a device on both transports shows once,
+    // preferred USB). Brief wait so USB attaches (instant) and any Wi-Fi
+    // announcement land.
+    DeviceMonitor.shared.start()
+    Thread.sleep(forTimeInterval: 2.0)
+    let devices = DeviceMonitor.shared.allDevices
+
+    guard !devices.isEmpty else {
+        // Fall back to the one-shot path (covers the just-attached single device
+        // that hasn't hit the monitor yet).
+        do {
+            let device = try discoverDevice()
+            printDevice(device, index: nil)
+        } catch {
+            FileHandle.standardError.write(Data("no device: \(error)\n".utf8))
+            exit(1)
+        }
+        return
     }
+
+    print("\(devices.count) device\(devices.count == 1 ? "" : "s") attached:\n")
+    for (i, d) in devices.enumerated() {
+        printDevice(d, index: devices.count > 1 ? i + 1 : nil)
+        if i < devices.count - 1 { print("") }
+    }
+}
+
+private func printDevice(_ device: DeviceInfo, index: Int?) {
+    let prefix = index.map { "[\($0)] " } ?? ""
+    let transport = device.interface.label.isEmpty ? "unknown" : device.interface.label
+    print("\(prefix)UDID:       \(device.udid)")
+    print("    Name:       \(device.deviceName)")
+    print("    Model:      \(device.displayName)")
+    print("    Class:      \(device.deviceClass)")
+    print("    Transport:  \(transport)")
+    print("    Screen:     \(device.screenDescription)")
+    print("    Suggested:  \(device.suggestedResolution.rawValue)")
 }
 
 // MARK: - analyze

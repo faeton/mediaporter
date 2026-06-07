@@ -58,25 +58,6 @@ public func queryUSBNegotiatedSpeedMbps(serial: String? = nil) -> Int? {
     return mobileCount == 1 ? firstMobileSpeed : nil
 }
 
-/// Is there an iPhone/iPad on the USB bus? When `false` while our
-/// MobileDevice-side discovery still has the device, it's connected over
-/// the Wi-Fi tunnel (RemoteXPC). The connection pill uses this to choose
-/// between "over USB-C X.X" and "over Wi-Fi" suffixes.
-public func anyAppleMobileDeviceOnUSB() -> Bool {
-    guard let matching = IOServiceMatching("IOUSBHostDevice") else { return false }
-    var iter: io_iterator_t = 0
-    guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iter) == KERN_SUCCESS else {
-        return false
-    }
-    defer { IOObjectRelease(iter) }
-
-    while case let entry = IOIteratorNext(iter), entry != 0 {
-        defer { IOObjectRelease(entry) }
-        guard let vid = readUInt(entry, "idVendor"), vid == 0x05AC else { continue }
-        if isAppleMobileDevice(entry) { return true }
-    }
-    return false
-}
 
 /// Heuristic: is this Apple USB entry an iPhone or iPad (not a keyboard,
 /// mouse, AirPods case, or Studio Display)? Reads `kUSBProductString` /

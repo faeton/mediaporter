@@ -3,8 +3,33 @@
 import Foundation
 
 public struct DeviceInfo {
+    /// Transport the device is reachable over. A device can be present on both
+    /// at once (USB + Wi-Fi); the monitor publishes the preferred one (USB).
+    public enum Interface: String {
+        case usb, wifi, unknown
+        /// Short user-facing label for the picker / connection pill.
+        public var label: String {
+            switch self {
+            case .usb:     return "USB"
+            case .wifi:    return "Wi-Fi"
+            case .unknown: return ""
+            }
+        }
+        /// SF Symbol name for the transport badge.
+        public var symbol: String {
+            switch self {
+            case .usb:     return "cable.connector"
+            case .wifi:    return "wifi"
+            case .unknown: return "questionmark"
+            }
+        }
+    }
+
     public let udid: String
-    public let handle: UnsafeRawPointer
+    /// Handle for the *preferred* transport. Mutable because the monitor
+    /// promotes Wi-Fi → published handle if USB detaches while Wi-Fi stays up.
+    public var handle: UnsafeRawPointer
+    public var interface: Interface = .unknown
     public var deviceName: String = "iOS Device"
     public var productType: String = ""      // e.g. "iPad13,4", "iPhone15,2"
     public var productVersion: String = ""   // e.g. "17.4.1"
@@ -186,8 +211,19 @@ private func readDeviceValue(_ device: UnsafeRawPointer, key: String) -> String?
 }
 
 /// Query device properties and build a full DeviceInfo.
+/// Classify a bare attached handle's transport. Cheap accessor — no
+/// connect/session needed, safe to call inside the notification callback.
+func interfaceOf(_ handle: UnsafeRawPointer) -> DeviceInfo.Interface {
+    switch MD.getInterfaceType(handle) {
+    case 1:  return .usb
+    case 2:  return .wifi
+    default: return .unknown
+    }
+}
+
 private func queryDeviceInfo(device: UnsafeRawPointer, udid: String) -> DeviceInfo {
     var info = DeviceInfo(udid: udid, handle: device)
+    info.interface = interfaceOf(device)
 
     info.deviceName = readDeviceValue(device, key: "DeviceName") ?? "iOS Device"
     info.productType = readDeviceValue(device, key: "ProductType") ?? ""
@@ -282,7 +318,14 @@ private func screenSpecsForProduct(_ productType: String, deviceClass: String) -
 public class DeviceMonitor {
     public static let shared = DeviceMonitor()
 
+    /// Published canonical view: one entry per device, handle = preferred
+    /// transport. Read by allDevices/currentDevice/device(udid:).
     private var devicesByUDID: [String: DeviceInfo] = [:]
+    /// Live transports per device (retained handles). A device on both USB and
+    /// Wi-Fi has two entries; the canonical above is recomputed (USB-preferred)
+    /// on every attach/detach so an asymmetric detach falls back instead of
+    /// vanishing. Only when this empties does the device leave the picker.
+    private var handlesByUDID: [String: [DeviceInfo.Interface: UnsafeRawPointer]] = [:]
     private let devicesLock = NSLock()
     private var started = false
     private let lock = NSLock()
@@ -327,13 +370,18 @@ public class DeviceMonitor {
         let handle = existing.handle
         devicesLock.unlock()
 
+        // Blocking lockdown reads happen WITHOUT the lock held (consultant
+        // pitfall: AMDeviceCopyValue can stall/deadlock under devicesLock).
         let refreshed = queryDeviceInfo(device: handle, udid: udid)
         guard !refreshed.deviceClass.isEmpty else { return }
 
         devicesLock.lock()
-        devicesByUDID[udid] = refreshed
+        // Only commit if the transport is still live (a detach may have raced).
+        if handlesByUDID[udid] != nil {
+            recomputeLocked(udid, metadata: refreshed)
+        }
         devicesLock.unlock()
-        DebugLog.notice("device.monitor", "lockdown values recovered for \(udid) → \(refreshed.deviceClass)")
+        DebugLog.notice("device.monitor", "lockdown values recovered for \(udid) → \(refreshed.deviceClass) (\(refreshed.interface.rawValue))")
     }
 
     /// Preferred single device: first iPad, else first iPhone, else anything.
@@ -345,16 +393,78 @@ public class DeviceMonitor {
         return devicesByUDID[udid]
     }
 
-    fileprivate func add(_ info: DeviceInfo) {
-        devicesLock.lock()
-        devicesByUDID[info.udid] = info
-        devicesLock.unlock()
+    /// Rebuild the published DeviceInfo for `udid` from its live transports,
+    /// preferring USB. Caller must hold devicesLock. `metadata` supplies the
+    /// descriptive fields (name/model/screen); the handle + interface are
+    /// overlaid from the winning transport.
+    private func recomputeLocked(_ udid: String, metadata: DeviceInfo) {
+        guard let handles = handlesByUDID[udid], !handles.isEmpty else {
+            devicesByUDID.removeValue(forKey: udid)
+            return
+        }
+        let best: DeviceInfo.Interface =
+            handles[.usb] != nil ? .usb :
+            (handles[.wifi] != nil ? .wifi : (handles.keys.first ?? .unknown))
+        guard let bestHandle = handles[best] else { return }
+        var canon = metadata
+        canon.handle = bestHandle
+        canon.interface = best
+        devicesByUDID[udid] = canon
     }
 
-    fileprivate func remove(udid: String) {
-        devicesLock.lock()
-        devicesByUDID.removeValue(forKey: udid)
-        devicesLock.unlock()
+    /// Record a transport for a device (retained `handle`). Replaces any stale
+    /// handle for the same transport, then recomputes the preferred view.
+    fileprivate func attach(_ info: DeviceInfo, handle: UnsafeRawPointer, interface: DeviceInfo.Interface) {
+        devicesLock.lock(); defer { devicesLock.unlock() }
+        var handles = handlesByUDID[info.udid] ?? [:]
+        if let prior = handles[interface] {
+            if prior == handle {
+                // Same pointer re-announced (re-trust / interface flap): the
+                // caller already took a fresh retain — drop it so the slot keeps
+                // exactly one. Metadata may still have improved, so fall through.
+                MD.release(handle)
+            } else {
+                MD.release(prior)        // replace a stale handle for this transport
+                handles[interface] = handle
+            }
+        } else {
+            handles[interface] = handle
+        }
+        handlesByUDID[info.udid] = handles
+        // Use the fresh info as metadata when it carries readable lockdown
+        // values (or when this is the first sighting); otherwise keep the
+        // last-good metadata so a pending re-attach doesn't blank the row.
+        let base = (!info.deviceClass.isEmpty || devicesByUDID[info.udid] == nil)
+            ? info : devicesByUDID[info.udid]!
+        recomputeLocked(info.udid, metadata: base)
+    }
+
+    /// Drop one transport for a device. Falls back to the remaining transport
+    /// if any; only removes the device entirely when its last transport leaves.
+    fileprivate func detach(udid: String, interface: DeviceInfo.Interface, handle: UnsafeRawPointer) {
+        devicesLock.lock(); defer { devicesLock.unlock() }
+        guard var handles = handlesByUDID[udid] else { return }
+        // Identify the leaving transport, safest signal first. Pointer match is
+        // authoritative (releasing a handle we can't tie to this detach would be
+        // a use-after-free). Then trust the classified interface. Only when a
+        // single transport is tracked do we assume that one left — by then it's
+        // unambiguous which handle to drop.
+        var drop: DeviceInfo.Interface? = nil
+        for (k, v) in handles where v == handle { drop = k; break }
+        if drop == nil, handles[interface] != nil { drop = interface }
+        if drop == nil, handles.count == 1 { drop = handles.keys.first }
+        if let d = drop, let h = handles[d] {
+            MD.release(h)
+            handles[d] = nil
+        }
+        if handles.isEmpty {
+            handlesByUDID.removeValue(forKey: udid)
+            devicesByUDID.removeValue(forKey: udid)
+        } else {
+            handlesByUDID[udid] = handles
+            let base = devicesByUDID[udid] ?? DeviceInfo(udid: udid, handle: handles.values.first!)
+            recomputeLocked(udid, metadata: base)
+        }
     }
 
     private static func priority(_ d: DeviceInfo) -> Int {
@@ -396,21 +506,25 @@ private let _monitorCallback: MD.NotificationCallback = { infoPtr, _ in
         _ = MD.retain(dev)
         if let cfUDID = MD.copyID(dev) {
             let udid = cfUDID as String
+            let iface = interfaceOf(dev)
             let deviceInfo = queryDeviceInfo(device: dev, udid: udid)
             if deviceInfo.deviceClass.isEmpty {
                 // Pairing/trust not yet valid — typically a Wi-Fi-discovered device
                 // with stale pairing, or a USB device pre-trust. Tracked but hidden;
                 // polling loop will retry via refreshIfPending().
                 DebugLog.notice("device.monitor",
-                                "attach with unreadable lockdown values for \(udid); hiding until trust completes")
+                                "attach with unreadable lockdown values for \(udid) (\(iface.rawValue)); hiding until trust completes")
             }
-            DeviceMonitor.shared.add(deviceInfo)
+            DeviceMonitor.shared.attach(deviceInfo, handle: dev, interface: iface)
+        } else {
+            MD.release(dev)   // couldn't identify it — balance the retain
         }
     } else if msgType == 2 {
-        // We still get a valid device pointer on disconnect — use its UDID to
-        // remove only that specific device, leaving other attached devices alone.
+        // We still get a valid device pointer on disconnect. Classify which
+        // transport left so a dual-transport device falls back instead of
+        // vanishing, and remove only that specific endpoint.
         if let cfUDID = MD.copyID(dev) {
-            DeviceMonitor.shared.remove(udid: cfUDID as String)
+            DeviceMonitor.shared.detach(udid: cfUDID as String, interface: interfaceOf(dev), handle: dev)
         }
     }
 }
@@ -453,6 +567,6 @@ public func discoverDevice(timeout: TimeInterval = 5.0) throws -> DeviceInfo {
     }
 
     let info = queryDeviceInfo(device: device, udid: udid)
-    DeviceMonitor.shared.add(info)
+    DeviceMonitor.shared.attach(info, handle: device, interface: interfaceOf(device))
     return info
 }

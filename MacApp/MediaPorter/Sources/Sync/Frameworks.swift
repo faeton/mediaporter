@@ -83,8 +83,13 @@ enum MD {
     typealias AMDeviceCopyDeviceIdentifierFn = @convention(c) (UnsafeRawPointer) -> CFString?
     typealias AMDeviceCopyValueFn = @convention(c) (UnsafeRawPointer, CFString?, CFString) -> CFTypeRef?
     typealias AMDeviceRetainFn = @convention(c) (UnsafeRawPointer) -> UnsafeRawPointer?
+    typealias AMDeviceReleaseFn = @convention(c) (UnsafeRawPointer) -> Void
     typealias AMDeviceConnectFn = @convention(c) (UnsafeRawPointer) -> Int32
     typealias AMDeviceStartSessionFn = @convention(c) (UnsafeRawPointer) -> Int32
+    /// AMDeviceGetInterfaceType(device) → connection transport: 1 = direct/USB,
+    /// 2 = indirect/Wi-Fi (network), 3 = companion-proxy. Cheap accessor on a
+    /// bare attached handle (no connect/session needed).
+    typealias AMDeviceGetInterfaceTypeFn = @convention(c) (UnsafeRawPointer) -> Int32
     typealias AMDeviceStartServiceFn = @convention(c) (
         UnsafeRawPointer, CFString, UnsafeMutablePointer<UnsafeMutableRawPointer?>, UnsafeRawPointer?
     ) -> Int32
@@ -143,6 +148,8 @@ enum MD {
     static var copyID: AMDeviceCopyDeviceIdentifierFn { lookup(loadMobileDevice(), "AMDeviceCopyDeviceIdentifier") }
     static var copyValue: AMDeviceCopyValueFn { lookup(loadMobileDevice(), "AMDeviceCopyValue") }
     static var retain: AMDeviceRetainFn { lookup(loadMobileDevice(), "AMDeviceRetain") }
+    static var release: AMDeviceReleaseFn { lookup(loadMobileDevice(), "AMDeviceRelease") }
+    static var getInterfaceType: AMDeviceGetInterfaceTypeFn { lookup(loadMobileDevice(), "AMDeviceGetInterfaceType") }
     static var connect: AMDeviceConnectFn { lookup(loadMobileDevice(), "AMDeviceConnect") }
     static var startSession: AMDeviceStartSessionFn { lookup(loadMobileDevice(), "AMDeviceStartSession") }
     static var startService: AMDeviceStartServiceFn { lookup(loadMobileDevice(), "AMDeviceStartService") }
