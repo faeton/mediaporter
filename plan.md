@@ -20,16 +20,10 @@ recommendation rework (bitrate sub-item remains), **#13** zombie sweep, **A1**,
 
 **Shipped since (2026-06-07):** ✅ **A2** (1810ae0 — checkOrThrow aborts fast on
 drainer-observed connection death; rc proven meaningless), ✅ **A6/A7** (b2f131f),
-✅ **F1 Wi-Fi sync** (a18dcf9), ✅ **multi-device USB/Wi-Fi picker** (36df5c6).
+✅ **F1 Wi-Fi sync** (a18dcf9), ✅ **multi-device USB/Wi-Fi picker** (36df5c6),
+✅ **A5/A8/A9 + F1 follow-ups** (f7c5c28).
 
 **What's actually left** (none block a release; all are polish/hardening):
-- **A5 / A8 — Medium.** `probeFile` blocks a cooperative-pool thread; disk
-  preflight is still over-conservative (`1.1 × source` instead of predicted
-  output — the `freeBytes` flaky-zero bug was fixed in a18dcf9, but the
-  required-size estimate itself is unchanged).
-- **A9 — Low.** `clusterExtrasOrdered` recomputes every progress tick.
-- **F1 follow-ups — Low.** Wi-Fi discovery timeout (`discoverDevice` 5s misses
-  slow Bonjour re-announces); throughput bench over Wi-Fi vs USB.
 - **#12 bitrate hint, R1b DMG background, P0 #4 device-verify of the no-TMDb /
   no-API-key poster fallbacks** — cosmetic / verification tail.
 
@@ -416,7 +410,14 @@ Code-review pass against the shipping 0.6.0 codebase. Each item lists severity, 
   remainder (`ExternalMux.swift:212–236`). Same pattern as `Transcoder`'s main
   path. CHANGELOG 0.6.2 "External-mux failure tail".
 
-### A5. probeFile blocks a cooperative-pool thread (not MainActor) — **Medium** *(open — verified 2026-06-07)*
+### A5. probeFile blocks a cooperative-pool thread (not MainActor) — ✅ RESOLVED 2026-06-07 (f7c5c28)
+Fixed via option (a): the blocking `Process.run`/read/`waitUntilExit` runs in
+`Task.detached(.utility)`, off the cooperative pool. Added a lock-guarded
+`ProbeProcessBox` + `withTaskCancellationHandler` so a cancelled analyze
+terminates the ffprobe child (the CLAUDE.md #12 contract), which the old inline
+form never did either. *(original finding below)*
+
+### A5 (orig). probeFile blocks a cooperative-pool thread (not MainActor) — **Medium** *(open — verified 2026-06-07)*
 - `Sources/Analysis/Probe.swift:126`. Still synchronous `proc.run()` + `readDataToEndOfFile()` (`:145`) + `waitUntilExit()` (`:146`). Called from `PipelineController.analyzeOne` (`PipelineController.swift:989`) which is `@MainActor`-isolated; called concurrently up to 4× by the TaskGroup at 956.
 - Important correction to the original finding's framing: `probeFile` is a *nonisolated* `async` function. Swift 5.7+ hops nonisolated async calls off the caller's actor onto the generic cooperative executor. So UI does **not** freeze. What suffers: 4 concurrent probes each pin a cooperative-pool worker (pool size ≈ `activeProcessorCount`). On a quad-core MBA that's all of them; other concurrency (TMDb fetches, OpenSubtitles, file scanning) gets queued behind them.
 - Consequence: parallel analyze is parallel, but during the probe window other async work in the app stalls. Not catastrophic — the analyze wave already coalesces network work via `resolveCluster` caching.
@@ -431,13 +432,34 @@ Code-review pass against the shipping 0.6.0 codebase. Each item lists severity, 
 - `Sources/Transcode/Transcoder.swift:574` still calls `probeOutputForDebug(outputPath)` unconditionally after every successful transcode (function at `:579`). Not gated behind `Tweaks.debug`.
 - Fix: gate behind `Tweaks.debug` (or remove). Cheap, but visible per-file overhead and noise in the debug log.
 
-### A8. Disk preflight is over-conservative for the streaming pipeline — **Medium (Mac side); spec-debate (device side)** *(open — verified 2026-06-07)*
+### A8. Disk preflight is over-conservative for the streaming pipeline — ✅ RESOLVED 2026-06-07 (f7c5c28)
+Split the preflight by surface. **Key correction to the original framing:** the
+Mac does NOT keep ~1 output in flight — `cleanupTempOutputs` only deletes temp
+`.m4v` files once *every* job is `.synced` (no per-file delete in the upload
+loop, transcode lookahead has no upload backpressure), so all outputs coexist
+for the whole run. So the Mac figure is a *sum*, not largest-single:
+`Σ(source × 1.1)` over transcode/remux jobs + mux-sidecar bytes + one
+largest-source reserve, with copy-only jobs excluded (they stream from the
+source, zero temp — the real over-rejection fix). Device = `Σ(predicted output)
+× 1.05` over all jobs (downscale/HEVC/AC3→AAC shrink it; backstopped by the
+upload loop's per-file device poll). codex+grok caught the copy-only over-count
+and the mux-scratch gap; both folded in. *(original finding below)*
+
+### A8 (orig). Disk preflight is over-conservative for the streaming pipeline — **Medium (Mac side); spec-debate (device side)** *(open — verified 2026-06-07)*
 - `Sources/Pipeline/PipelineStats.swift:129` still computes `required = sourceBytesTotal × 1.1` for both Mac temp and the device; no `predictedOutputBytes` field yet.
 - Mac side is over-conservative: `runPipelined` keeps ~1 transcoded output in flight at a time. The real requirement is `largest_single_output × 1.1 + headroom`, not the sum. Big drops (50+ files) can be rejected even when the pipeline would happily stream through with ~10 GB of free temp.
 - Device side is more subtle. The actual need is sum of *output* bytes, not source — and outputs often shrink after downscale / H.265 / AC3→AAC. But output size isn't known until after `evaluateCompatibility` per file. Today's 1.1×source is the safe pessimistic bound. Better: after analyze, sum `decision.predictedOutputBytes` (add field if missing) and use that × 1.05 as the device-side check.
 - Fix: split the preflight. Mac check on the largest source file; device check on sum of predicted outputs. Don't ship until you've cross-checked predicted vs actual on a real batch — under-estimating bites mid-sync.
 
-### A9. SwiftUI recomputes `clusterExtrasOrdered` every progress tick — **Low** *(open — verified 2026-06-07)*
+### A9. SwiftUI recomputes `clusterExtrasOrdered` every progress tick — ✅ RESOLVED 2026-06-07 (f7c5c28)
+Cached in `@State`, recomputed via `.onChange(of: clusterExtrasKey, initial:
+true)`. The key is a content fingerprint (per-cluster hash of id + show name +
+sorted dub/sub ids, the array sorted then hashed) — order-independent, no
+XOR-linear collisions, and never stale on a re-cluster / show-rename, which a
+count-only key missed (user-reachable via the show picker — codex+grok flagged
+it). *(original finding below)*
+
+### A9 (orig). SwiftUI recomputes `clusterExtrasOrdered` every progress tick — **Low** *(open — verified 2026-06-07)*
 - `App/Sources/ContentView.swift:27` is still a computed property on the view, re-invoked from `body` (`:157`) on every `@Observable` tick. Not cached on the controller. SwiftUI re-invokes body on every `@Observable` change — `job.progress` ticks every 0.25 s during transcode/upload.
 - Small N: invisible. Large drop (50+ jobs, 8+ clusters): noticeable CPU during sync, plus more invalidations downstream than necessary.
 - Fix: cache the ordered list on the controller as `@Published var clusterExtrasOrdered: [(String, ReleaseExtras)]`, recompute only when `clusterExtras` / `jobs.count` / `tvShowResolutions` change. Or use `@State` on the view + `.onChange(of:)` of a stable derived key.
@@ -450,20 +472,11 @@ Code-review pass against the shipping 0.6.0 codebase. Each item lists severity, 
 - **A2** is the last open protocol-correctness gap below the P-tier abstraction layer; it surfaces as the rare "stuck SyncFinished" failure mode (**A1** now closed by the post-write size verify).
 
 ### Suggested triage order if grouped *(updated 2026-06-07)*
-Resolved since the audit: **A1** (post-write size verify), **A3** (per-task
-self-abandon), **A4** (stderr drainer). Remaining, in order:
-1. **A2** — the last open High. Convert the `FileBegin`/`FileComplete`/`FileError`
-   callsites to a `try checkOrThrow(...)` so a dead mid-session ATC connection
-   fails loudly instead of uploading into the void. Pairs naturally with the
-   A3 `dispatchedCount`/`completedCount` cosmetic rename. Test with a forced
-   mid-sync disconnect.
-2. **A6 + A7** as a cleanup batch, ~15 min total — cache `detectVideoToolbox()`
-   as a `static let`, gate `probeOutputForDebug` behind `Tweaks.debug`.
-3. **A5** — wrap the `probeFile` body in `Task.detached { … }.value`; validate
-   analyze wall time on a 20-file drop doesn't regress.
-4. **A8** after A5, since the device-side check wants `predictedOutputBytes`
-   exposed from the analyze decision.
-5. **A9** only if a large drop measurably stalls during sync.
+**All A-series items resolved.** Audit-era closes: **A1** (post-write size
+verify), **A3** (per-task self-abandon), **A4** (stderr drainer). 2026-06-07:
+**A2** (1810ae0), **A6/A7** (b2f131f), **A5/A8/A9** (f7c5c28). Nothing left in
+this tier; remaining work is the cosmetic/verification tail in the readiness
+snapshot at the top.
 
 ---
 
@@ -546,12 +559,14 @@ over the same link.
   `anyAppleMobileDeviceOnUSB` heuristic, now deleted); picker shows a transport
   badge; the wrong "Wi-Fi not supported" warning is gone; DeviceMonitor tracks
   transports per UDID (prefer USB, promote Wi-Fi on asymmetric detach).
-- **Discovery timeout for Wi-Fi.** `discoverDevice()` (`Sync/Device.swift:434`)
-  5s timeout can miss a Wi-Fi device that hasn't re-announced (USB fires the
-  AMDevice callback instantly; Wi-Fi only on a periodic Bonjour announcement).
-  Longer/retried discovery for network-attached devices.
-- **Throughput bench over Wi-Fi** vs USB baseline (~30 MB/s) — never measured on
-  large files; small files complete fine.
+- ✅ **Discovery timeout for Wi-Fi** (f7c5c28). `discoverDevice` default 5s→15s
+  (Wi-Fi Bonjour re-announce regularly exceeds 5s; USB still fires on the first
+  100ms poll so the ceiling is free), and it now returns the always-on
+  DeviceMonitor's device the moment it appears mid-poll.
+- ✅ **Throughput bench over Wi-Fi** (f7c5c28). `bench-upload` now reports the
+  transport. Measured on akm16pro / 152 MB over Wi-Fi: **~56–63 MB/s** (1 MB
+  chunk wins), *above* the old ~30 MB/s USB-2 baseline — Wi-Fi is not the
+  bottleneck on this link. Large-file sync over Wi-Fi confirmed via smoke-test.
 - **Device-sleep caveat** (doc/UX): a sleeping device stops advertising
   `_apple-mobdev2._tcp` and drops off within ~2 min (Auto-Lock Never isn't always
   enough). Worth a user-facing note for Wi-Fi sync.
