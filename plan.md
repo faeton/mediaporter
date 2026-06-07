@@ -503,36 +503,45 @@ icon labels render on the well plates, footer at the bottom edge.
 
 Speculative work. Each item has a stated unknown that needs device verification before we'd commit engineering effort. Captured here so we don't redo the research.
 
-### F1. Wi-Fi transport (USB-less sync)
+### F1. Wi-Fi transport (USB-less sync) — ✅ SHIPPED 2026-06-07 (a18dcf9)
 
-**Today.** Sync path is USB → `usbmuxd` → `MobileDevice.framework` lockdown → `com.apple.atc`. Wi-Fi-paired devices are visible on the bus, but the session opener (`Sync/Frameworks.swift::AMDeviceConnect`) implicitly assumes USB.
+Full AFC+ATC sync works over Wi-Fi (USB unplugged), verified end-to-end via
+`mediaporterctl smoke-test` (sync+verify+cleanup PASS) on akm16pro over **both**
+Wi-Fi and USB with one unified code path.
 
-**Hypothesis.** AMDevice handles Wi-Fi pairing transparently — same `AMDeviceConnect` / `AMDeviceStartService` calls should work if the device is Wi-Fi-paired. Throughput will drop (per-`FileProgress` ack RTT over Wi-Fi), but small files should complete.
+**Root cause was a single API choice.** Enumeration + lockdown already worked
+over Wi-Fi (`idevice_id -n`, `ideviceinfo -n`); the blocker was AFC. The legacy
+`AMDeviceStartService` skips the SSL service handshake that network lockdown
+sessions require → `0xE8000012` over Wi-Fi (works over USB). Proven the OS
+supports AFC-over-Wi-Fi: libimobiledevice `afcclient -n ls /` lists the AFC root
+over the same link.
 
-**Unknowns to verify.**
-- Whether `AirTrafficHost.framework` opens ATC channels the same way over Wi-Fi-only `AMDevice` handles. — *open*
-- Real upload rate vs USB baseline (~30 MB/s today). — *open*
-- Whether Ping/Pong keepalive cadence (CLAUDE.md #9) survives Wi-Fi jitter on long uploads. — *open*
+**The fix (three-step secure path in `Sync/AFC.swift::AFCClient.init`):**
+1. `AMDeviceSecureStartService("com.apple.afc")` — does the SSL handshake.
+2. `AFCConnectionOpen` takes the service connection's **socket fd**
+   (`AMDServiceConnectionGetSocket`), not the `AMDServiceConnectionRef` — passing
+   the ref → AFC error 11 (service-not-connected) on the first file op. Matches
+   `research/scripts/afc_plus_atc.py:153`.
+3. `AFCConnectionSetSecureContext(conn, AMDServiceConnectionGetSecureIOContext(svc))`
+   — routes AFC I/O through the SSL context. Without it, Wi-Fi I/O pushes
+   plaintext into the SSL stream → 60s stalls/hangs. Over USB the context is nil
+   → harmless no-op (plaintext), so one path serves both transports.
 
-**Partial validation (2026-06-07).** Took the first real steps (full writeup:
-`research/docs/IOS_TEST_HARNESS.md` → "F1"). On akm16pro: enable network sync via
-`pymobiledevice3 lockdown wifi-connections --state on` (one-time over USB), put
-the Mac + device on one subnet (a Personal Hotspot is a single subnet, so Bonjour
-works), and:
-- `idevice_id -n` lists the device + it advertises `_apple-mobdev2._tcp`.
-- `ideviceinfo -n` (network interface only) returns lockdown values → **classic
-  lockdown sessions open over Wi-Fi**. Strong signal AFC+ATC will too.
-- The attach callback (`Sync/Device.swift:388`) already has no USB-only filter, so
-  a Wi-Fi device flows straight into the device list — the "implicitly assumes
-  USB" note above is about the *session*, not enumeration.
-Remaining: a full AFC upload + ATC sync with **USB unplugged** to confirm the
-session opens/holds over Wi-Fi (the three unknowns above). A broken-USB-port
-device can't be a target — initial pairing requires USB.
-
-**Why it was deferred.** USB wins on every axis and porter.md customers have the
-cable. Now partly de-risked; pull if a segment shifts (untethered shoot floor).
-
-**UI signal already wired (2026-05-14).** `ConnectionPillView` now detects "device discovered but no iPhone/iPad on the USB bus" (via `USBSpeed.swift::anyAppleMobileDeviceOnUSB`) and shows `CONNECTED over Wi-Fi` + an amber warning hint that explains Wi-Fi sync isn't supported yet and the user needs a cable. When we ship F1 the hint just disappears — no other UI plumbing needed.
+**Remaining polish (not blocking):**
+- **UI hint removal.** `ConnectionPillView`'s amber "Wi-Fi sync isn't supported,
+  use a cable" warning (via `USBSpeed.swift::anyAppleMobileDeviceOnUSB`) is now
+  WRONG — F1 ships. Remove/repurpose the hint; `CONNECTED over Wi-Fi` can stay.
+- **Discovery timeout for Wi-Fi.** `discoverDevice()` (`Sync/Device.swift:434`)
+  5s timeout can miss a Wi-Fi device that hasn't re-announced (USB fires the
+  AMDevice callback instantly; Wi-Fi only on a periodic Bonjour announcement).
+  Longer/retried discovery for network-attached devices.
+- **Throughput bench over Wi-Fi** vs USB baseline (~30 MB/s) — never measured on
+  large files; small files complete fine.
+- **Device-sleep caveat** (doc/UX): a sleeping device stops advertising
+  `_apple-mobdev2._tcp` and drops off within ~2 min (Auto-Lock Never isn't always
+  enough). Worth a user-facing note for Wi-Fi sync.
+- One-time `wifi-connections` enable (over USB) is the precondition for a device
+  to advertise for network sync.
 
 ### F2. Apple Vision Pro support — researched 2026-05-14, conclusion: don't ship
 
