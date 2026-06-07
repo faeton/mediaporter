@@ -122,31 +122,66 @@ public enum ProbeError: LocalizedError {
 
 // MARK: - Probe
 
+/// Thread-safe holder that lets `probeFile`'s cancellation handler terminate
+/// the live ffprobe child from outside the detached task. `Process` isn't
+/// `Sendable`; all access is gated behind the lock and the handler only ever
+/// calls `terminate()`, guarded on `isRunning` (terminating an unlaunched
+/// Process raises). If cancellation fires before the child launches, the
+/// detached task's `Task.checkCancellation()` throws before `run()`.
+private final class ProbeProcessBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var proc: Process?
+    func adopt(_ p: Process) { lock.lock(); proc = p; lock.unlock() }
+    func terminate() {
+        lock.lock(); defer { lock.unlock() }
+        if let p = proc, p.isRunning { p.terminate() }
+    }
+}
+
 /// Run ffprobe on a media file and parse the output into a MediaInfo struct.
 public func probeFile(url: URL) async throws -> MediaInfo {
     guard let ffprobe = FFmpegLocator.ffprobe else { throw ProbeError.ffprobeNotFound }
 
-    let proc = Process()
-    proc.executableURL = ffprobe
-    proc.arguments = [
-        "-v", "quiet",
-        "-print_format", "json",
-        "-show_format",
-        "-show_streams",
-        url.path,
-    ]
+    // Run ffprobe off the cooperative pool. The synchronous Process.run +
+    // readDataToEndOfFile + waitUntilExit pins a cooperative-pool worker for
+    // the whole probe; analyze fans out 4 probes at once, which on a quad-core
+    // is the entire pool, starving other async work (TMDb fetches, file scan)
+    // until the probes finish. Task.detached moves the blocking I/O onto a
+    // fresh thread so the cooperative pool stays free. The process handle is
+    // held in a lock-guarded box so a cancelled analyze actually terminates the
+    // child — matching the Transcoder's "Cancel reaches the subprocess"
+    // contract — instead of leaving ffprobe running to completion. See plan.md A5.
+    let box = ProbeProcessBox()
+    let data: Data = try await withTaskCancellationHandler {
+        try await Task.detached(priority: .utility) { () throws -> Data in
+            let proc = Process()
+            proc.executableURL = ffprobe
+            proc.arguments = [
+                "-v", "quiet",
+                "-print_format", "json",
+                "-show_format",
+                "-show_streams",
+                url.path,
+            ]
 
-    let pipe = Pipe()
-    proc.standardOutput = pipe
-    proc.standardError = FileHandle.nullDevice
-    proc.standardInput = FileHandle.nullDevice
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = FileHandle.nullDevice
+            proc.standardInput = FileHandle.nullDevice
 
-    try proc.run()
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    proc.waitUntilExit()
+            box.adopt(proc)
+            try Task.checkCancellation()   // cancelled before launch → don't spawn
+            try proc.run()
+            let out = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
 
-    guard proc.terminationStatus == 0 else {
-        throw ProbeError.failed("exit code \(proc.terminationStatus)")
+            guard proc.terminationStatus == 0 else {
+                throw ProbeError.failed("exit code \(proc.terminationStatus)")
+            }
+            return out
+        }.value
+    } onCancel: {
+        box.terminate()
     }
 
     guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {

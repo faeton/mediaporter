@@ -728,6 +728,7 @@ func runBenchUpload(path: String, chunkSizes: [Int]?, passes: Int) {
 
     print("")
     print("=== AFC chunk-size benchmark ===")
+    print("Transport: \(r.transport)")
     print(String(format: "File: %@ (%.1f MB)",
         r.fileURL.lastPathComponent, Double(r.fileBytes) / 1_048_576))
     print(String(format: "Warmup: %.2fs", r.warmupSeconds))

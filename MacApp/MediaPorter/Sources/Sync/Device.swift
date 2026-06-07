@@ -545,7 +545,15 @@ private let _oneshotCallback: MD.NotificationCallback = { infoPtr, _ in
     }
 }
 
-public func discoverDevice(timeout: TimeInterval = 5.0) throws -> DeviceInfo {
+/// Default chosen for Wi-Fi, not USB. A USB device fires its AMDevice
+/// notification within ~100 ms (first poll iteration), so the ceiling is free
+/// when one is plugged in. A Wi-Fi device only surfaces on a periodic Bonjour
+/// `_apple-mobdev2._tcp` re-announcement, whose cadence regularly exceeds the
+/// old 5 s — that window made USB-less discovery flaky in the CLI / smoke-test
+/// paths (the GUI uses the always-on DeviceMonitor and isn't affected). 15 s
+/// comfortably spans a re-announce while still failing fast when nothing's
+/// there. (F1 follow-up.)
+public func discoverDevice(timeout: TimeInterval = 15.0) throws -> DeviceInfo {
     if let device = DeviceMonitor.shared.currentDevice {
         return device
     }
@@ -560,6 +568,10 @@ public func discoverDevice(timeout: TimeInterval = 5.0) throws -> DeviceInfo {
     for _ in 0..<iterations {
         CFRunLoopRunInMode(.defaultMode, 0.1, false)
         if _oneshotDevice != nil { break }
+        // The always-on monitor (if running) shares the same notification
+        // stream and may register a slow Wi-Fi announce before our one-shot
+        // callback is serviced — return it the moment it appears.
+        if let device = DeviceMonitor.shared.currentDevice { return device }
     }
 
     guard let device = _oneshotDevice, let udid = _oneshotUDID else {

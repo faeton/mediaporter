@@ -1784,13 +1784,43 @@ public class PipelineController {
         // Preflight: fail fast if there isn't ~1.1× source size free locally
         // or on the device. Keeps long ffmpeg runs from dying mid-way.
         // ------------------------------------------------------------------
-        let sourceBytes = analyzed.reduce(Int64(0)) { $0 + Int64($1.fileSize) }
         var stats = PipelineStats()
         stats.runStart = Date()
         stats.deviceName = device.displayName
 
+        // Disk preflight (A8). Two different bounds because the Mac and the
+        // device have different failure characteristics.
+        //
+        // Mac temp: only transcode/remux jobs write a temp output, and every
+        // output coexists until the run finishes (cleanupTempOutputs is
+        // end-of-run only, no per-file delete in the upload loop). Copy-only
+        // jobs stream straight from the source (outputURL = inputURL) and use
+        // ZERO temp — excluding them is the real fix for the old over-rejection
+        // of already-compatible drops. Each transcode job is bounded by
+        // source × 1.1 rather than the ±30% output estimate: outputs only
+        // shrink under downscale / HEVC / AC3→AAC, and there is NO mid-run Mac
+        // disk re-check, so we keep the safe source ceiling. One extra
+        // largest-source reserve covers the transient mux intermediate a
+        // concurrent job may hold alongside its final output.
+        let tempJobs = analyzed.filter { $0.needsWork }
+        let largestSource = tempJobs.map { Int64($0.fileSize) }.max() ?? 0
+        let macRequired = tempJobs.reduce(Int64(0)) { $0 + macTempFootprint(for: $1) } + largestSource
+
+        // Device: every file lands on the device (transcoded or copied), so
+        // size on the predicted OUTPUT total — downscaled / compressed files
+        // are smaller there than their source, which is exactly the
+        // over-rejection we want to avoid. Optimistic vs source, but the
+        // per-file mid-sync disk poll (in the upload loop) aborts cleanly if
+        // it ever under-provisions, so 1.05 scratch is enough.
+        let predictedOutputTotal = analyzed.reduce(Int64(0)) { $0 + predictedOutputBytes(for: $1) }
+        let deviceRequired = Int64(Double(predictedOutputTotal) * 1.05)
+
         do {
-            let r = try checkDiskSpace(sourceBytesTotal: sourceBytes, deviceHandle: device.handle)
+            let r = try checkDiskSpace(
+                macRequiredBytes: macRequired,
+                deviceRequiredBytes: deviceRequired,
+                deviceHandle: device.handle
+            )
             stats.macFreeBefore = r.macFree
             stats.deviceFreeBefore = r.deviceFree
             stats.deviceTotalBytes = r.deviceTotal
@@ -2475,6 +2505,40 @@ public class PipelineController {
             // Analysis itself failed (probe, TMDb, whatever). Start over.
             job.status = .pending
         }
+    }
+
+    /// Worst-case Mac temp footprint for one transcode/remux job (A8). Its
+    /// final output is bounded by source × 1.1 (outputs only shrink under
+    /// downscale / HEVC / AC3→AAC; source is the safe ceiling with no mid-run
+    /// Mac re-check). Jobs that mux external dubs/subs also write a transient
+    /// intermediate sized source + external tracks, held alongside the output —
+    /// so add those sidecar bytes too, or a large dub batch silently blows the
+    /// reserve.
+    private func macTempFootprint(for job: FileJob) -> Int64 {
+        var bytes = Int64(Double(job.fileSize) * 1.1)
+        for ref in job.externalTracksToMux {
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: ref.path.path),
+               let sz = attrs[.size] as? Int {
+                bytes += Int64(sz)
+            }
+        }
+        return bytes
+    }
+
+    /// Best estimate of a job's transcoded output size, for the disk preflight
+    /// (A8). Reuses the same `estimateOutputBytes` model the resolution picker
+    /// shows ("≈ 1.2 GB"). Falls back to the source file size when we can't
+    /// estimate (no mediaInfo, or the estimator returns 0) so a copy is never
+    /// under-counted.
+    private func predictedOutputBytes(for job: FileJob) -> Int64 {
+        guard let info = job.mediaInfo else { return Int64(job.fileSize) }
+        let est = estimateOutputBytes(
+            for: job.maxResolution,
+            mediaInfo: info,
+            selectedAudioCount: max(job.selectedAudio.count, 1),
+            videoWillReencode: job.needsReencode
+        )
+        return est > 0 ? est : Int64(job.fileSize)
     }
 
     /// Delete a job's transcoded output if it's a file we created in the tempdir.

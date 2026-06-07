@@ -49,6 +49,10 @@ public struct BenchUploadReport: Sendable {
     public let warmupSeconds: Double
     public let results: [BenchUploadResult]
     public let note: String?
+    /// Transport the bench ran over ("USB" / "Wi-Fi" / "unknown"). Makes a
+    /// Wi-Fi-vs-USB throughput comparison self-labeling — run the same file on
+    /// each link and the reports say which is which. (F1 follow-up.)
+    public let transport: String
 
     public var best: BenchUploadResult? {
         results.max(by: { $0.medianMBps < $1.medianMBps })
@@ -66,9 +70,10 @@ public func benchUploadChunkSizes(
     progress: ((String) -> Void)? = nil
 ) async throws -> BenchUploadReport {
     let device = try discoverDevice()
+    let transport = device.interface.label.isEmpty ? "unknown" : device.interface.label
     let fileSize = (try FileManager.default.attributesOfItem(
         atPath: fileURL.path)[.size] as? Int).map(Int64.init) ?? 0
-    progress?("Device: \(device.displayName)")
+    progress?("Device: \(device.displayName) [\(transport)]")
     progress?("File: \(fileURL.lastPathComponent) (\(fileSize / 1_048_576) MB)")
     let note: String? = fileSize < 32 * 1024 * 1024
         ? "File <32 MB — connection-setup noise will dominate; numbers are not reliable."
@@ -108,7 +113,8 @@ public func benchUploadChunkSizes(
     }
     return BenchUploadReport(
         fileURL: fileURL, fileBytes: fileSize,
-        warmupSeconds: warmup, results: results, note: note
+        warmupSeconds: warmup, results: results, note: note,
+        transport: transport
     )
 }
 

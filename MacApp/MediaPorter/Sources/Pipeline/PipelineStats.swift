@@ -132,17 +132,28 @@ public enum PreflightError: LocalizedError {
     }
 }
 
-/// Fail fast if the Mac temp volume or the device doesn't have ~1.1× the total source
-/// size free. Mirrors _check_disk_space in src/mediaporter/pipeline.py.
+/// Fail fast if the Mac temp volume or the device doesn't have room for the run.
+///
+/// The two required figures are computed by the caller and are deliberately
+/// *different* (A8), because the Mac and the device fail differently:
+///   • Mac temp — sum over transcode/remux jobs of `source × 1.1` (+ mux
+///     sidecars + one largest-source reserve). Conservative source-based
+///     ceiling because every temp output coexists until end-of-run
+///     (`cleanupTempOutputs` is end-of-run only) and there is NO mid-run Mac
+///     re-check. Copy-only jobs are excluded — they stream from the source and
+///     use no temp.
+///   • Device — sum over ALL jobs of *predicted output* × 1.05. Optimistic
+///     (downscaled/compressed files are smaller than source), but the upload
+///     loop's per-file disk poll aborts cleanly if it ever under-provisions.
+/// Passing the figures in keeps this stats module free of analyze-layer types.
 public func checkDiskSpace(
-    sourceBytesTotal: Int64,
+    macRequiredBytes: Int64,
+    deviceRequiredBytes: Int64,
     deviceHandle: UnsafeRawPointer?
 ) throws -> (macFree: Int64?, deviceFree: Int64?, deviceTotal: Int64?) {
-    let required = Int64(Double(sourceBytesTotal) * 1.1)
-
     let macFree = DiskQuery.macTempFree
-    if let macFree, macFree < required {
-        throw PreflightError.notEnoughMacSpace(required: required, available: macFree)
+    if let macFree, macFree < macRequiredBytes {
+        throw PreflightError.notEnoughMacSpace(required: macRequiredBytes, available: macFree)
     }
 
     var deviceFree: Int64?
@@ -150,8 +161,8 @@ public func checkDiskSpace(
     if let handle = deviceHandle, let result = queryDeviceDiskSpace(device: handle) {
         deviceFree = result.free
         deviceTotal = result.total
-        if result.free < required {
-            throw PreflightError.notEnoughDeviceSpace(required: required, available: result.free)
+        if result.free < deviceRequiredBytes {
+            throw PreflightError.notEnoughDeviceSpace(required: deviceRequiredBytes, available: result.free)
         }
     }
 

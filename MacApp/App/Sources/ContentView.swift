@@ -12,6 +12,12 @@ struct ContentView: View {
     @State private var expanded: Set<UUID> = []
     @State private var isDroppingList = false
     @State private var isDroppingDevice = false
+    /// Cached result of `computeClusterExtrasOrdered()` (A9). Body re-runs on
+    /// every `@Observable` tick — `job.progress` fires every 0.25 s during a
+    /// run — and the sort + `localizedCaseInsensitiveCompare` here is wasted
+    /// work when its inputs didn't change. Recomputed only via `.onChange` of
+    /// `clusterExtrasKey` below, which is cheap to evaluate each tick.
+    @State private var clusterExtrasOrderedCache: [(String, ReleaseExtras)] = []
 
     // First-launch welcome — single sheet, dismiss-once. The flag flips on
     // dismiss so the next launch goes straight to the drop zone.
@@ -23,8 +29,10 @@ struct ContentView: View {
 
     /// Clusters with detected external tracks, ordered by show name for
     /// stable display. Used by ContentView to render one extras section
-    /// per cluster above the file list (#11d).
-    private var clusterExtrasOrdered: [(String, ReleaseExtras)] {
+    /// per cluster above the file list (#11d). Heavy enough (sort +
+    /// locale-aware compare) that we cache it in `clusterExtrasOrderedCache`
+    /// and only recompute when `clusterExtrasKey` changes (A9).
+    private func computeClusterExtrasOrdered() -> [(String, ReleaseExtras)] {
         pipeline.clusterExtras
             .filter { entry in
                 guard !entry.value.isEmpty else { return false }
@@ -36,6 +44,36 @@ struct ContentView: View {
                 return an.localizedCaseInsensitiveCompare(bn) == .orderedAscending
             }
             .map { ($0.key, $0.value) }
+    }
+
+    /// Cheap, *correct* invalidation hash for `clusterExtrasOrderedCache`.
+    /// Covers every input `computeClusterExtrasOrdered()` actually reads: which
+    /// clusters are displayed (non-empty extras AND have a member job), their
+    /// sort key (resolved show name), and their rendered content (dub/sub
+    /// identities). A count-only key looked cheaper but went stale on a
+    /// re-cluster or show-rename (PipelineController reassigns `clusterID` and
+    /// rekeys `clusterExtras` without changing any count) — user-reachable via
+    /// the show picker. We build one fingerprint per displayed cluster, sort
+    /// them, then hash the sorted array: order-independent (dictionary
+    /// iteration / job order can't churn it) without XOR's linear collisions,
+    /// and using sorted track ids so the scanner's emit order can't either.
+    /// O(clusters + jobs) with no locale-aware sort — far cheaper than the full
+    /// recompute every 0.25 s progress tick. A9.
+    private var clusterExtrasKey: Int {
+        let jobClusters = Set(pipeline.jobs.compactMap { $0.clusterID })
+        var perCluster: [Int] = []
+        for (cid, extras) in pipeline.clusterExtras where !extras.isEmpty && jobClusters.contains(cid) {
+            var h = Hasher()
+            h.combine(cid)
+            h.combine(pipeline.tvShowResolutions[cid]?.showName ?? cid)
+            h.combine(extras.dubs.map(\.id).sorted())
+            h.combine(extras.subs.map(\.id).sorted())
+            perCluster.append(h.finalize())
+        }
+        perCluster.sort()
+        var key = Hasher()
+        key.combine(perCluster)
+        return key.finalize()
     }
 
     /// "iPad" / "iPhone" / "iPod" / "device" — keeps drop-zone copy honest
@@ -154,7 +192,7 @@ struct ContentView: View {
                         } else {
                             ScrollView {
                                 LazyVStack(spacing: 4) {
-                                    ForEach(clusterExtrasOrdered, id: \.0) { cid, extras in
+                                    ForEach(clusterExtrasOrderedCache, id: \.0) { cid, extras in
                                         ClusterExtrasSection(
                                             clusterID: cid, extras: extras,
                                             theme: theme, accent: tweaks.accent
@@ -241,6 +279,9 @@ struct ContentView: View {
                 welcomeShown = true
                 showWelcome = false
             }
+        }
+        .onChange(of: clusterExtrasKey, initial: true) { _, _ in
+            clusterExtrasOrderedCache = computeClusterExtrasOrdered()
         }
         .onAppear {
             if !welcomeShown { showWelcome = true }
