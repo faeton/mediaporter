@@ -125,15 +125,33 @@ public enum ProbeError: LocalizedError {
 /// Thread-safe holder that lets `probeFile`'s cancellation handler terminate
 /// the live ffprobe child from outside the detached task. `Process` isn't
 /// `Sendable`; all access is gated behind the lock and the handler only ever
-/// calls `terminate()`, guarded on `isRunning` (terminating an unlaunched
-/// Process raises). If cancellation fires before the child launches, the
-/// detached task's `Task.checkCancellation()` throws before `run()`.
+/// calls `terminate()`.
+///
+/// `launch()` runs `Process.run()` *while holding the lock* so there is no
+/// window where a concurrent `terminate()` sees an un-launched process,
+/// no-ops, and then `run()` starts an orphan that never gets killed: a
+/// cancel either lands before launch (sets `cancelled`, `launch()` bails) or
+/// after (process is running, `terminate()` reaches it). `run()` only forks —
+/// it does no I/O — so holding the lock across it can't stall the canceller;
+/// the long `readDataToEndOfFile`/`waitUntilExit` happen outside the lock.
 private final class ProbeProcessBox: @unchecked Sendable {
     private let lock = NSLock()
     private var proc: Process?
-    func adopt(_ p: Process) { lock.lock(); proc = p; lock.unlock() }
+    private var cancelled = false
+
+    /// Launch the process under the lock. Returns false (and does not launch)
+    /// if a cancellation already arrived.
+    func launch(_ p: Process) throws -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if cancelled { return false }
+        proc = p
+        try p.run()
+        return true
+    }
+
     func terminate() {
         lock.lock(); defer { lock.unlock() }
+        cancelled = true
         if let p = proc, p.isRunning { p.terminate() }
     }
 }
@@ -169,9 +187,7 @@ public func probeFile(url: URL) async throws -> MediaInfo {
             proc.standardError = FileHandle.nullDevice
             proc.standardInput = FileHandle.nullDevice
 
-            box.adopt(proc)
-            try Task.checkCancellation()   // cancelled before launch → don't spawn
-            try proc.run()
+            guard try box.launch(proc) else { throw CancellationError() }
             let out = pipe.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
 

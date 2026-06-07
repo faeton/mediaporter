@@ -136,12 +136,12 @@ public enum PreflightError: LocalizedError {
 ///
 /// The two required figures are computed by the caller and are deliberately
 /// *different* (A8), because the Mac and the device fail differently:
-///   • Mac temp — sum over transcode/remux jobs of `source × 1.1` (+ mux
-///     sidecars + one largest-source reserve). Conservative source-based
-///     ceiling because every temp output coexists until end-of-run
-///     (`cleanupTempOutputs` is end-of-run only) and there is NO mid-run Mac
-///     re-check. Copy-only jobs are excluded — they stream from the source and
-///     use no temp.
+///   • Mac temp — sum over transcode/remux/mux jobs of their final output
+///     `(source + sidecars) × 1.1`, plus a reserve for the `lookaheadCap` mux
+///     intermediates live at once. Conservative source-based ceiling because
+///     every final output coexists until end-of-run (`cleanupTempOutputs` is
+///     end-of-run only) and there is NO mid-run Mac re-check. Copy-only jobs
+///     are excluded — they stream from the source and use no temp.
 ///   • Device — sum over ALL jobs of *predicted output* × 1.05. Optimistic
 ///     (downscaled/compressed files are smaller than source), but the upload
 ///     loop's per-file disk poll aborts cleanly if it ever under-provisions.

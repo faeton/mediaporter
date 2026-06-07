@@ -1792,19 +1792,33 @@ public class PipelineController {
         // device have different failure characteristics.
         //
         // Mac temp: only transcode/remux jobs write a temp output, and every
-        // output coexists until the run finishes (cleanupTempOutputs is
+        // FINAL output coexists until the run finishes (cleanupTempOutputs is
         // end-of-run only, no per-file delete in the upload loop). Copy-only
         // jobs stream straight from the source (outputURL = inputURL) and use
         // ZERO temp — excluding them is the real fix for the old over-rejection
-        // of already-compatible drops. Each transcode job is bounded by
-        // source × 1.1 rather than the ±30% output estimate: outputs only
-        // shrink under downscale / HEVC / AC3→AAC, and there is NO mid-run Mac
-        // disk re-check, so we keep the safe source ceiling. One extra
-        // largest-source reserve covers the transient mux intermediate a
-        // concurrent job may hold alongside its final output.
-        let tempJobs = analyzed.filter { $0.needsWork }
-        let largestSource = tempJobs.map { Int64($0.fileSize) }.max() ?? 0
-        let macRequired = tempJobs.reduce(Int64(0)) { $0 + macTempFootprint(for: $1) } + largestSource
+        // of already-compatible drops. Eligibility also includes jobs with
+        // external dubs/subs to mux: their `needsWork` is evaluated pre-mux and
+        // can be false even though muxing then transcoding the MKV → .m4v does
+        // produce a temp output.
+        //
+        // Each final output is bounded by (source + sidecars) × 1.1 — a safe
+        // ceiling since there's NO mid-run Mac re-check, and the muxed output
+        // carries the dub tracks. On TOP of the always-present outputs we
+        // reserve for the transient mux intermediates (source + sidecars each),
+        // of which at most `parallelCap` are live at once (the lookahead cap;
+        // each is deleted right after its transcode). Summing every
+        // intermediate would falsely reject large dubbed batches, so we reserve
+        // only the concurrent worst case.
+        let tempJobs = analyzed.filter { $0.needsWork || !$0.externalTracksToMux.isEmpty }
+        let outputsTotal = tempJobs.reduce(Int64(0)) { $0 + macOutputFootprint(for: $1) }
+        // Same formula as the transcode lookahead cap below — at most this many
+        // mux intermediates are live at once.
+        let lookaheadCap = Int64(max(2, min(4, ProcessInfo.processInfo.activeProcessorCount / 4)))
+        let largestIntermediate = tempJobs
+            .filter { !$0.externalTracksToMux.isEmpty }
+            .map { Int64($0.fileSize) + sidecarBytes(for: $0) }
+            .max() ?? 0
+        let macRequired = outputsTotal + lookaheadCap * largestIntermediate
 
         // Device: every file lands on the device (transcoded or copied), so
         // size on the predicted OUTPUT total — downscaled / compressed files
@@ -2507,15 +2521,11 @@ public class PipelineController {
         }
     }
 
-    /// Worst-case Mac temp footprint for one transcode/remux job (A8). Its
-    /// final output is bounded by source × 1.1 (outputs only shrink under
-    /// downscale / HEVC / AC3→AAC; source is the safe ceiling with no mid-run
-    /// Mac re-check). Jobs that mux external dubs/subs also write a transient
-    /// intermediate sized source + external tracks, held alongside the output —
-    /// so add those sidecar bytes too, or a large dub batch silently blows the
-    /// reserve.
-    private func macTempFootprint(for job: FileJob) -> Int64 {
-        var bytes = Int64(Double(job.fileSize) * 1.1)
+    /// Total on-disk size of a job's external dub/sub sidecar files (0 when it
+    /// has none). Used by the A8 Mac preflight: a mux job copies these into its
+    /// intermediate, so they enlarge both the intermediate and the final output.
+    private func sidecarBytes(for job: FileJob) -> Int64 {
+        var bytes: Int64 = 0
         for ref in job.externalTracksToMux {
             if let attrs = try? FileManager.default.attributesOfItem(atPath: ref.path.path),
                let sz = attrs[.size] as? Int {
@@ -2523,6 +2533,16 @@ public class PipelineController {
             }
         }
         return bytes
+    }
+
+    /// Worst-case size of one job's FINAL temp output for the A8 Mac preflight.
+    /// Bounded by (source + sidecars) × 1.1: a plain transcode output only
+    /// shrinks under downscale / HEVC / AC3→AAC (source is the safe ceiling with
+    /// no mid-run Mac re-check), and a muxed output additionally carries the dub
+    /// tracks (the sidecars). The transient mux *intermediate* is accounted for
+    /// separately at the call site (only `parallelCap` are live at once).
+    private func macOutputFootprint(for job: FileJob) -> Int64 {
+        Int64(Double(Int64(job.fileSize) + sidecarBytes(for: job)) * 1.1)
     }
 
     /// Best estimate of a job's transcoded output size, for the disk preflight

@@ -49,14 +49,15 @@ struct ContentView: View {
     /// Cheap, *correct* invalidation hash for `clusterExtrasOrderedCache`.
     /// Covers every input `computeClusterExtrasOrdered()` actually reads: which
     /// clusters are displayed (non-empty extras AND have a member job), their
-    /// sort key (resolved show name), and their rendered content (dub/sub
-    /// identities). A count-only key looked cheaper but went stale on a
-    /// re-cluster or show-rename (PipelineController reassigns `clusterID` and
-    /// rekeys `clusterExtras` without changing any count) — user-reachable via
-    /// the show picker. We build one fingerprint per displayed cluster, sort
-    /// them, then hash the sorted array: order-independent (dictionary
-    /// iteration / job order can't churn it) without XOR's linear collisions,
-    /// and using sorted track ids so the scanner's emit order can't either.
+    /// sort key (resolved show name), and their full rendered content. A
+    /// count-only key looked cheaper but went stale on a re-cluster or
+    /// show-rename (PipelineController reassigns `clusterID` and rekeys
+    /// `clusterExtras` without changing any count) — user-reachable via the show
+    /// picker. We hash the *whole* `DubStudio`/`SubTrack` (label, lang, forced,
+    /// per-episode coverage — all Hashable), sorted by id so a rescan that grows
+    /// episode coverage under the same label still invalidates, then sort the
+    /// per-cluster fingerprints and hash the array: order-independent
+    /// (dictionary / job order can't churn it) without XOR's linear collisions.
     /// O(clusters + jobs) with no locale-aware sort — far cheaper than the full
     /// recompute every 0.25 s progress tick. A9.
     private var clusterExtrasKey: Int {
@@ -66,8 +67,8 @@ struct ContentView: View {
             var h = Hasher()
             h.combine(cid)
             h.combine(pipeline.tvShowResolutions[cid]?.showName ?? cid)
-            h.combine(extras.dubs.map(\.id).sorted())
-            h.combine(extras.subs.map(\.id).sorted())
+            h.combine(extras.dubs.sorted { $0.id < $1.id })
+            h.combine(extras.subs.sorted { $0.id < $1.id })
             perCluster.append(h.finalize())
         }
         perCluster.sort()
