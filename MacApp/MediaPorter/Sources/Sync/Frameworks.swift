@@ -88,6 +88,24 @@ enum MD {
     typealias AMDeviceStartServiceFn = @convention(c) (
         UnsafeRawPointer, CFString, UnsafeMutablePointer<UnsafeMutableRawPointer?>, UnsafeRawPointer?
     ) -> Int32
+    /// AMDeviceSecureStartService(device, serviceName, options, &serviceConn).
+    /// The SSL-aware replacement for AMDeviceStartService. Required over Wi-Fi:
+    /// network lockdown sessions are SSL-wrapped and the legacy StartService
+    /// skips the SSL service handshake → 0xE8000012 (F1). `options` may be nil.
+    /// Returns an AMDServiceConnectionRef (opaque) usable by AFCConnectionOpen.
+    typealias AMDeviceSecureStartServiceFn = @convention(c) (
+        UnsafeRawPointer, CFString, CFDictionary?, UnsafeMutablePointer<UnsafeMutableRawPointer?>
+    ) -> Int32
+    /// AMDServiceConnectionGetSocket(serviceConn) → raw socket fd. AFCConnectionOpen
+    /// takes this fd (cast to a handle), not the AMDServiceConnectionRef.
+    typealias AMDServiceConnectionGetSocketFn = @convention(c) (UnsafeRawPointer) -> Int32
+    /// AMDServiceConnectionGetSecureIOContext(serviceConn) → SSL context (or nil
+    /// over USB). Must be applied to the AFC connection or AFC I/O over Wi-Fi
+    /// writes plaintext to an SSL socket → hangs/garbage.
+    typealias AMDServiceConnectionGetSecureIOContextFn = @convention(c) (UnsafeRawPointer) -> UnsafeMutableRawPointer?
+    /// AFCConnectionSetSecureContext(afcConn, sslContext) → routes AFC I/O through
+    /// the service connection's SSL context. nil context = plaintext (USB).
+    typealias AFCConnectionSetSecureContextFn = @convention(c) (UnsafeRawPointer, UnsafeRawPointer?) -> Int32
     typealias AFCConnectionOpenFn = @convention(c) (
         UnsafeRawPointer, UInt32, UnsafeMutablePointer<UnsafeMutableRawPointer?>
     ) -> Int32
@@ -128,6 +146,10 @@ enum MD {
     static var connect: AMDeviceConnectFn { lookup(loadMobileDevice(), "AMDeviceConnect") }
     static var startSession: AMDeviceStartSessionFn { lookup(loadMobileDevice(), "AMDeviceStartSession") }
     static var startService: AMDeviceStartServiceFn { lookup(loadMobileDevice(), "AMDeviceStartService") }
+    static var secureStartService: AMDeviceSecureStartServiceFn { lookup(loadMobileDevice(), "AMDeviceSecureStartService") }
+    static var serviceConnectionGetSocket: AMDServiceConnectionGetSocketFn { lookup(loadMobileDevice(), "AMDServiceConnectionGetSocket") }
+    static var serviceConnectionGetSecureIOContext: AMDServiceConnectionGetSecureIOContextFn { lookup(loadMobileDevice(), "AMDServiceConnectionGetSecureIOContext") }
+    static var afcSetSecureContext: AFCConnectionSetSecureContextFn { lookup(loadMobileDevice(), "AFCConnectionSetSecureContext") }
     static var afcOpen: AFCConnectionOpenFn { lookup(loadMobileDevice(), "AFCConnectionOpen") }
     static var afcClose: AFCConnectionCloseFn { lookup(loadMobileDevice(), "AFCConnectionClose") }
     static var afcMkdir: AFCDirectoryCreateFn { lookup(loadMobileDevice(), "AFCDirectoryCreate") }

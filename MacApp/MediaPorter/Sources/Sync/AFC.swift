@@ -25,6 +25,9 @@ enum AFCError: LocalizedError {
 
 class AFCClient {
     private var conn: UnsafeMutableRawPointer?
+    /// The AMDServiceConnectionRef backing `conn` (secure-service path). Held so
+    /// its SSL context outlives the AFC connection over Wi-Fi.
+    private var serviceConn: UnsafeMutableRawPointer?
     /// Bytes per AFC write call. The size-adaptive default is in
     /// `recommendedChunkSize(forFileBytes:)` below — the constant here
     /// is the lower bound used when the file size isn't known. Read
@@ -49,19 +52,51 @@ class AFCClient {
 
     init(device: DeviceInfo, chunkSize: Int = AFCClient.defaultChunkSize) throws {
         self.chunkSize = chunkSize
+        func hx(_ v: Int32) -> String { "0x\(String(format: "%08x", UInt32(bitPattern: v)))" }
+        func fail(_ step: String, _ rc: Int32) -> AFCError {
+            DebugLog.error("afc.connect", "\(step) failed rc=\(rc) (\(hx(rc)))")
+            return AFCError.connectionFailed(rc)
+        }
+
         var rc = MD.connect(device.handle)
-        guard rc == 0 else { throw AFCError.connectionFailed(rc) }
+        guard rc == 0 else { throw fail("AMDeviceConnect", rc) }
 
         rc = MD.startSession(device.handle)
-        guard rc == 0 else { throw AFCError.connectionFailed(rc) }
+        guard rc == 0 else { throw fail("AMDeviceStartSession", rc) }
 
+        // SSL-aware service start (F1). The legacy AMDeviceStartService returns
+        // 0xE8000012 over Wi-Fi: network lockdown sessions are SSL-wrapped and it
+        // skips the SSL service handshake. AMDeviceSecureStartService does the
+        // handshake and works over both USB and Wi-Fi.
         var svcHandle: UnsafeMutableRawPointer?
-        rc = MD.startService(device.handle, "com.apple.afc" as CFString, &svcHandle, nil)
-        guard rc == 0, let svc = svcHandle else { throw AFCError.connectionFailed(rc) }
+        rc = MD.secureStartService(device.handle, "com.apple.afc" as CFString, nil, &svcHandle)
+        guard rc == 0, let svc = svcHandle else { throw fail("AMDeviceSecureStartService(afc)", rc) }
+        self.serviceConn = svc
+
+        // AFCConnectionOpen takes the service connection's SOCKET fd, NOT the
+        // AMDServiceConnectionRef — passing the ref opens a connection whose
+        // first file op fails with AFC error 11 (service-not-connected).
+        // Matches research/scripts/afc_plus_atc.py:153-162.
+        let sock = MD.serviceConnectionGetSocket(svc)
+        guard let sockHandle = UnsafeRawPointer(bitPattern: Int(sock)) else {
+            throw fail("AMDServiceConnectionGetSocket(fd=\(sock))", -1)
+        }
 
         var afcConn: UnsafeMutableRawPointer?
-        rc = MD.afcOpen(svc, 0, &afcConn)
-        guard rc == 0, let c = afcConn else { throw AFCError.connectionFailed(rc) }
+        rc = MD.afcOpen(sockHandle, 0, &afcConn)
+        guard rc == 0, let c = afcConn else { throw fail("AFCConnectionOpen", rc) }
+
+        // Wire the SSL context onto the AFC connection BEFORE any file I/O. Over
+        // Wi-Fi the socket is SSL; without this, AFC reads/writes push plaintext
+        // into the SSL stream → 60s I/O stalls / hangs. Over USB the context is
+        // nil (plaintext) and this is a harmless no-op. `svc` owns the context,
+        // so it must outlive the connection — held in self.serviceConn, never
+        // invalidated (matches the legacy non-cleanup behaviour).
+        let sslCtx = MD.serviceConnectionGetSecureIOContext(svc)
+        let setRC = MD.afcSetSecureContext(c, sslCtx)
+        DebugLog.notice("afc.connect",
+                        "connected via SecureStartService (\(sslCtx != nil ? "ssl/wifi" : "plaintext/usb")) fd=\(sock) setCtx=\(hx(setRC))")
+
         self.conn = c
     }
 

@@ -87,16 +87,28 @@ public enum ByteFormat {
 public enum DiskQuery {
     /// Free bytes on the volume that contains the given URL (typically temp dir).
     public static func freeBytes(at url: URL) -> Int64? {
-        do {
-            let values = try url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            if let cap = values.volumeAvailableCapacityForImportantUsage { return cap }
-        } catch { }
-        // Fallback to plain availableCapacity
+        // `volumeAvailableCapacityForImportantUsage` is unreliable on macOS: on a
+        // near-full (but not full) volume it can return 0 even with 100+ GB
+        // actually free (observed: 0 reported on a 97%-full data volume with
+        // 132 GB free). Returning that bogus 0 tripped a false "Not enough free
+        // space on Mac" preflight. So query BOTH keys and take the larger — a
+        // flaky 0 from one never under-reports the other.
+        var importantUsage: Int64? = nil
+        if let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+           let cap = values.volumeAvailableCapacityForImportantUsage {
+            importantUsage = cap
+        }
+        var plain: Int64? = nil
         if let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityKey]),
            let cap = values.volumeAvailableCapacity {
-            return Int64(cap)
+            plain = Int64(cap)
         }
-        return nil
+        switch (importantUsage, plain) {
+        case let (i?, p?): return max(i, p)
+        case let (i?, nil): return i
+        case let (nil, p?): return p
+        case (nil, nil):   return nil
+        }
     }
 
     public static var macTempFree: Int64? {
