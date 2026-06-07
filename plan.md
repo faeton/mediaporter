@@ -18,15 +18,18 @@ this doc still listed as open: **P0 #1** (episode-still poster order), **#12**
 recommendation rework (bitrate sub-item remains), **#13** zombie sweep, **A1**,
 **A3** (mitigated), **A4**, **R2**, **R3**.
 
+**Shipped since (2026-06-07):** ✅ **A2** (1810ae0 — checkOrThrow aborts fast on
+drainer-observed connection death; rc proven meaningless), ✅ **A6/A7** (b2f131f),
+✅ **F1 Wi-Fi sync** (a18dcf9), ✅ **multi-device USB/Wi-Fi picker** (36df5c6).
+
 **What's actually left** (none block a release; all are polish/hardening):
-- **A2 — High, the one real gap.** ATC `check()` still never throws, so a dead
-  mid-session connection is logged-then-ignored. Rare but it's the "stuck
-  SyncFinished" failure mode. Top of the next-work list.
-- **A6 / A7 — Medium, ~15 min cleanup.** Cache VideoToolbox detection; gate the
-  per-output debug probe behind `Tweaks.debug`.
 - **A5 / A8 — Medium.** `probeFile` blocks a cooperative-pool thread; disk
-  preflight is over-conservative (`1.1 × source` instead of predicted output).
+  preflight is still over-conservative (`1.1 × source` instead of predicted
+  output — the `freeBytes` flaky-zero bug was fixed in a18dcf9, but the
+  required-size estimate itself is unchanged).
 - **A9 — Low.** `clusterExtrasOrdered` recomputes every progress tick.
+- **F1 follow-ups — Low.** Wi-Fi discovery timeout (`discoverDevice` 5s misses
+  slow Bonjour re-announces); throughput bench over Wi-Fi vs USB.
 - **#12 bitrate hint, R1b DMG background, P0 #4 device-verify of the no-TMDb /
   no-API-key poster fallbacks** — cosmetic / verification tail.
 
@@ -379,10 +382,20 @@ Code-review pass against the shipping 0.6.0 codebase. Each item lists severity, 
   → swept file". The original mid-loop `break` still logs `"TRUNCATED"` at
   `:149` but the post-write stat now backstops it.
 
-### A2. ATC send failures swallowed by `check()` — **High** *(STILL OPEN — verified 2026-06-07)*
-- `Sources/Sync/ATCSession.swift:1024`. `check(_ tag:, _ rc:)` still only logs `rc != 0` and returns `rc`. `beginFile` (`:686`) and `completeFile` (`:704`) are marked `throws` but call the non-throwing `check()` for their `FileBegin`/`FileProgress`/`FileComplete` sends, so a dead ATC connection mid-session is logged-then-ignored. This is the top remaining reliability gap.
-- Consequence: if ATC connection dies mid-session (drainer-detected or transport-level), every subsequent send returns nonzero and gets logged-then-ignored. We keep uploading bytes over AFC, send `FileComplete` into the void, and only notice on `finishSync` timeout. Rows from after the drop are unbound.
-- Fix: convert `check` for the `FileBegin`/`FileComplete`/`FileError`/`FileProgress` callsites into `try checkOrThrow(...) throws -> Void`. Other ATC sends (`PowerAssertion`, `MetadataSyncFinished`) where rc != 0 isn't necessarily fatal can keep the logging-only variant under a different name.
+### A2. ATC send failures swallowed by `check()` — ✅ RESOLVED 2026-06-07 (1810ae0)
+- The fix keys on the DRAINER's liveness signal, not the send rc — Phase-2
+  telemetry (438eeb5, since removed) proved rc is meaningless here: must-ack
+  sends return wild nonzero rc (MetadataSyncFinished `0xf69a43c0`, Pong `1`) on
+  perfectly successful syncs, so the originally-planned "throw on rc != 0" would
+  have aborted every sync.
+- `connectionDead` (guarded by `inboxLock`, reset per session) is set by the
+  drainer when its blocking read returns nil for an UNEXPECTED reason
+  (transport error / peer death, distinguished from our own `stopDrainer`).
+  `checkOrThrow` throws `SyncError.connectionLost` when the flag is set; the
+  must-ack sends (`FileBegin`/`FileComplete`/`MetadataSyncFinished`) use it, so a
+  dropped connection aborts at the next send instead of the 120s `finishSync`
+  deadline (which also short-circuits on death). Heartbeats stay on `check()`.
+- Verified: Wi-Fi smoke-test still passes with zero false aborts.
 
 ### A3. Off-by-one in `registeredCount` skips abandon for in-flight failures — **High** *(mitigated 0.7.0; structural fix deferred)*
 - The acute failure mode (detached task throws between `FileBegin` and
