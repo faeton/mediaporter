@@ -528,9 +528,11 @@ over the same link.
    → harmless no-op (plaintext), so one path serves both transports.
 
 **Remaining polish (not blocking):**
-- **UI hint removal.** `ConnectionPillView`'s amber "Wi-Fi sync isn't supported,
-  use a cable" warning (via `USBSpeed.swift::anyAppleMobileDeviceOnUSB`) is now
-  WRONG — F1 ships. Remove/repurpose the hint; `CONNECTED over Wi-Fi` can stay.
+- ✅ **UI hint removal + multi-device picker** (36df5c6). Per-device USB/Wi-Fi
+  transport via `AMDeviceGetInterfaceType` (replaces the global
+  `anyAppleMobileDeviceOnUSB` heuristic, now deleted); picker shows a transport
+  badge; the wrong "Wi-Fi not supported" warning is gone; DeviceMonitor tracks
+  transports per UDID (prefer USB, promote Wi-Fi on asymmetric detach).
 - **Discovery timeout for Wi-Fi.** `discoverDevice()` (`Sync/Device.swift:434`)
   5s timeout can miss a Wi-Fi device that hasn't re-announced (USB fires the
   AMDevice callback instantly; Wi-Fi only on a periodic Bonjour announcement).
