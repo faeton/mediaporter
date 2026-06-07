@@ -58,6 +58,7 @@ enum SyncError: LocalizedError {
     case noManifest
     case cigFailed
     case rejected
+    case connectionLost(String)
 
     var errorDescription: String? {
         switch self {
@@ -65,6 +66,7 @@ enum SyncError: LocalizedError {
         case .noManifest: return "No AssetManifest received from device"
         case .cigFailed: return "CIG computation failed"
         case .rejected: return "Device rejected sync"
+        case .connectionLost(let at): return "ATC connection lost during \(at)"
         }
     }
 }
@@ -82,6 +84,13 @@ class ATCSession {
     private var drainerThread: Thread?
     private var drainerStop = false
     private let inboxLock = NSLock()
+    /// Set by the drainer when its blocking read returns nil for an UNEXPECTED
+    /// reason (transport error / peer death — not our own stopDrainer). This is
+    /// the authoritative liveness signal: a send's return code is NOT (telemetry
+    /// proved must-ack sends return wild nonzero rc on perfectly good syncs).
+    /// Guarded by inboxLock. checkOrThrow consults it so a dead mid-sync
+    /// connection aborts at the next must-ack send instead of the 120s deadline.
+    private var connectionDead = false
     /// Names of non-Ping ATC messages the drainer has read but the foreground
     /// flow hasn't consumed yet. finishSync polls for SyncFinished here.
     private var inbox: [String] = []
@@ -393,7 +402,7 @@ class ATCSession {
         check("SendPowerAssertion", ATH.sendPowerAssertion(conn!, kCFBooleanTrue))
         log("  >> MetadataSyncFinished (anchor=\"\(anchor)\")")
         DebugLog.write("atc.MetadataSyncFinished", "anchor=\(anchor)")
-        check("MetadataSyncFinished", ATH.sendMetadataSyncFinished(
+        try checkOrThrow("MetadataSyncFinished", ATH.sendMetadataSyncFinished(
             conn!,
             ["Keybag": 1, "Media": 1] as NSDictionary as CFDictionary,
             ["Media": anchor] as NSDictionary as CFDictionary
@@ -436,7 +445,7 @@ class ATCSession {
             let aid = String(f.assetID)
 
             log("  >> FileBegin (asset=\(aid))")
-            check("FileBegin", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileBegin" as CFString, [
+            try checkOrThrow("FileBegin", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileBegin" as CFString, [
                 "AssetID": aid,
                 "FileSize": f.item.fileSize,
                 "TotalSize": f.item.fileSize,
@@ -464,7 +473,7 @@ class ATCSession {
             ] as NSDictionary as CFDictionary)!))
 
             log("  >> FileComplete (path=\(f.devicePath))")
-            check("FileComplete", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileComplete" as CFString, [
+            try checkOrThrow("FileComplete", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileComplete" as CFString, [
                 "AssetID": aid,
                 "AssetPath": f.devicePath,
                 "Dataclass": "Media",
@@ -561,7 +570,7 @@ class ATCSession {
         check("SendPowerAssertion", ATH.sendPowerAssertion(conn!, kCFBooleanTrue))
         log("  >> MetadataSyncFinished (anchor=\"\(anchor)\")")
         DebugLog.write("atc.MetadataSyncFinished", "anchor=\(anchor)")
-        check("MetadataSyncFinished", ATH.sendMetadataSyncFinished(
+        try checkOrThrow("MetadataSyncFinished", ATH.sendMetadataSyncFinished(
             conn!,
             ["Keybag": 1, "Media": 1] as NSDictionary as CFDictionary,
             ["Media": anchor] as NSDictionary as CFDictionary
@@ -641,7 +650,7 @@ class ATCSession {
         check("SendPowerAssertion", ATH.sendPowerAssertion(conn!, kCFBooleanTrue))
         log("  >> MetadataSyncFinished (anchor=\"\(anchor)\", delete-only)")
         DebugLog.write("atc.MetadataSyncFinished", "anchor=\(anchor) mode=delete")
-        check("MetadataSyncFinished", ATH.sendMetadataSyncFinished(
+        try checkOrThrow("MetadataSyncFinished", ATH.sendMetadataSyncFinished(
             conn!,
             ["Keybag": 1, "Media": 1] as NSDictionary as CFDictionary,
             ["Media": anchor] as NSDictionary as CFDictionary
@@ -832,6 +841,15 @@ class ATCSession {
                 stopDrainer()
                 return
             }
+            // Connection dropped mid-wait (after the inbox above was drained, so
+            // any SyncFinished that landed first already won). No point burning
+            // the full 120s deadline on a dead socket.
+            if isConnectionDead() {
+                log("  *** ATC connection lost before SyncFinished ***")
+                DebugLog.error("atc.finishSync.dead", "connection died after \(Int(Date().timeIntervalSince(start)))s — no SyncFinished")
+                stopDrainer()
+                return
+            }
             Thread.sleep(forTimeInterval: 0.2)
         }
         log("  SyncFinished not received (\(Int(deadlineSeconds)) s timeout)")
@@ -852,6 +870,7 @@ class ATCSession {
 
     private func startDrainer() {
         drainerStop = false
+        inboxLock.lock(); connectionDead = false; inboxLock.unlock()
         let t = Thread { [weak self] in
             guard let self else { return }
             while !self.drainerStop {
@@ -864,17 +883,15 @@ class ATCSession {
                 // reader whose result was already discarded — so finishSync
                 // never saw it and hung until the 120 s hard deadline.
                 guard let msg = ATH.readMessage(c) else {
-                    // nil = conn invalidated (close called) or transport
-                    // error. Either way, drainer is done.
-                    //
-                    // A2 telemetry (Phase 2): this is the AUTHORITATIVE peer-death
-                    // signal — earlier than finishSync's 120s deadline. drainerStop
-                    // distinguishes expected teardown (stopDrainer flipped it) from
-                    // unexpected death (mid-sync yank / Wi-Fi drop). Phase 4's
-                    // connectionDead flag will be set right here, on the
-                    // drainerStop==false branch.
-                    DebugLog.notice("atc.drainer.eof",
-                                    "readMessage nil — connection invalidated/transport error (drainerStop=\(self.drainerStop))")
+                    // nil = conn invalidated (close called) or transport error.
+                    // This is the AUTHORITATIVE peer-death signal — far earlier
+                    // than finishSync's 120s deadline. drainerStop distinguishes
+                    // our own teardown (expected) from a mid-sync drop (yank /
+                    // Wi-Fi loss): only the latter flags the connection dead so
+                    // the next must-ack checkOrThrow aborts fast.
+                    if !self.drainerStop {
+                        self.markConnectionDead("drainer read returned nil mid-session (transport error / peer death)")
+                    }
                     return
                 }
                 guard let nameCF = ATH.messageName(msg) else { continue }
@@ -1031,17 +1048,39 @@ class ATCSession {
 
     @discardableResult
     private func check(_ tag: String, _ rc: Int32) -> Int32 {
-        // A2 telemetry (Phase 2): record EVERY send's rc — successes too — so a
-        // device-session capture (good sync / Wi-Fi sync / mid-sync USB yank)
-        // tells us what "success" looks like per message type BEFORE we convert
-        // any must-ack send to throw. HISTORY shows rc!=0 is not uniformly fatal
-        // (post-SyncFinished sends "return 1"; framework failures 0x80f20840),
-        // so we need the convention, not a guess. .notice → survives `log show`.
-        // Throwaway instrumentation; removed when Phase 4 lands checkOrThrow.
-        DebugLog.notice("atc.send.rc",
-                        "\(tag) rc=\(rc) (0x\(String(format: "%08x", UInt32(bitPattern: rc)))) conn=\(conn != nil ? "live" : "nil")")
+        // NB: rc is logged for diagnostics only — it is NOT a liveness signal.
+        // A2 telemetry confirmed must-ack sends (MetadataSyncFinished, FileComplete)
+        // return wild nonzero rc (0xf69a43c0, 1, …) on perfectly successful syncs.
+        // Connection death is detected by the drainer (see connectionDead), not here.
         if rc != 0 { log("  !! \(tag) returned status \(rc)") }
         return rc
+    }
+
+    /// Send-result check for MUST-ACK messages (FileBegin/FileComplete/
+    /// MetadataSyncFinished). Logs rc like check(), then throws if the drainer
+    /// has flagged the connection dead — so a connection that dropped mid-sync
+    /// aborts at the next must-ack send instead of stalling to finishSync's
+    /// 120s deadline. Does NOT throw on nonzero rc (that's meaningless here).
+    private func checkOrThrow(_ tag: String, _ rc: Int32) throws {
+        check(tag, rc)
+        if isConnectionDead() {
+            DebugLog.error("atc.connectionLost", "aborting at \(tag) — drainer saw transport death")
+            throw SyncError.connectionLost(tag)
+        }
+    }
+
+    private func isConnectionDead() -> Bool {
+        inboxLock.lock(); defer { inboxLock.unlock() }
+        return connectionDead
+    }
+
+    /// Called by the drainer when its blocking read returns nil unexpectedly.
+    private func markConnectionDead(_ reason: String) {
+        inboxLock.lock()
+        let already = connectionDead
+        connectionDead = true
+        inboxLock.unlock()
+        if !already { DebugLog.error("atc.drainer.dead", reason) }
     }
 
     private func readMsg(timeout: TimeInterval = 15) -> (UnsafeMutableRawPointer?, String?) {
