@@ -2,6 +2,19 @@
 
 The Swift MacApp under `MacApp/` is the shipping target. Versions starting with 0.4.0 track the MacApp; the 0.1.x – 0.3.x entries describe the now-frozen Python CLI under `python-reference/`.
 
+## 0.8.1 — 2026-06-08
+
+Patch release. A few quality-of-life touches on top of 0.8.0.
+
+### New
+
+- **Audio loudness normalization** — Settings → Transcode → "Normalize audio loudness (EBU R128)" applies the ffmpeg `loudnorm` filter to even out quiet-dialogue / loud-action mixes. Off by default, persisted. Only affects tracks that are being re-encoded (it needs a decode+encode); tracks copied as-is keep their original levels, and track disposition/codec/metadata are untouched.
+- **Pre-Send size estimate** — the Send button now shows "≈ N GB to send", the summed predicted output size across the files about to sync (same estimator as the per-file resolution-picker "≈").
+
+### Fixed
+
+- **Clearer Wi-Fi sync failures** — when a sync to a Wi-Fi device fails, the status now hints that the device may have gone to sleep (a sleeping/locked iPhone or iPad stops advertising over the network and drops the connection); wake and unlock it, or use a cable for large syncs. Shown only for genuine transport failures on Wi-Fi targets — not for cancels, disk-full aborts, or USB.
+
 ## 0.8.0 — 2026-06-08
 
 Minor release. **Sync over Wi-Fi** — no cable required — plus a multi-device picker that shows each attached iPhone/iPad's transport, a batch of pipeline reliability and performance hardening (fast abort on mid-sync connection loss, smarter disk preflight, probe/analyze no longer starves the async pool), and UI polish (bitrate hints, verified poster fallbacks). Every change was verified on-device (akm16pro) over both USB and Wi-Fi.
