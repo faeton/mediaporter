@@ -190,19 +190,25 @@ struct SettingsView: View {
                 }
 
                 LabeledContent("Output") {
-                    Toggle("I AirPlay or cast to a 4K display", isOn: Binding(
-                        get: { pipe.airplayTo4K },
-                        set: { newValue in
-                            pipe.airplayTo4K = newValue
-                            ConfigLoader.saveAirplayTo4K(newValue)
-                        }
-                    ))
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("I AirPlay or cast to a 4K display", isOn: Binding(
+                            get: { pipe.airplayTo4K },
+                            set: { newValue in
+                                pipe.airplayTo4K = newValue
+                                ConfigLoader.saveAirplayTo4K(newValue)
+                            }
+                        ))
+                        Toggle("Normalize audio loudness (EBU R128)", isOn: Binding(
+                            get: { pipe.normalizeLoudness },
+                            set: { pipe.normalizeLoudness = $0 }
+                        ))
+                    }
                     .toggleStyle(.switch)
                 }
             } header: {
                 Text("Transcode").font(.system(size: 13, weight: .semibold))
             } footer: {
-                Text("VideoToolbox uses Apple's hardware HEVC encoder — 5–10× faster, slightly larger files at the same quality. libx265 is the reference software encoder — slower, smaller files, more consistent quality. VideoToolbox is the right default on Apple Silicon.\n\nThe 4K-output toggle keeps originals instead of dropping to the device's panel resolution — flip it on when you mostly watch via AirPlay/HDMI to a TV.")
+                Text("VideoToolbox uses Apple's hardware HEVC encoder — 5–10× faster, slightly larger files at the same quality. libx265 is the reference software encoder — slower, smaller files, more consistent quality. VideoToolbox is the right default on Apple Silicon.\n\nThe 4K-output toggle keeps originals instead of dropping to the device's panel resolution — flip it on when you mostly watch via AirPlay/HDMI to a TV.\n\nLoudness normalization evens out quiet-dialogue / loud-action mixes (the ffmpeg loudnorm filter). It only applies to audio tracks that are being re-encoded — tracks copied as-is keep their original levels.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)

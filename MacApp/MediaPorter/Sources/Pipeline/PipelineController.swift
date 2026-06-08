@@ -39,6 +39,13 @@ public class PipelineController {
     /// downscale recommendation is wrong for them. Drives the banner copy
     /// and skips the auto-downscale in `runAnalyze`.
     public var airplayTo4K = false
+    /// Apply EBU R128 loudness normalization (ffmpeg `loudnorm`) to re-encoded
+    /// audio. Off by default; persisted. Only affects tracks already being
+    /// transcoded — `loudnorm` needs a decode+encode, so copied tracks are
+    /// untouched. Quiet-dialogue / loud-action mixes get evened out. (#13)
+    public var normalizeLoudness = UserDefaults.standard.bool(forKey: "normalizeLoudness") {
+        didSet { UserDefaults.standard.set(normalizeLoudness, forKey: "normalizeLoudness") }
+    }
     public var tmdbAPIKey: String = ""
 
     /// Resolved show identity per cluster (`FileJob.clusterID`). Each entry is
@@ -1526,6 +1533,7 @@ public class PipelineController {
                         burnIn: job.burnInSubtitle,
                         originalLanguageFallback: job.metadata?.originalLanguage,
                         audioLanguageOverrides: job.audioLanguageOverrides,
+                        normalizeLoudness: normalizeLoudness,
                         progress: { pct in
                             let now = Date()
                             if pct < 1.0, now.timeIntervalSince(lastTranscodeUpdate) < 0.25 { return }
@@ -1704,6 +1712,7 @@ public class PipelineController {
                     externalSubs: externalSubs,
                     burnIn: job.burnInSubtitle,
                     originalLanguageFallback: job.metadata?.originalLanguage,
+                    normalizeLoudness: normalizeLoudness,
                     progress: { pct in
                         let now = Date()
                         if pct < 1.0, now.timeIntervalSince(lastTranscodeUpdate) < 0.25 { return }
@@ -1857,7 +1866,7 @@ public class PipelineController {
         do {
             uploader = try AFCUploader(device: device)
         } catch {
-            overallStatus = "AFC connection failed: \(error.localizedDescription)"
+            overallStatus = "AFC connection failed: \(error.localizedDescription)\(wifiDropHint(for: device))"
             isRunning = false
             DebugLog.error("pipeline.runPipelined", "AFC connection failed: \(error.localizedDescription)")
             return
@@ -2170,6 +2179,7 @@ public class PipelineController {
         diskPoller.cancel()
         // Prefer the disk-full message when both fired — the underlying AFC
         // error is just "cancelled" because that's how the upload aborted.
+        let diskFull = diskDetector.reason() != nil
         if let diskMsg = diskDetector.reason() { workFailed = diskMsg }
         uploader.close()
 
@@ -2186,7 +2196,10 @@ public class PipelineController {
 
         if let err = workFailed {
             let wasCancel = cancelFlag.get()
-            overallStatus = wasCancel ? "Cancelled — finalizing…" : "Upload failed: \(err)"
+            // Wi-Fi sleep hint only for a real transport failure — never for a
+            // cancel or a disk-full abort (those have their own clear cause).
+            let hint = (wasCancel || diskFull) ? "" : wifiDropHint(for: device)
+            overallStatus = wasCancel ? "Cancelled — finalizing…" : "Upload failed: \(err)\(hint)"
             for (job, _) in preparedPairs
                 where job.status == .syncing || job.status == .uploaded
             {
@@ -2198,7 +2211,7 @@ public class PipelineController {
             // the socket dies. (#15: prior `close()` here could orphan the
             // device's pending-asset wait.)
             registerSession.finishGraceful(deadlineSeconds: 15)
-            overallStatus = wasCancel ? "Cancelled" : "Upload failed: \(err)"
+            overallStatus = wasCancel ? "Cancelled" : "Upload failed: \(err)\(hint)"
             isRunning = false
             lastRunStats = stats
             cancelFlag.set(false)
@@ -2375,7 +2388,8 @@ public class PipelineController {
                     externalSubs: externalSubs,
                     burnIn: job.burnInSubtitle,
                     originalLanguageFallback: job.metadata?.originalLanguage,
-                    audioLanguageOverrides: job.audioLanguageOverrides
+                    audioLanguageOverrides: job.audioLanguageOverrides,
+                    normalizeLoudness: normalizeLoudness
                 ) { pct in
                     let now = Date()
                     // Always let the final 1.0 through — the throttle would
@@ -2549,6 +2563,17 @@ public class PipelineController {
     /// separately at the call site (only `parallelCap` are live at once).
     private func macOutputFootprint(for job: FileJob) -> Int64 {
         Int64(Double(Int64(job.fileSize) + sidecarBytes(for: job)) * 1.1)
+    }
+
+    /// Suffix appended to a sync-failure message when the target is on Wi-Fi.
+    /// A sleeping or locked iPhone/iPad stops advertising `_apple-mobdev2._tcp`
+    /// and drops the connection mid-sync, which otherwise surfaces as an opaque
+    /// AFC / "connection lost" error. Empty for USB (the cable doesn't sleep
+    /// out from under us). Callers gate it off for cancels and disk-full aborts.
+    private func wifiDropHint(for device: DeviceInfo) -> String {
+        guard device.interface == .wifi else { return "" }
+        let cls = device.deviceClass.isEmpty ? "device" : device.deviceClass
+        return " — if the \(cls) went to sleep, Wi-Fi sync drops; wake it and keep it unlocked (Auto-Lock off helps), then retry. A cable is steadier for large syncs."
     }
 
     /// Best estimate of a job's transcoded output size, for the disk preflight

@@ -183,7 +183,8 @@ public enum Transcoder {
         externalSubs: [ExternalSubtitle] = [],
         burnIn: BurnInSubtitle? = nil,
         originalLanguageFallback: String? = nil,
-        audioLanguageOverrides: [Int: String] = [:]
+        audioLanguageOverrides: [Int: String] = [:],
+        normalizeLoudness: Bool = false
     ) -> [String] {
         let langFallback = LanguageCodes.toIso6392T(originalLanguageFallback)
         guard let ffmpeg = FFmpegLocator.ffmpeg else { return [] }
@@ -377,6 +378,14 @@ public enum Transcoder {
                 let channels = aa.targetChannels ?? (aa.stream.channels ?? 2)
                 let bitrate = aa.targetBitrate ?? (channels >= 6 ? "384k" : "256k")
                 cmd += ["-c:a:\(outIdx)", "aac", "-b:a:\(outIdx)", bitrate, "-ac:a:\(outIdx)", String(min(channels, 6))]
+                // EBU R128 loudness normalization (#13). Per-stream filter so it
+                // only touches this re-encoded track — copied tracks can't be
+                // filtered, and disposition/codec/metadata stay untouched. A
+                // copied track keeps its original loudness; that's expected,
+                // the toggle's job is to tame the tracks we're already decoding.
+                if normalizeLoudness {
+                    cmd += ["-filter:a:\(outIdx)", "loudnorm"]
+                }
             } else {
                 cmd += ["-c:a:\(outIdx)", "copy"]
             }
@@ -466,6 +475,7 @@ public enum Transcoder {
         burnIn: BurnInSubtitle? = nil,
         originalLanguageFallback: String? = nil,
         audioLanguageOverrides: [Int: String] = [:],
+        normalizeLoudness: Bool = false,
         progress: ((Double) -> Void)? = nil
     ) async throws -> URL {
         guard let ffmpeg = FFmpegLocator.ffmpeg else { throw TranscodeError.ffmpegNotFound }
@@ -484,7 +494,8 @@ public enum Transcoder {
             externalSubs: externalSubs,
             burnIn: burnIn,
             originalLanguageFallback: originalLanguageFallback,
-            audioLanguageOverrides: audioLanguageOverrides
+            audioLanguageOverrides: audioLanguageOverrides,
+            normalizeLoudness: normalizeLoudness
         )
 
         guard !cmd.isEmpty else { throw TranscodeError.ffmpegNotFound }

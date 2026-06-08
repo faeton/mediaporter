@@ -105,8 +105,33 @@ struct DeviceColumnView: View {
                     .foregroundStyle(theme.textFaint)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if let total = estimatedSendBytes(eligible), total > 0 {
+                // Pre-Send size estimate (#11) — the same per-file estimator the
+                // resolution picker shows, summed. "≈" because transcode output
+                // is a prediction (±30%); copies are exact.
+                Text("≈ \(ByteFormat.short(total)) to send")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(theme.textFaint)
             }
         }
+    }
+
+    /// Summed predicted output size across the about-to-send jobs (#11). nil
+    /// when none have probed media info yet.
+    private func estimatedSendBytes(_ eligible: [FileJob]) -> Int64? {
+        var total: Int64 = 0
+        var any = false
+        for job in eligible {
+            guard let info = job.mediaInfo else { continue }
+            let b = estimateOutputBytes(
+                for: job.maxResolution,
+                mediaInfo: info,
+                selectedAudioCount: max(job.selectedAudio.count, 1),
+                videoWillReencode: job.needsReencode
+            )
+            if b > 0 { total += b; any = true }
+        }
+        return any ? total : nil
     }
 
     private func deviceBlock(info: DeviceInfo) -> some View {

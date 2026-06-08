@@ -352,13 +352,28 @@ Matching rules (apply to both bulk-apply and external):
 
 ## P3 — QoL features (pull when an item bites)
 
-10. Manual metadata override in the file row (title / year / SxxEyy).
-11. Dry-run / final-size estimate before "Send"
-    (source bitrate × resolution-ratio² × duration).
-12. Forced-subtitle flag in the per-file details.
-13. Audio loudnorm checkbox.
-14. Multi-device picker in DeviceColumn (currently auto-picks iPad).
-15. Expert-mode custom ffmpeg flags in Settings.
+10. ✅ **DONE.** Manual metadata override in the file row (title / year / SxxEyy)
+    — `EditTitleSheet` (movies) / cluster show-picker (TV), already shipped.
+11. ✅ **DONE 2026-06-08.** Pre-Send size estimate — the Send button now shows
+    "≈ N GB to send" (sum of `estimateOutputBytes` over eligible jobs); the
+    per-resolution picker already showed the per-file "≈".
+12. ✅ **DONE.** Forced-subtitle flag in the per-file details — `FileRowView`
+    `subtitleDispositionTags` surfaces "forced" / "SDH" / "default", already shipped.
+13. ✅ **DONE 2026-06-08.** Audio loudnorm checkbox — Settings → Transcode
+    "Normalize audio loudness (EBU R128)" (`PipelineController.normalizeLoudness`,
+    persisted). Applies the ffmpeg `loudnorm` filter per-stream, only to
+    re-encoded audio (copied tracks keep their levels). Verified the filter
+    coexists with our aac/`-ac`/`-disposition:a default` flags without breaking
+    the audio-switcher rule (CLAUDE.md #10).
+14. ✅ **DONE** (36df5c6). Multi-device picker in DeviceColumn with USB/Wi-Fi
+    transport badges.
+15. **HELD — not shipped.** Expert-mode custom ffmpeg flags in Settings.
+    Deliberately deferred: arbitrary user flags can silently override the
+    documented safety-critical args (audio-switcher disposition #10, `-tag:v
+    hvc1` / `-f mp4` #11) and produce broken syncs that are painful to
+    diagnose. Lowest value of the P3 set, highest blast radius, no concrete
+    demand yet. Revisit only with a clear use case + a guard that protects the
+    critical flags.
 
 ---
 
