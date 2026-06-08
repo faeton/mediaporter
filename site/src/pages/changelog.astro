@@ -4,6 +4,27 @@ import Base from "../layouts/Base.astro";
 // Keeping it static now to avoid coupling the site build to source layout changes in MacApp/.
 const releases = [
   {
+    version: "0.8.1",
+    date: "2026-06-08",
+    notes: [
+      "Audio loudness normalization — Settings → Transcode → \"Normalize audio loudness (EBU R128)\" evens out quiet-dialogue / loud-action mixes via the ffmpeg `loudnorm` filter. Off by default, persisted. Only applies to tracks being re-encoded; copied tracks keep their original levels.",
+      "Pre-Send size estimate — the Send button now shows \"≈ N GB to send\", the summed predicted output size across the files about to sync.",
+      "Clearer Wi-Fi sync failures — a failed sync to a Wi-Fi device now hints that it may have gone to sleep (a sleeping device stops advertising over the network and drops the connection); shown only for genuine transport failures, not cancels, disk-full, or USB.",
+    ],
+  },
+  {
+    version: "0.8.0",
+    date: "2026-06-08",
+    notes: [
+      "Sync over Wi-Fi — the full transcode → upload → register flow now works with the device on Wi-Fi, no cable. The blocker was a single API choice: the legacy service-start skips the SSL handshake network lockdown sessions require, so AFC now uses a secure service-start + the connection's socket fd + the SSL I/O context (one code path serves USB and Wi-Fi). Keep the device awake and unlocked — a sleeping device stops advertising and drops off Wi-Fi within ~2 min.",
+      "Multi-device USB/Wi-Fi picker — when more than one iPhone/iPad is attached, the device column shows a picker; each device carries a real per-transport badge (USB / Wi-Fi). Transports are tracked per device (prefers USB, promotes Wi-Fi if USB drops).",
+      "Reliability: mid-sync connection loss now aborts fast instead of stalling ~2 min — the send return code was proven meaningless as a liveness signal, so the session keys on the drainer thread observing transport death. Disk preflight sizes on predicted output (excludes stream-copied files), fixing false \"not enough space\" rejections of big drops.",
+      "Performance: VideoToolbox capability is probed once per run instead of a subprocess per file; the debug-only output probe is compiled out of release builds; the show-extras list is cached instead of re-sorted on every progress tick.",
+      "Bitrate hints — the per-file row shows the measured source bitrate, and the recommendation banner adds \"these files run ~N Mbps at full resolution\" when a downscale is on the table.",
+      "Diagnostics: `bench-upload` reports the transport (Wi-Fi measured ~56–63 MB/s on a test device, above the older ~30 MB/s USB-2 baseline); poster-fallback branch logging; faster Wi-Fi discovery; analyze no longer pins the cooperative thread pool during ffprobe.",
+    ],
+  },
+  {
     version: "0.7.0",
     date: "2026-05-18",
     notes: [
