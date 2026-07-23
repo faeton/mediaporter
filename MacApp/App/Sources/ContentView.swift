@@ -77,6 +77,20 @@ struct ContentView: View {
         return key.finalize()
     }
 
+    /// The job the pipeline is actively working on right now. `.uploaded` is
+    /// excluded on purpose — jobs park there for minutes waiting on batch ATC
+    /// registration while the interesting progress is on the next `.syncing`
+    /// job. First match in list order so concurrent analyzers don't make the
+    /// follow-scroll jitter.
+    private var activeJobID: UUID? {
+        pipeline.jobs.first { job in
+            switch job.status {
+            case .analyzing, .muxing, .transcoding, .tagging, .syncing: return true
+            default: return false
+            }
+        }?.id
+    }
+
     /// "iPad" / "iPhone" / "iPod" / "device" — keeps drop-zone copy honest
     /// when an iPhone is plugged in instead of an iPad.
     private var deviceClassLabel: String {
@@ -191,28 +205,58 @@ struct ContentView: View {
                         if showEmpty {
                             EmptyStateView(theme: theme, accent: tweaks.accent)
                         } else {
-                            ScrollView {
-                                LazyVStack(spacing: 4) {
-                                    ForEach(clusterExtrasOrderedCache, id: \.0) { cid, extras in
-                                        ClusterExtrasSection(
-                                            clusterID: cid, extras: extras,
-                                            theme: theme, accent: tweaks.accent
-                                        )
+                            ScrollViewReader { proxy in
+                                ScrollView {
+                                    LazyVStack(spacing: 4) {
+                                        ForEach(clusterExtrasOrderedCache, id: \.0) { cid, extras in
+                                            ClusterExtrasSection(
+                                                clusterID: cid, extras: extras,
+                                                theme: theme, accent: tweaks.accent
+                                            )
+                                        }
+                                        ForEach(pipeline.jobs) { job in
+                                            FileRowView(
+                                                job: job,
+                                                isExpanded: expanded.contains(job.id),
+                                                theme: theme,
+                                                accent: tweaks.accent,
+                                                density: tweaks.density,
+                                                onToggle: { toggle(job.id) },
+                                                onRemove: { pipeline.removeJob(job) }
+                                            )
+                                        }
                                     }
-                                    ForEach(pipeline.jobs) { job in
-                                        FileRowView(
-                                            job: job,
-                                            isExpanded: expanded.contains(job.id),
-                                            theme: theme,
-                                            accent: tweaks.accent,
-                                            density: tweaks.density,
-                                            onToggle: { toggle(job.id) },
-                                            onRemove: { pipeline.removeJob(job) }
-                                        )
+                                    .padding(.vertical, 8)
+                                    .padding(.horizontal, 10)
+                                }
+                                // Follow the run: whenever the pipeline moves on to a
+                                // new job, bring that row near the top so finished
+                                // rows scroll away above and the queue stays visible
+                                // below. Fires only on job *transitions* (not every
+                                // progress tick), so a user who scrolls off to look
+                                // at something isn't yanked back mid-file.
+                                //
+                                // Backward jumps are suppressed: under runPipelined a
+                                // job drops to `.ready` between encode-finish and
+                                // upload-start, so first-active briefly hands off to
+                                // the next transcoding job and then snaps back to
+                                // `.syncing` — without the guard every file in a
+                                // multi-file Send scrolls forward → back → forward.
+                                // The suppressed row sits just above the anchor
+                                // anyway, and a fresh run passes through nil (no old
+                                // index), so it always re-follows from the top.
+                                .onChange(of: activeJobID) { oldID, newID in
+                                    guard let newID else { return }
+                                    if let oldID,
+                                       let oldIdx = pipeline.jobs.firstIndex(where: { $0.id == oldID }),
+                                       let newIdx = pipeline.jobs.firstIndex(where: { $0.id == newID }),
+                                       newIdx < oldIdx {
+                                        return
+                                    }
+                                    withAnimation(.easeInOut(duration: 0.3)) {
+                                        proxy.scrollTo(newID, anchor: UnitPoint(x: 0, y: 0.15))
                                     }
                                 }
-                                .padding(.vertical, 8)
-                                .padding(.horizontal, 10)
                             }
                         }
                     }
