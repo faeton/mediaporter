@@ -130,9 +130,12 @@ func registerUploadedFiles(
         do {
             let session = ATCSession(device: device, verbose: verbose)
             let (grappa, anchorStr) = try session.handshake()
-            let newAnchor = String(Int(anchorStr)! + 1)
+            guard let anchorInt = Int(anchorStr) else {
+                throw SyncError.protocolError("device sent non-numeric Media anchor '\(anchorStr)'")
+            }
+            let newAnchor = String(anchorInt + 1)
 
-            let plistData = session.buildSyncPlist(files: syncFiles, anchor: Int(newAnchor)!)
+            let plistData = try session.buildSyncPlist(files: syncFiles, anchor: anchorInt + 1)
             let cigData = try session.computeCIG(deviceGrappa: grappa, plistData: plistData)
 
             let registerAFC = try AFCClient(device: device)
@@ -198,24 +201,41 @@ final class RegisterSession {
     /// yet.
     func open(files: [SyncFileInfo], progress: ((String) -> Void)? = nil) throws {
         var lastError: Error?
-        for attempt in 0..<2 {
+        // Cold-start tolerance. Right after a device is connected or unlocked,
+        // medialibraryd can take tens of seconds to answer the ATC handshake
+        // — it's still waking up / finishing its initial media scan, so the
+        // RequestingSync gets no ReadyForSync. The device is otherwise fine
+        // (AFC already connected). The old 2-attempt / 8s-total window was too
+        // short for a freshly-attached device, surfacing a spurious
+        // "handshake failed" on the very first Send. Back off across 4
+        // attempts (~26s of settle + up to a 30s handshake wait each) and, if
+        // they all miss, throw the explanatory `deviceNotReady` so the UI can
+        // tell the user to unlock/wait rather than dumping the raw protocol
+        // reason. Each retry message names the attempt so the wait reads as
+        // deliberate progress, not a stall.
+        let settleSchedule: [UInt32] = [2, 4, 8, 12]
+        let attempts = settleSchedule.count
+        for attempt in 0..<attempts {
             // Fresh session per attempt — handshake leaves stale state if
             // it half-completes. Brief settle even on first attempt so
             // medialibraryd has a moment to commit any in-flight state from
-            // the previous run; longer on retry.
-            let settle: UInt32 = attempt == 0 ? 2 : 6
+            // the previous run; longer on each retry.
+            let settle = settleSchedule[attempt]
             progress?(attempt == 0
                 ? "Waiting for device to settle…"
-                : "Retrying after handshake failure — waiting longer…")
+                : "Device still waking up — retrying (\(attempt + 1)/\(attempts))…")
             sleep(settle)
 
             let s = ATCSession(device: device, verbose: verbose)
             do {
                 progress?("Connecting to device (ATC handshake)…")
                 let (grappa, anchorStr) = try s.handshake()
-                let newAnchor = String(Int(anchorStr)! + 1)
+                guard let anchorInt = Int(anchorStr) else {
+                    throw SyncError.protocolError("device sent non-numeric Media anchor '\(anchorStr)'")
+                }
+                let newAnchor = String(anchorInt + 1)
                 progress?("Building sync manifest…")
-                let plistData = s.buildSyncPlist(files: files, anchor: Int(newAnchor)!)
+                let plistData = try s.buildSyncPlist(files: files, anchor: anchorInt + 1)
                 let cigData = try s.computeCIG(deviceGrappa: grappa, plistData: plistData)
                 let registerAFC = try AFCClient(device: device)
                 try s.prepareSync(
@@ -230,6 +250,8 @@ final class RegisterSession {
                 s.close()
                 if case .handshakeFailed = err {
                     lastError = err
+                    DebugLog.notice("atc.handshake.retry",
+                        "attempt \(attempt + 1)/\(attempts) failed: \(err.localizedDescription)")
                     continue
                 }
                 throw err
@@ -238,7 +260,11 @@ final class RegisterSession {
                 throw error
             }
         }
-        throw lastError ?? SyncError.handshakeFailed("ATC handshake failed after retry")
+        // Every attempt missed the handshake — the cold-start signature.
+        // Log the last raw reason for diagnostics, surface the friendly one.
+        DebugLog.error("atc.handshake.exhausted",
+            "no ReadyForSync after \(attempts) attempts; last=\((lastError as? SyncError)?.localizedDescription ?? "unknown")")
+        throw SyncError.deviceNotReady(attempts: attempts)
     }
 
     func registerFile(_ f: SyncFileInfo) throws {
@@ -264,10 +290,12 @@ final class RegisterSession {
         session?.sendProgress(assetID: assetID, fraction: fraction)
     }
 
-    func finish() {
-        session?.finishSync()
+    @discardableResult
+    func finish() -> ATCSession.SyncFinishOutcome {
+        let outcome = session?.finishSync() ?? .finished
         afc?.close(); afc = nil
         session?.close(); session = nil
+        return outcome
     }
 
     /// Cancel-path finalization. After the caller has abandoned every
@@ -278,10 +306,12 @@ final class RegisterSession {
     /// Empirically a few seconds is enough; we cap at `deadlineSeconds`
     /// so a cancelling user isn't stuck on the 120 s normal-path wait.
     /// (#15 from research/docs/ATC_PIPELINE_OPTIMIZATION.md.)
-    func finishGraceful(deadlineSeconds: TimeInterval = 15) {
-        session?.finishSync(deadlineSeconds: deadlineSeconds)
+    @discardableResult
+    func finishGraceful(deadlineSeconds: TimeInterval = 15) -> ATCSession.SyncFinishOutcome {
+        let outcome = session?.finishSync(deadlineSeconds: deadlineSeconds) ?? .finished
         afc?.close(); afc = nil
         session?.close(); session = nil
+        return outcome
     }
 
     /// Tear down without waiting for SyncFinished. Reserved for paths
@@ -335,8 +365,11 @@ public func deleteFromDevice(
 
     let session = ATCSession(device: device, verbose: verbose)
     let (grappa, anchorStr) = try session.handshake()
-    let newAnchor = String(Int(anchorStr)! + 1)
-    let plistData = session.buildDeletePlist(syncIDs: syncIDs, anchor: Int(newAnchor)!)
+    guard let anchorInt = Int(anchorStr) else {
+        throw SyncError.protocolError("device sent non-numeric Media anchor '\(anchorStr)'")
+    }
+    let newAnchor = String(anchorInt + 1)
+    let plistData = try session.buildDeletePlist(syncIDs: syncIDs, anchor: anchorInt + 1)
     let cigData = try session.computeCIG(deviceGrappa: grappa, plistData: plistData)
 
     let afc = try AFCClient(device: device)

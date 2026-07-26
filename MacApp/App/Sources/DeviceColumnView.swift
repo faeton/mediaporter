@@ -170,6 +170,10 @@ struct DeviceColumnView: View {
 
             recommendationCard(info: info)
 
+            if pipeline.duplicateCheckUnavailable != nil {
+                duplicateCheckOffCard
+            }
+
             if let stats = pipeline.lastRunStats, stats.runEnd != nil {
                 RunSummaryCard(theme: theme, accent: accent, stats: stats)
             }
@@ -185,14 +189,25 @@ struct DeviceColumnView: View {
 
     private var noDeviceBlock: some View {
         VStack(spacing: 6) {
-            Text("No device")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(theme.text)
-            Text("Connect an iPhone or iPad via USB or Wi-Fi.\nTrust the computer if prompted.")
-                .font(.system(size: 11))
-                .foregroundStyle(theme.textDim)
-                .multilineTextAlignment(.center)
-                .lineSpacing(2)
+            if pipeline.frameworkCompatibilityError != nil {
+                Text("Device sync unavailable")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                Text("MediaPorter isn't compatible with this version of macOS yet.\nAnalyze and transcode still work — check porter.md for an update.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textDim)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+            } else {
+                Text("No device")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                Text("Connect an iPhone or iPad via USB or Wi-Fi.\nTrust the computer if prompted.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textDim)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 20)
@@ -243,6 +258,28 @@ struct DeviceColumnView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(accent.ring, lineWidth: 1)
+        )
+    }
+
+    /// Amber note when the device-library pull failed during analyze —
+    /// duplicate detection is off for this batch, so files already on the
+    /// device would sync again without this warning (B4).
+    private var duplicateCheckOffCard: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
+            Text("Couldn't read the device library — duplicate check is off for this batch. Files already on the device won't be flagged.")
+                .font(.system(size: 12))
+                .foregroundStyle(theme.text)
+                .lineSpacing(1)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.orange.opacity(0.35), lineWidth: 1)
         )
     }
 

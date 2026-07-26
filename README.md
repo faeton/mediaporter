@@ -1,6 +1,6 @@
 # mediaporter
 
-Transfer video files to iPhone and iPad over USB — no iTunes, no Finder, no cloud. Videos appear in the native Apple TV app with full metadata, artwork, and playback support.
+Transfer video files to iPhone and iPad over USB or Wi-Fi — no iTunes, no Finder, no cloud. Videos appear in the native Apple TV app with full metadata, artwork, and playback support.
 
 An open-source alternative to iTunes/Finder video sync. Push any video from your Mac to your iOS device with automatic transcoding, metadata lookup, and native TV app integration.
 
@@ -17,7 +17,7 @@ If you want to use the app, get it from porter.md. If you want to read the code 
 2. **Metadata** — looks up title, year, and poster art from TMDb
 3. **Transcode** — converts to Apple-compatible format if needed (HEVC/H.264 via ffmpeg, with VideoToolbox hardware acceleration)
 4. **Tag** — writes MP4 metadata atoms (title, artwork, HD flag, stik type, TV-episode fields)
-5. **Sync** — transfers to device over USB using the native ATC protocol
+5. **Sync** — transfers to device over USB or Wi-Fi using the native ATC protocol
 
 Videos appear in the TV app immediately — movies in the Movies tab, TV episodes grouped by show and season.
 
@@ -39,7 +39,10 @@ Videos appear in the TV app immediately — movies in the Movies tab, TV episode
 - **Duplicate skip** — files already on the device (matched on title + duration ±2 s) are filtered out by default; per-row override puts them back in the queue
 - **Movies and TV shows** — automatic detection, TMDb metadata, season/episode grouping, per-episode stills and show portraits; fallback posters when TMDb has nothing
 - **Storage-aware recommendation** — banner respects the device's panel resolution by default; a Settings toggle ("I AirPlay to a 4K display") flips to keeping originals
-- **Direct USB transfer** — no Wi-Fi, no cloud, no Apple ID required
+- **USB or Wi-Fi transfer** — direct Mac-to-device, no cloud, no Apple ID required. Wi-Fi sync works cable-free after the device has been paired once over USB; a multi-device picker shows each attached iPhone/iPad with its live transport badge
+- **Audio loudness normalization** — optional EBU R128 `loudnorm` pass (Settings → Transcode) evens out quiet-dialogue / loud-action mixes; only applies to tracks already being re-encoded
+- **Pre-Send size estimate** — the Send button shows "≈ N GB to send" before anything starts, summed from per-file predicted output sizes
+- **`mediaporterctl`** — headless CLI companion (`devices`, `sync`, `delete`, `smoke-test`, `bench-upload`) for scripting and release gating
 - **No iTunes, Finder, or admin prompts** — the shipping app `dlopen`s Apple's private `MobileDevice.framework` directly, so there's no sudo, no helper install, no `SMAppService` dialog
 - **Sign-and-go distribution** — release builds are signed + notarized via Developer ID, stapled, and shipped as a DMG from [porter.md](https://porter.md). First-launch ffmpeg precheck explains the one external dependency
 - **Resilient lifecycle** — zombie ffmpeg children from a hard crash are swept at next launch; cancel during mux or transcode actually kills the running ffmpeg; orphan AFC bytes can be re-registered without re-uploading; leftover transcoded outputs in temp are surfaced with a one-click cleanup
@@ -53,7 +56,7 @@ Three columns: drop zone on the left, queued files in the middle (with inline ex
 - **File rows** show the parsed title, detected streams, the planned action ("transcode" / "remux" / "copy"), and any cluster-extras that would be muxed in. Hold-to-preview a poster for the full artwork.
 - **Cluster header** (visible when the dropped folder has external dubs / subs) lists every detected studio + sub label with include checkboxes, a radio for default audio dub, and a Burn-in toggle per sub. Selections propagate to every episode in the cluster.
 - **Bottom timeline** is the live three-stage pill — Analyze → Transcode → Upload — with per-stage active counts (muxing rolls up under Transcode), a synced/on-device counter, and Cancel / Clear buttons.
-- **Settings** covers TMDb / OpenSubtitles credentials, encoder (VideoToolbox vs libx265), the AirPlay-to-4K toggle, and the "Always propagate per-episode changes" switch.
+- **Settings** covers TMDb / OpenSubtitles credentials, encoder (VideoToolbox vs libx265), loudness normalization, the AirPlay-to-4K toggle, the "Always propagate per-episode changes" switch, and an FFmpeg-source panel showing whether the bundled or system ffmpeg is in use.
 - **Menu bar** wires Cmd-Q guard during sync, manual "Retry Registration" when a previous run left bytes on the device but skipped the final commit, "Clean Up Staged Media Files" for surfaced orphans / leftovers, and a Help submenu for one-click bug reports with diagnostic info.
 
 ## How it works
@@ -85,7 +88,7 @@ Release builds run through `MacApp/scripts/release.sh`: arm64 SwiftPM build → 
 
 ### Protocol details
 
-- **ATC handshake** with Grappa authentication over USB
+- **ATC handshake** with Grappa authentication (USB or Wi-Fi; network sessions use the SSL-aware secure-service path)
 - **Binary plist** sync metadata with CIG cryptographic signatures
 - **AFC** (Apple File Conduit) for file upload to device storage
 - **Asset registration** via FileBegin/FileComplete protocol messages
@@ -97,7 +100,7 @@ The result is a native media library entry — videos appear in the TV app with 
 
 Every diagnostic event the app produces (ATC wire traffic, AFC upload progress, ffmpeg invocations, TMDb / OpenSubtitles lookups, device-library snapshots) goes to **two** sinks at once:
 
-1. **Apple Unified Logging** under subsystem **`md.porter.MediaPorter`** (matches the app's bundle identifier). The category is the tag prefix before the first dot — currently `afc`, `atc`, `cleanup`, `device`, `extracts`, `ffmpeg`, `ffprobe`, `opensubs`, `prereq`, `tmdb`, `zombie`. Inspect with:
+1. **Apple Unified Logging** under subsystem **`md.porter.MediaPorter`** (matches the app's bundle identifier). The category is the tag prefix before the first dot — currently `afc`, `atc`, `bugsink`, `cleanup`, `device`, `extracts`, `ffmpeg`, `ffprobe`, `opensubs`, `pipeline`, `poster`, `prereq`, `tmdb`, `transcode`, `ui`, `zombie`. Inspect with:
 
    ```bash
    # live tail
@@ -136,8 +139,12 @@ This project includes extensive protocol research and reverse engineering docume
 | [ATC Protocol](research/docs/ATC_PROTOCOL.md) | Wire format, message flow, observed commands |
 | [Trace Analysis](research/docs/TRACE_ANALYSIS.md) | Protocol trace analysis from LLDB sessions |
 | [Media Library DB](research/docs/MEDIA_LIBRARY_DB.md) | MediaLibrary.sqlitedb schema analysis |
-| [Architecture](research/docs/ARCHITECTURE.md) | Module overview and technical decisions |
+| [Audio Switcher Rule](research/docs/AUDIO_SWITCHER_RULE.md) | Why AC3 must become AAC and default-track dispositions matter |
+| [Grappa](research/docs/GRAPPA.md) | Authentication handshake analysis |
+| [Release Testing](research/docs/RELEASE_TESTING.md) | Pre-release verification checklist |
 | [History](research/docs/HISTORY.md) | Chronological findings log |
+
+(`research/docs/` contains more; see [research/README.md](research/README.md) for the full index.)
 
 ## Repository layout
 

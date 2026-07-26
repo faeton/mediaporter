@@ -76,6 +76,16 @@ func usage() -> Never {
 
 guard argv.count >= 2 else { usage() }
 
+// B2: every subcommand except help touches the private frameworks — fail
+// with a clear message instead of the old fatalError when a macOS update
+// breaks a private API.
+if !["-h", "--help", "help"].contains(argv[1]),
+   let fwError = preflightPrivateFrameworks() {
+    FileHandle.standardError.write(Data(
+        "error: \(fwError.localizedDescription)\nMediaPorter isn't compatible with this version of macOS yet — check porter.md for an update.\n".utf8))
+    exit(3)
+}
+
 switch argv[1] {
 case "devices":
     runDevices()
@@ -140,7 +150,7 @@ case "streaming-test":
 case "-h", "--help", "help":
     usage()
 default:
-    FileHandle.standardError.write(Data("unknown command: \(argv[1])\n".utf8))
+    writeUserStderr("unknown command: \(argv[1])\n")
     usage()
 }
 
@@ -162,7 +172,7 @@ func runDevices() {
             let device = try discoverDevice()
             printDevice(device, index: nil)
         } catch {
-            FileHandle.standardError.write(Data("no device: \(error)\n".utf8))
+            writeUserStderr("no device: \(error)\n")
             exit(1)
         }
         return
@@ -192,7 +202,7 @@ private func printDevice(_ device: DeviceInfo, index: Int?) {
 func runAnalyze(path: String) {
     let url = URL(fileURLWithPath: path)
     guard FileManager.default.fileExists(atPath: url.path) else {
-        FileHandle.standardError.write(Data("not found: \(path)\n".utf8))
+        writeUserStderr("not found: \(path)\n")
         exit(1)
     }
 
@@ -212,7 +222,7 @@ func runAnalyze(path: String) {
     switch result! {
     case .success(let v): info = v
     case .failure(let e):
-        FileHandle.standardError.write(Data("probe failed: \(e)\n".utf8))
+        writeUserStderr("probe failed: \(e)\n")
         exit(1)
     }
 
@@ -265,14 +275,14 @@ func runPull(remote: String, local: String) {
     do {
         device = try discoverDevice()
     } catch {
-        FileHandle.standardError.write(Data("no device: \(error)\n".utf8))
+        writeUserStderr("no device: \(error)\n")
         exit(1)
     }
     let url = URL(fileURLWithPath: local)
     do {
         try pullDeviceFile(remote: remote, to: url, device: device)
     } catch {
-        FileHandle.standardError.write(Data("pull failed: \(error.localizedDescription)\n".utf8))
+        writeUserStderr("pull failed: \(error.localizedDescription)\n")
         exit(1)
     }
     let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
@@ -301,8 +311,7 @@ func runPull(remote: String, local: String) {
             } catch {
                 // Sibling missing is expected for a checkpointed DB.
                 // Log to stderr so triage knows we tried but don't exit.
-                FileHandle.standardError.write(Data(
-                    "\(sidecarRemote): \(error.localizedDescription) (non-fatal)\n".utf8))
+                writeUserStderr("\(sidecarRemote): \(error.localizedDescription) (non-fatal)\n")
             }
         }
     }
@@ -314,7 +323,7 @@ func runLs(remote: String) {
     let device: DeviceInfo
     do { device = try discoverDevice() }
     catch {
-        FileHandle.standardError.write(Data("no device: \(error)\n".utf8))
+        writeUserStderr("no device: \(error)\n")
         exit(1)
     }
     do {
@@ -325,7 +334,7 @@ func runLs(remote: String) {
             for e in entries.sorted() { print(e) }
         }
     } catch {
-        FileHandle.standardError.write(Data("ls failed: \(error.localizedDescription)\n".utf8))
+        writeUserStderr("ls failed: \(error.localizedDescription)\n")
         exit(1)
     }
 }
@@ -334,7 +343,7 @@ func runStat(remote: String) {
     let device: DeviceInfo
     do { device = try discoverDevice() }
     catch {
-        FileHandle.standardError.write(Data("no device: \(error)\n".utf8))
+        writeUserStderr("no device: \(error)\n")
         exit(1)
     }
     do {
@@ -345,7 +354,7 @@ func runStat(remote: String) {
             exit(2)
         }
     } catch {
-        FileHandle.standardError.write(Data("stat failed: \(error.localizedDescription)\n".utf8))
+        writeUserStderr("stat failed: \(error.localizedDescription)\n")
         exit(1)
     }
 }
@@ -357,7 +366,7 @@ func runStreamingTest(f1: String, f2: String) {
     let u2 = URL(fileURLWithPath: f2)
     for u in [u1, u2] {
         guard FileManager.default.fileExists(atPath: u.path) else {
-            FileHandle.standardError.write(Data("not found: \(u.path)\n".utf8))
+            writeUserStderr("not found: \(u.path)\n")
             exit(1)
         }
     }
@@ -373,7 +382,7 @@ func runStreamingTest(f1: String, f2: String) {
     }
     sema.wait()
     if let e = thrown {
-        FileHandle.standardError.write(Data("streaming-test failed: \(e.localizedDescription)\n".utf8))
+        writeUserStderr("streaming-test failed: \(e.localizedDescription)\n")
         exit(1)
     }
 }
@@ -385,7 +394,7 @@ func runGateTest(f1: String, f2: String, sleepSec: Double) {
     let u2 = URL(fileURLWithPath: f2)
     for u in [u1, u2] {
         guard FileManager.default.fileExists(atPath: u.path) else {
-            FileHandle.standardError.write(Data("not found: \(u.path)\n".utf8))
+            writeUserStderr("not found: \(u.path)\n")
             exit(1)
         }
     }
@@ -409,7 +418,7 @@ func runGateTest(f1: String, f2: String, sleepSec: Double) {
     switch result! {
     case .success(let r): report = r
     case .failure(let e):
-        FileHandle.standardError.write(Data("gate-test failed: \(e.localizedDescription)\n".utf8))
+        writeUserStderr("gate-test failed: \(e.localizedDescription)\n")
         exit(1)
     }
 
@@ -445,7 +454,7 @@ func runRecover() {
     do {
         device = try discoverDevice()
     } catch {
-        FileHandle.standardError.write(Data("no device: \(error)\n".utf8))
+        writeUserStderr("no device: \(error)\n")
         exit(1)
     }
     print("Device: \(device.displayName) (\(device.udid.prefix(16))...)")
@@ -466,7 +475,7 @@ func runRecover() {
     switch reportResult! {
     case .success(let r): report = r
     case .failure(let error):
-        FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
+        writeUserStderr("\(error.localizedDescription)\n")
         exit(1)
     }
 
@@ -502,7 +511,7 @@ func runRecover() {
 func runSync(paths: [String]) -> Never {
     let urls = paths.map { URL(fileURLWithPath: $0) }
     for u in urls where !FileManager.default.fileExists(atPath: u.path) {
-        FileHandle.standardError.write(Data("not found: \(u.path)\n".utf8))
+        writeUserStderr("not found: \(u.path)\n")
         exit(1)
     }
     Task { @MainActor in
@@ -516,7 +525,7 @@ func runSync(paths: [String]) -> Never {
         do {
             pc.deviceInfo = try discoverDevice()
         } catch {
-            FileHandle.standardError.write(Data("no device: \(error.localizedDescription)\n".utf8))
+            writeUserStderr("no device: \(error.localizedDescription)\n")
             exitCode = 1
             return
         }
@@ -542,7 +551,7 @@ func runSync(paths: [String]) -> Never {
                     }
                 }()
                 if line != lastLine {
-                    FileHandle.standardError.write(Data("\r\u{1b}[2K\(line)".utf8))
+                    writeUserStderr("\r\u{1b}[2K\(line)")
                     lastLine = line
                 }
                 try? await Task.sleep(for: .milliseconds(250))
@@ -552,7 +561,7 @@ func runSync(paths: [String]) -> Never {
         await pc.runFullPipeline()
 
         printer.cancel()
-        FileHandle.standardError.write(Data("\r\u{1b}[2K".utf8)) // clear status line
+        writeUserStderr("\r\u{1b}[2K") // clear status line
 
         print("")
         print("Result:")
@@ -599,7 +608,7 @@ func runDelete(titleLike: String, confirm: Bool) {
     let device: DeviceInfo
     do { device = try discoverDevice() }
     catch {
-        FileHandle.standardError.write(Data("no device: \(error.localizedDescription)\n".utf8))
+        writeUserStderr("no device: \(error.localizedDescription)\n")
         exit(1)
     }
     print("Device: \(device.displayName)")
@@ -608,7 +617,7 @@ func runDelete(titleLike: String, confirm: Bool) {
     do {
         candidates = try findDeleteCandidates(titleLike: titleLike, device: device)
     } catch {
-        FileHandle.standardError.write(Data("query failed: \(error.localizedDescription)\n".utf8))
+        writeUserStderr("query failed: \(error.localizedDescription)\n")
         exit(1)
     }
     if candidates.isEmpty {
@@ -665,7 +674,7 @@ func runDelete(titleLike: String, confirm: Bool) {
             print("   bound file itself when delete_track commits)")
         }
     } catch {
-        FileHandle.standardError.write(Data("delete failed: \(error.localizedDescription)\n".utf8))
+        writeUserStderr("delete failed: \(error.localizedDescription)\n")
         exit(1)
     }
 
@@ -681,7 +690,7 @@ func runDelete(titleLike: String, confirm: Bool) {
             for c in stillPresent { print("  • \(c.title) (sync_id=\(c.syncID))") }
         }
     } catch {
-        FileHandle.standardError.write(Data("verify query failed: \(error.localizedDescription) (non-fatal)\n".utf8))
+        writeUserStderr("verify query failed: \(error.localizedDescription) (non-fatal)\n")
     }
 }
 
@@ -701,7 +710,7 @@ func parseChunkList(_ s: String) -> [Int] {
 func runBenchUpload(path: String, chunkSizes: [Int]?, passes: Int) {
     let url = URL(fileURLWithPath: path)
     guard FileManager.default.fileExists(atPath: url.path) else {
-        FileHandle.standardError.write(Data("not found: \(path)\n".utf8))
+        writeUserStderr("not found: \(path)\n")
         exit(1)
     }
     let chunks = chunkSizes ?? [256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024]
@@ -721,7 +730,7 @@ func runBenchUpload(path: String, chunkSizes: [Int]?, passes: Int) {
     sema.wait()
 
     if let e = thrown {
-        FileHandle.standardError.write(Data("bench-upload failed: \(e.localizedDescription)\n".utf8))
+        writeUserStderr("bench-upload failed: \(e.localizedDescription)\n")
         exit(1)
     }
     guard let r = report else { return }
@@ -765,8 +774,7 @@ func runSmokeTest(fixturePath: String?, keep: Bool) -> Never {
     let defaultFixture = "/Users/faeton/Sites/mediaporter/test_fixtures/mediaporter-test-shows/Mediaporter.Alpha.S01E01.mp4"
     let url = URL(fileURLWithPath: fixturePath ?? defaultFixture)
     guard FileManager.default.fileExists(atPath: url.path) else {
-        FileHandle.standardError.write(Data(
-            "fixture not found: \(url.path)\n".utf8))
+        writeUserStderr("fixture not found: \(url.path)\n")
         exit(1)
     }
 
@@ -812,7 +820,7 @@ func runSmokeTest(fixturePath: String?, keep: Bool) -> Never {
                     line = pc.overallStatus
                 }
                 if line != last {
-                    FileHandle.standardError.write(Data("\r\u{1b}[2K\(line)".utf8))
+                    writeUserStderr("\r\u{1b}[2K\(line)")
                     last = line
                 }
                 try? await Task.sleep(for: .milliseconds(250))
@@ -820,7 +828,7 @@ func runSmokeTest(fixturePath: String?, keep: Bool) -> Never {
         }
         await pc.runFullPipeline()
         printer.cancel()
-        FileHandle.standardError.write(Data("\r\u{1b}[2K".utf8))
+        writeUserStderr("\r\u{1b}[2K")
 
         guard let job = pc.jobs.first else {
             failures.append("PipelineController dropped the job")

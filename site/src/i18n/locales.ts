@@ -326,7 +326,7 @@ const en: Strings = {
   downloadTitle: "Get MediaPorter.",
   downloadBody:
     "Signed and notarized by Apple. Pick the build that fits — both ship the same app, the only difference is whether ffmpeg comes inside the bundle.",
-  downloadVersion: "v0.8.1 · 2026-06-08",
+  downloadVersion: "v0.8.2 · 2026-07-26",
   downloadRequires: "# Requires macOS 14+ · Apple Silicon",
   downloadBundledTag: "## with-ffmpeg",
   downloadBundledTitle: "MediaPorter + ffmpeg",
@@ -579,7 +579,7 @@ const ru: Strings = {
   downloadTitle: "Получить MediaPorter.",
   downloadBody:
     "Подписано и нотаризовано Apple. Выберите сборку — приложение одинаковое, отличается только тем, лежит ли ffmpeg внутри бандла.",
-  downloadVersion: "v0.8.1 · 2026-06-08",
+  downloadVersion: "v0.8.2 · 2026-07-26",
   downloadRequires: "# Требуется macOS 14+ · Apple Silicon",
   downloadBundledTag: "## with-ffmpeg",
   downloadBundledTitle: "MediaPorter + ffmpeg",
@@ -831,7 +831,7 @@ const zh: Strings = {
   downloadTitle: "获取 MediaPorter。",
   downloadBody:
     "已由 Apple 签名并公证。两种构建里跑的是同一个应用——区别只在于 ffmpeg 是否打包在应用内。",
-  downloadVersion: "v0.8.1 · 2026-06-08",
+  downloadVersion: "v0.8.2 · 2026-07-26",
   downloadRequires: "# 需要 macOS 14+ · Apple Silicon",
   downloadBundledTag: "## with-ffmpeg",
   downloadBundledTitle: "MediaPorter + ffmpeg",
@@ -1084,7 +1084,7 @@ const ko: Strings = {
   downloadTitle: "MediaPorter 받기.",
   downloadBody:
     "Apple 서명 및 공증 완료. 빌드 두 가지 모두 동일한 앱이며, 차이는 ffmpeg가 번들에 포함되어 있는지 여부뿐입니다.",
-  downloadVersion: "v0.8.1 · 2026-06-08",
+  downloadVersion: "v0.8.2 · 2026-07-26",
   downloadRequires: "# macOS 14+ · Apple Silicon 필요",
   downloadBundledTag: "## with-ffmpeg",
   downloadBundledTitle: "MediaPorter + ffmpeg",
@@ -1241,7 +1241,7 @@ function buildGuide(locale: Locale): GuideStrings {
         },
         {
           id: "compared",
-          heading: "Compared to AirDrop, VLC, Infuse, and WALTR",
+          heading: "Compared to AirDrop, VLC, and Infuse",
           body: "AirDrop dumps files into the Files app, not the TV app, and skips per-episode metadata. VLC and Infuse are great third-party players but live outside the native TV ecosystem (no AirPlay-from-lock-screen, no system Now Playing). Older sync tools targeted iTunes; iTunes is gone on modern macOS. MediaPorter is built specifically for the modern, post-iTunes path into the native TV app, with anime-aware metadata handling.",
         },
       ],
@@ -1363,7 +1363,7 @@ function buildGuide(locale: Locale): GuideStrings {
         },
         {
           id: "compared",
-          heading: "对比 AirDrop、VLC、Infuse、WALTR",
+          heading: "对比 AirDrop、VLC、Infuse",
           body: "AirDrop 把文件丢进 Files 而不是 TV 应用，且没有逐集元数据。VLC 和 Infuse 是优秀的第三方播放器，但在原生 TV 生态之外（锁屏 AirPlay、系统正在播放都没有）。早期同步工具走 iTunes，现代 macOS 上 iTunes 已经不在。MediaPorter 专门为「后 iTunes 时代」进入原生 TV 应用而做，且懂动漫的元数据规则。",
         },
       ],

@@ -119,19 +119,6 @@ public func usbMaxCapabilityMbps(productType: String) -> Int {
     return 480
 }
 
-/// Short human label for a Mbps value. "USB 2", "USB 3 (5 Gbps)", etc.
-public func usbSpeedLabel(mbps: Int) -> String {
-    switch mbps {
-    case ..<480: return "USB 1"
-    case 480: return "USB 2"
-    case 5000: return "USB 3 (5 Gbps)"
-    case 10000: return "USB 3 (10 Gbps)"
-    case 20000: return "USB 3 (20 Gbps)"
-    case 40000: return "USB 4 / Thunderbolt"
-    default: return "\(mbps) Mbps"
-    }
-}
-
 // MARK: - Private helpers
 
 private func mbpsForUSBSpeedCode(_ code: Int) -> Int {

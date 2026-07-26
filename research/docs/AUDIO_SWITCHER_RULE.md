@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-13
 **Status:** Confirmed experimentally on iPad Pro 12.9" (3rd gen), iPadOS 17+
-**Supersedes:** CLAUDE.md finding #15 (2026-04-06), which claimed mixed audio codecs break the switcher. That was wrong — the real rule is codec-specific.
+**Supersedes:** an early 2026-04-06 CLAUDE.md finding which claimed mixed audio codecs break the switcher. That was wrong — the real rule is codec-specific. (This rule now lives as CLAUDE.md critical rule #10.)
 
 ## The rule
 

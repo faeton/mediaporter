@@ -222,9 +222,24 @@ struct SendDiagnosticSheet: View {
                 data: Data(diag.utf8)
             )
 
+            // Framework stderr (B3) — MobileDevice/AFC spam plus any Swift
+            // runtime messages that hit fd 2 after the redirect. Rides along
+            // with the debug log under the same toggle.
+            let stderrAttach: BugsinkClient.Attachment? = {
+                guard wantsLog,
+                      let tail = tailFile(path: frameworkStderrLogPath, lines: logTailLines),
+                      !tail.isEmpty else { return nil }
+                return BugsinkClient.Attachment(
+                    filename: "framework-stderr.log",
+                    contentType: "text/plain",
+                    data: Data(tail.utf8)
+                )
+            }()
+
             var attachments: [BugsinkClient.Attachment] = [diagAttach]
             if let s = screenshot { attachments.append(s) }
             if let l = logAttach { attachments.append(l) }
+            if let f = stderrAttach { attachments.append(f) }
 
             let summary = descCopy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "(no description) — \(diag.split(separator: "\n").first ?? "report")"

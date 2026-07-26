@@ -1,6 +1,7 @@
 # mediaporter — Research Request (HISTORICAL)
 
-> **NOTE (2026-04-06):** This research request is HISTORICAL. The ATC sync blocker has been fully resolved. Videos now sync to the TV app with correct metadata (media_type=2048, media_kind=2). See `CLAUDE.md` "Confirmed Findings (2026-04-06)" and `scripts/atc_proper_sync.py` for the working solution.
+> **NOTE (2026-04-06):** This research request is HISTORICAL. The ATC sync blocker has been fully resolved. Videos now sync to the TV app with correct metadata (media_type=2048, media_kind=2).
+> **ARCHIVED (2026-07-26):** internal references below are dead — `scripts/atc_proper_sync.py` and the CLAUDE.md "Confirmed Findings" section no longer exist; `docs/*` paths moved to `research/docs/`. Kept only as provenance for the interoperability-research record. Candidate for deletion.
 
 ## Context
 

@@ -26,7 +26,19 @@ struct MediaPorterApp: App {
                     // Hand the delegate a reference so applicationShouldTerminate
                     // can check for in-flight work before honoring Cmd-Q.
                     AppDelegate.sharedPipeline = pipeline
-                    pipeline.startDeviceMonitoring()
+                    configureDiagnostics()
+                    // B2: dlopen/dlsym everything up front. On a macOS that
+                    // renamed/removed a private API this used to be a silent
+                    // fatalError at first device touch; now device features
+                    // stay off and the user gets one clear alert (local
+                    // analyze/transcode still works).
+                    if let fwError = preflightPrivateFrameworks() {
+                        pipeline.frameworkCompatibilityError = fwError.localizedDescription
+                        DebugLog.error("prereq.frameworks", fwError.localizedDescription)
+                        reportFrameworkIncompatibility(fwError)
+                    } else {
+                        pipeline.startDeviceMonitoring()
+                    }
                     pipeline.startFFmpegMonitoring()
                     pipeline.refreshLeftovers()
                     if let key = ConfigLoader.tmdbAPIKey() {
@@ -39,7 +51,6 @@ struct MediaPorterApp: App {
                     pipeline.hwAccel = ConfigLoader.hwAccelEnabled()
                     pipeline.airplayTo4K = ConfigLoader.airplayTo4K()
                     MetricsCollector.bump("launches")
-                    configureDiagnostics()
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -160,6 +171,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Quit Anyway")
         let response = alert.runModal()
         return response == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
+    }
+}
+
+/// One alert + one Bugsink event when the private-framework preflight fails
+/// (B2). This is the "macOS update broke the private API" path — the single
+/// place a clear user-facing message matters most, and without the event
+/// we'd never learn it happened (framework load failures produce no crash
+/// report and no heartbeat).
+@MainActor
+private func reportFrameworkIncompatibility(_ error: FrameworkError) {
+    Task {
+        try? await BugsinkClient.send(
+            message: "Private-framework preflight failed: \(error.localizedDescription)",
+            level: .error,
+            tags: [
+                "type": "framework_preflight",
+                "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
+            ]
+        )
+    }
+    let alert = NSAlert()
+    alert.alertStyle = .critical
+    alert.messageText = "MediaPorter isn't compatible with this version of macOS yet"
+    alert.informativeText = """
+    A system component MediaPorter relies on has changed \
+    (\(error.localizedDescription)). Device sync is disabled; analyzing and \
+    transcoding files still works. Check porter.md for an update.
+    """
+    alert.addButton(withTitle: "OK")
+    alert.addButton(withTitle: "Open porter.md")
+    if alert.runModal() == .alertSecondButtonReturn,
+       let url = URL(string: "https://porter.md") {
+        NSWorkspace.shared.open(url)
     }
 }
 

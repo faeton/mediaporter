@@ -169,8 +169,11 @@ public func gateTestInterleave(
     // Register, but with a probe between FileComplete #1 and #2.
     let session = ATCSession(device: device, verbose: false)
     let (grappa, anchorStr) = try session.handshake()
-    let newAnchor = String(Int(anchorStr)! + 1)
-    let plistData = session.buildSyncPlist(files: [p1.asSyncFileInfo, p2.asSyncFileInfo], anchor: Int(newAnchor)!)
+    guard let anchorInt = Int(anchorStr) else {
+        throw SyncError.protocolError("device sent non-numeric Media anchor '\(anchorStr)'")
+    }
+    let newAnchor = String(anchorInt + 1)
+    let plistData = try session.buildSyncPlist(files: [p1.asSyncFileInfo, p2.asSyncFileInfo], anchor: anchorInt + 1)
     let cigData = try session.computeCIG(deviceGrappa: grappa, plistData: plistData)
     let registerAFC = try AFCClient(device: device)
 

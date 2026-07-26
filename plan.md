@@ -1,36 +1,27 @@
 # MediaPorter Roadmap
 
 Living plan. Items move up as priorities change. Engineering checklist for the
-MacApp + Python reference. Source of truth for "what's next" — `CLAUDE.md` Next
-steps mirrors the P0/P1 items in tighter form.
+MacApp + Python reference. Source of truth for "what's next".
 
 ---
 
-## Readiness snapshot — 2026-06-07
+## Readiness snapshot — 2026-07-26
 
-Shipping target is **0.7.0** (tagged 2026-05-18; `MediaLibrary` wire-key fix +
-streaming-register reliability + `mediaporterctl` smoke-test gate). Working tree
-clean, 75/75 unit tests green at last release, smoke-test PASS on akm16pro.
+Shipped: **0.8.0 + 0.8.1** (both tagged 2026-06-08). 0.8.0 headlined Wi-Fi
+sync + multi-device USB/Wi-Fi picker + the A-series reliability/perf closes
+(A2, A5–A9); 0.8.1 added audio loudnorm, the pre-Send "≈ N GB" estimate, and
+clearer Wi-Fi failure messaging. Working tree clean, 75/75 unit tests green,
+smoke-test PASS on akm16pro over both USB and Wi-Fi.
 
-**Ship-readiness: good.** All P0/P1 engine work is shipped and on-device-verified.
-The reconciliation below (verified against code 2026-06-07) closed several items
-this doc still listed as open: **P0 #1** (episode-still poster order), **#12**
-recommendation rework (bitrate sub-item remains), **#13** zombie sweep, **A1**,
-**A3** (mitigated), **A4**, **R2**, **R3**.
+**Shipped since 0.8.1 (unreleased):** ✅ file list follows the active job
+during a run (652a0f6, 2026-07-23) — in CHANGELOG under Unreleased.
 
-**Shipped since (2026-06-07):** ✅ **A2** (1810ae0), ✅ **A6/A7** (b2f131f),
-✅ **F1 Wi-Fi sync** (a18dcf9), ✅ **multi-device USB/Wi-Fi picker** (36df5c6),
-✅ **A5/A8/A9 + F1 follow-ups** (f7c5c28), ✅ **review follow-ups** (d1fd593).
-
-**Tail closed (2026-06-08, → 0.8.0):** ✅ **#12 bitrate hint** (per-row source
-bitrate already wired; added the aggregate "~N Mbps at full resolution" hint to
-the recommendation banner), ✅ **P0 #4 poster fallback** (verified end-to-end on
-akm16pro: a no-TMDb-match episode took the synthetic-landscape branch, 37 KB
-poster generated + stamped + uploaded on a successful sync; branch logging
-added), ✅ **R1b DMG background** (superseded — plain no-background install
-window is the shipped design; orphaned placeholder PNG removed).
-
-**Nothing tracked open below P-tier.** Next: cut **0.8.0** (Wi-Fi sync headline).
+**Open items:** **P3 #15** (expert ffmpeg flags — deliberately HELD) and the
+fresh **B-series audit** (2026-07-26, below): B2 dlopen `fatalError` and B1
+device-data force-unwraps are the two worth pulling first (consultant
+consensus: B2 ≥ B1; suggested 0.8.2 scope at the end of the B-series). A-series "(orig)"
+sections are historical records, not open work. Next release: cut **0.8.2**
+when enough QoL accumulates, or **0.9.0** if a feature headline emerges.
 
 ---
 
@@ -329,7 +320,7 @@ Matching rules (apply to both bulk-apply and external):
 - Downloading missing tracks from external sources.
 - Bulk-apply across different clusters in one drop.
 
-### 12. Recommendation rework *(mostly shipped 2026-05-14)*
+### 12. Recommendation rework ✅ DONE 2026-06-08
 - Default on-device-display framing kept; Settings toggle "I AirPlay/cast to a
   4K display" flips the banner to keep-originals copy
   (`DeviceColumnView.swift::recommendationCopy`, `pipeline.airplayTo4K`).
@@ -444,20 +435,28 @@ Fixed via option (a): the blocking `Process.run`/read/`waitUntilExit` runs in
 terminates the ffprobe child (the CLAUDE.md #12 contract), which the old inline
 form never did either. *(original finding below)*
 
-### A5 (orig). probeFile blocks a cooperative-pool thread (not MainActor) — **Medium** *(open — verified 2026-06-07)*
+### A5 (orig). probeFile blocks a cooperative-pool thread (not MainActor) — **Medium** *(historical — resolved above)*
 - `Sources/Analysis/Probe.swift:126`. Still synchronous `proc.run()` + `readDataToEndOfFile()` (`:145`) + `waitUntilExit()` (`:146`). Called from `PipelineController.analyzeOne` (`PipelineController.swift:989`) which is `@MainActor`-isolated; called concurrently up to 4× by the TaskGroup at 956.
 - Important correction to the original finding's framing: `probeFile` is a *nonisolated* `async` function. Swift 5.7+ hops nonisolated async calls off the caller's actor onto the generic cooperative executor. So UI does **not** freeze. What suffers: 4 concurrent probes each pin a cooperative-pool worker (pool size ≈ `activeProcessorCount`). On a quad-core MBA that's all of them; other concurrency (TMDb fetches, OpenSubtitles, file scanning) gets queued behind them.
 - Consequence: parallel analyze is parallel, but during the probe window other async work in the app stalls. Not catastrophic — the analyze wave already coalesces network work via `resolveCluster` caching.
 - Fix options: (a) wrap probe body in `Task.detached { … }.value` so blocking lives outside the cooperative pool, (b) switch to async pipe reading via `DispatchSource.makeReadSource(fileDescriptor:queue:)` or `for try await line in handle.bytes.lines`. Option (a) is one-line and good enough; (b) is correct but invasive. Same pattern recurs in: `Tagger`, `StillExtractor`, anywhere we use Process synchronously.
 
-### A6. VideoToolbox detection runs a subprocess per transcode — **Medium** *(open — verified 2026-06-07)*
-- `Sources/Transcode/Transcoder.swift:126` (definition), still called at `:310` inside the per-transcode hot path. Not yet cached as a `static let`.
+### A6. VideoToolbox detection runs a subprocess per transcode — ✅ RESOLVED 2026-06-07 (b2f131f)
+`Transcoder.videoToolboxAvailable()` now memoizes behind `vtCacheLock`/`vtCache`
+— one probe per app run. *(original finding below)*
+
+### A6 (orig). VideoToolbox detection runs a subprocess per transcode — **Medium** *(historical — resolved above)*
+- `Sources/Transcode/Transcoder.swift:126` (definition), was called inside the per-transcode hot path without caching.
 - Consequence: every file pays ~50–150 ms + a stderr-free Process for a fact that never changes per app run.
 - Fix: replace with `static let supportsVideoToolbox: Bool = detectVideoToolbox()` on `Transcoder` (or move into a launch-time capability struct alongside `FFmpegLocator`). One subprocess at first use, cached forever.
 
-### A7. probeOutputForDebug unconditional per output file — **Medium** *(open — verified 2026-06-07)*
-- `Sources/Transcode/Transcoder.swift:574` still calls `probeOutputForDebug(outputPath)` unconditionally after every successful transcode (function at `:579`). Not gated behind `Tweaks.debug`.
-- Fix: gate behind `Tweaks.debug` (or remove). Cheap, but visible per-file overhead and noise in the debug log.
+### A7. probeOutputForDebug unconditional per output file — ✅ RESOLVED 2026-06-07 (b2f131f)
+`probeOutputForDebug` is now wrapped in `#if DEBUG` (`Transcoder.swift:~609`) —
+release builds skip the per-output ffprobe entirely. *(original finding below)*
+
+### A7 (orig). probeOutputForDebug unconditional per output file — **Medium** *(historical — resolved above)*
+- `Sources/Transcode/Transcoder.swift` called `probeOutputForDebug(outputPath)` unconditionally after every successful transcode.
+- Fix applied: gated behind `#if DEBUG`.
 
 ### A8. Disk preflight is over-conservative for the streaming pipeline — ✅ RESOLVED 2026-06-07 (f7c5c28)
 Split the preflight by surface. **Key correction to the original framing:** the
@@ -472,7 +471,7 @@ source, zero temp — the real over-rejection fix). Device = `Σ(predicted outpu
 upload loop's per-file device poll). codex+grok caught the copy-only over-count
 and the mux-scratch gap; both folded in. *(original finding below)*
 
-### A8 (orig). Disk preflight is over-conservative for the streaming pipeline — **Medium (Mac side); spec-debate (device side)** *(open — verified 2026-06-07)*
+### A8 (orig). Disk preflight is over-conservative for the streaming pipeline — **Medium (Mac side); spec-debate (device side)** *(historical — resolved above)*
 - `Sources/Pipeline/PipelineStats.swift:129` still computes `required = sourceBytesTotal × 1.1` for both Mac temp and the device; no `predictedOutputBytes` field yet.
 - Mac side is over-conservative: `runPipelined` keeps ~1 transcoded output in flight at a time. The real requirement is `largest_single_output × 1.1 + headroom`, not the sum. Big drops (50+ files) can be rejected even when the pipeline would happily stream through with ~10 GB of free temp.
 - Device side is more subtle. The actual need is sum of *output* bytes, not source — and outputs often shrink after downscale / H.265 / AC3→AAC. But output size isn't known until after `evaluateCompatibility` per file. Today's 1.1×source is the safe pessimistic bound. Better: after analyze, sum `decision.predictedOutputBytes` (add field if missing) and use that × 1.05 as the device-side check.
@@ -486,7 +485,7 @@ XOR-linear collisions, and never stale on a re-cluster / show-rename, which a
 count-only key missed (user-reachable via the show picker — codex+grok flagged
 it). *(original finding below)*
 
-### A9 (orig). SwiftUI recomputes `clusterExtrasOrdered` every progress tick — **Low** *(open — verified 2026-06-07)*
+### A9 (orig). SwiftUI recomputes `clusterExtrasOrdered` every progress tick — **Low** *(historical — resolved above)*
 - `App/Sources/ContentView.swift:27` is still a computed property on the view, re-invoked from `body` (`:157`) on every `@Observable` tick. Not cached on the controller. SwiftUI re-invokes body on every `@Observable` change — `job.progress` ticks every 0.25 s during transcode/upload.
 - Small N: invisible. Large drop (50+ jobs, 8+ clusters): noticeable CPU during sync, plus more invalidations downstream than necessary.
 - Fix: cache the ordered list on the controller as `@Published var clusterExtrasOrdered: [(String, ReleaseExtras)]`, recompute only when `clusterExtras` / `jobs.count` / `tvShowResolutions` change. Or use `@State` on the view + `.onChange(of:)` of a stable derived key.
@@ -502,8 +501,197 @@ it). *(original finding below)*
 **All A-series items resolved.** Audit-era closes: **A1** (post-write size
 verify), **A3** (per-task self-abandon), **A4** (stderr drainer). 2026-06-07:
 **A2** (1810ae0), **A6/A7** (b2f131f), **A5/A8/A9** (f7c5c28). Nothing left in
-this tier; remaining work is the cosmetic/verification tail in the readiness
-snapshot at the top.
+this tier; open audit work now lives in the **B-series (2026-07-26)** below.
+
+---
+
+## Audit findings — 2026-07-26 (untriaged)
+
+Code-review sweep against the post-0.8.1 tree (652a0f6). No TODO/FIXME markers
+exist in the codebase; these are latent robustness/hygiene items. Promote into
+P-tier as they bite; close with a `*(shipped)*` line.
+
+### B1. Force-unwraps on device-supplied data in the ATC path — ✅ SHIPPED 2026-07-26
+Guarded `Int(anchorStr)` at all four sites (throws `SyncError.protocolError`);
+all ~13 `messageCreate!` sites now go through `sendMsg`/`sendMsgOrThrow`
+helpers; `try!` plist serialization → throwing builders (tests updated);
+`as! Int` file-size cast guarded. *(original finding below)*
+
+### B1 (orig). Force-unwraps on device-supplied data in the ATC path — **High** *(historical — resolved above)*
+- `SyncEngine.swift:133/:216/:338` — `Int(anchorStr)!` where `anchorStr` comes
+  from the device's `DataclassAnchors["Media"]` CFString. A non-numeric/empty
+  anchor hard-crashes mid-sync instead of throwing `SyncError`. Same pattern in
+  `GateTest.swift:172-173`.
+- `ATCSession.swift:143` + ~12 more sites — `ATH.messageCreate(...)!`
+  force-unwraps a private-framework return; nil ⇒ crash instead of
+  `handshakeFailed`.
+- `ATCSession.swift:334/:361` — `try! PropertyListSerialization.data(...)` on a
+  throwing path; `AFC.swift:142` — `as! Int` on a file attribute.
+- Fix: convert to guarded throws (`SyncError.protocolError`). Mechanical; the
+  call sites are already inside throwing functions.
+
+### B2. `dlopen`/`dlsym` failures crash the GUI (`fatalError`) — ✅ SHIPPED 2026-07-26
+Handles are now thread-safe lazy `Result` globals; `preflightPrivateFrameworks()`
+dlopens all three libs + dlsyms every table symbol. GUI checks at launch:
+compatibility alert + Bugsink event + device features disabled (local
+analyze/transcode still works); CLI exits 3 with a clear message. The loader
+`fatalError`s remain only as unreachable backstops. *(original finding below)*
+
+### B2 (orig). `dlopen`/`dlsym` failures crash the GUI (`fatalError`) — **High** *(historical — resolved above)*
+- `Frameworks.swift:19/:42/:53/:56/:66` — missing `AirTrafficHost` on a future
+  macOS, un-bundled `libcig.dylib`, or a renamed private symbol crashes at
+  launch/first device touch. This is the most likely OS-upgrade failure mode and
+  the one place a user-facing "MediaPorter isn't compatible with this macOS yet"
+  alert would help most. Fix: make loaders throwing, surface an alert + Bugsink
+  report.
+
+### B3. Permanent stderr hijack kills crash diagnosability — ✅ SHIPPED 2026-07-26
+stderr now redirects to `/tmp/mediaporter-stderr.log` (truncated per launch)
+instead of `/dev/null` — framework spam stays out of the terminal but crash
+reasons stay recoverable, and the file rides along in Send Diagnostic. CLI
+user-facing errors write to the saved original stderr (`writeUserStderr`) so
+they reach the terminal (they were silently swallowed before). The
+`_md/_ath/_cig` double-dlopen race is closed by the lazy-global rewrite (B2).
+*(original finding below)*
+
+### B3 (orig). Permanent stderr hijack kills crash diagnosability — **Medium** *(historical — resolved above)*
+- `Frameworks.swift:29 + :277-285` — `loadMobileDevice()` calls
+  `suppressFrameworkStderr()`, `dup2`-ing fd 2 → `/dev/null` for the whole
+  process; `restoreStderr()` (`:288`) is never called. After the first device
+  touch, all Swift-runtime/crash output is lost. Also: `_md`/`_ath`/`_cig` are
+  unsynchronized globals reachable from MainActor and detached uploaders —
+  double-`dlopen` race. Fix: scope the redirect to framework calls (or restore
+  after load) and guard the globals with a lock/`static let`.
+
+### B4. Swallowed errors that silently degrade UX — **partially shipped 2026-07-26**
+- ✅ **Duplicate detection** (shipped): a failed device-library pull now sets
+  `PipelineController.duplicateCheckUnavailable` and the device column shows an
+  amber "duplicate check is off for this batch" card, instead of the silent
+  `?? []` that read as "nothing is a duplicate".
+- ⏳ **Tagging** (deferred): `PipelineController.swift:~2420` `try? Tagger.tag`
+  → unconditional `.ready` still ships an untagged file silently. Consensus:
+  low priority — ATC artwork is independent of the MP4 atoms, so device
+  artwork survives; wants a per-row "metadata not embedded" chip, don't fail
+  the sync. Defer to a later patch.
+- ⏳ **Subtitle cache write** (deferred): `OpenSubtitlesClient.swift:~299`
+  silent drop — log-only fix, opportunistic.
+
+### B5. Blocking sleeps on cooperative threads — **Low**
+- `SyncEngine.swift:128/:210` POSIX `sleep(3…8)`; `ATCSession.swift:853`
+  `Thread.sleep` in a 120 s poll loop. Both run in `Task.detached` contexts
+  today, so impact is bounded; swap for `Task.sleep` when touching those files.
+
+### B6. Dead/orphaned code + packaging hygiene — **partially shipped 2026-07-26**
+- ✅ `Sync/PrivateFrameworks.h` — deleted (unreferenced, superseded by
+  `Frameworks.swift` typealiases).
+- ✅ `USBSpeed.swift` `usbSpeedLabel(mbps:)` — deleted (no callers).
+- ⏳ `GateTest.swift`/`BenchUpload.swift` compile into the shipped GUI app but
+  are reachable only from dev CLI subcommands; consider `#if DEBUG`/separate
+  target. Deferred (packaging touch).
+- ⏳ `scripts/make-icon.swift` vs `App/Sources/AppIcon.swift` — two drifting
+  copies of the icon artwork; unify. Deferred.
+- ⏳ Local-only cruft (gitignored, not in Package resources):
+  `MediaPorter/Resources/grappa.bin`, `MacApp/Private/SyncAuthSeed.dat`, and
+  multi-GB stale DMGs in `MacApp/build/` (release.sh only cleans the current
+  version). Housekeeping — owner's call.
+- ⏳ `Package.swift:40-44` — `MediaPorterCoreTests` is the only target without
+  `.swiftLanguageMode(.v5)`: kept as the Swift-6 migration canary (consensus:
+  fine as-is).
+
+### B7. `DeviceCleanup.swift:24-35` binding-lag race — **documented, by design**
+- The `item_extra.location=''` lag window is papered over by `pendingSlots`;
+  underlying race unfixed by design. Keep the comment as the tracking record.
+
+### B8. `finishSync` outcome is invisible to the caller — ✅ SHIPPED 2026-07-26
+`finishSync` now returns `SyncFinishOutcome` (`finished`/`allowedFallback`/
+`connectionLost`/`timeout`), threaded through `RegisterSession.finish`/
+`finishGraceful`; `runPipelined` surfaces non-`finished` as "device didn't
+confirm the final commit — check TV.app". *(original finding below)*
+
+### B8 (orig). `finishSync` outcome is invisible to the caller — **High** *(historical — resolved above)*
+- `ATCSession.finishSync` (`:808-858`) returns `Void` on every exit: real
+  `SyncFinished`, the deliberate SyncAllowed-after-30s fallback, connection
+  death, and the 120 s timeout all look identical to the pipeline, which then
+  reports the run as a success (`PipelineController.swift:~2256`). The fallback
+  itself is a documented escape hatch (fresh inbox drain + 30 s grace +
+  `.notice`), NOT the old rule-#14 bug — but timeout/death exits deserve a
+  distinct user-visible "sync may not have committed — check TV.app" state.
+- Fix: return an enum (`finished` / `allowedFallback` / `connectionLost` /
+  `timeout`), surface non-`finished` in the run summary.
+
+### B9. `readMsg` abandons blocked readers that steal later messages — **High** *(codex, verified)*
+- `ATCSession.swift:1086-1102` — on timeout, the global-queue
+  `ATH.readMessage(c)` task is abandoned but stays blocked; when a message
+  eventually arrives, the zombie reader consumes it instead of the drainer
+  (the exact failure the drainer comment at `:878` warns about). Repeated
+  timeouts stack multiple competing readers.
+- Fix: single long-lived reader owned by the drainer; `readMsg` waits on the
+  inbox instead of spawning its own read.
+
+### B10. Handshake/manifest CF typing assumed, not checked — ✅ SHIPPED 2026-07-26
+Handshake `DeviceInfo`/`Grappa`/anchor extraction now `CFGetTypeID`-guards
+every device value before bridging (mistyped → `handshakeFailed`, not UB).
+AssetManifest parsing already type-checked before bridging. *(original finding
+below)*
+
+### B10 (orig). Handshake/manifest CF typing assumed, not checked — **Medium** *(historical — resolved above)*
+- `ATCSession.swift:153-171` assumed device params are
+  `CFDictionary`/`CFData`/`CFString` without `CFGetTypeID` checks.
+
+### B11. Drainer teardown races — **Medium** *(codex)*
+- `drainerStop` read/written unsynchronized (`ATCSession.swift:872/:876/:892/:920`);
+  `close()` invalidates/releases the connection without joining the blocking
+  reader. Fix alongside B9's reader restructure.
+
+### B12. `AFCConnectionSetSecureContext` failure logged but ignored — ✅ SHIPPED 2026-07-26
+`AFCClient.init` now throws `AFCError.connectionFailed` when an SSL context
+exists (Wi-Fi) and `afcSetSecureContext` returns nonzero — instead of
+proceeding into the plaintext-into-SSL 60 s stall. Nil context (USB) still
+no-ops.
+
+### B13. Device-library sqlite3 pipe deadlock — ✅ SHIPPED 2026-07-26
+All four `DeviceLibraryQuery` sqlite3 calls now go through a shared
+`runSQLite3` helper that drains stdout to EOF BEFORE `waitUntilExit` (and
+sets stdin to `/dev/null`), closing the >64 KB pipe-buffer deadlock per
+CLAUDE.md #12.
+
+### Consultant review (2026-07-26, codex + grok) — consensus priorities
+Both agree B1/B2 lead, with reweights:
+- **B2 ≥ B1** — the dlopen `fatalError` is the structural product risk (one
+  macOS update can strand every user with a silent crash, and framework load
+  actually happens at app-appearance via DeviceMonitor, before diagnostics
+  init). B2 fix should also cover *lazy* `lookup` calls, not just `dlopen`,
+  and preflight all symbols into one cached `Result` + a "not compatible with
+  this macOS yet" alert + one Bugsink event (device features disabled, local
+  transcode still usable).
+- **B1 internal order**: `Int(anchorStr)!` and B10's CF-typing first (true
+  device input), `as! Int` file-size cast next, `messageCreate!`/`try!` plist
+  last (local data, fix for consistency).
+- **B3 stderr promoted** — with no auto-crash SDK, the permanent fd-2 →
+  `/dev/null` redirect guts the only support channel. Note (codex): a scoped
+  save/restore does NOT work — later AFC traffic writes stderr too, and dup2
+  is process-global; either rely on `AMDSetLogLevel(0)` alone, or drain a
+  process-lifetime pipe to the saved stderr + a bounded file.
+- **B4 dups > tagging > subtitle-cache** — silent duplicate rows in TV.app are
+  the worst outcome (hard for users to clean). Tagging failure keeps device
+  artwork (ATC artwork is independent of MP4 atoms) — chip, don't fail.
+- **B5/B6 stay opportunistic**; test-target Swift-6 mode is a fine migration
+  canary as-is.
+
+**0.8.2 scope ("doesn't hard-crash on bad protocol / OS drift") — ✅ SHIPPED
+2026-07-26 (unreleased):** B2 (throwing loaders + alert + Bugsink), B1+B10
+device-input guards, B3 stderr redirect, B4 duplicate-detection banner, B8
+outcome enum, B12 secure-context, B13 pipe drain, plus B6 dead-code deletions
+(PrivateFrameworks.h, usbSpeedLabel). Build clean, 75/75 tests green.
+**Still open:** B5 (blocking sleeps), B9/B11 (drainer/reader restructure —
+bigger surgery, own change), B4-tagging/subtitle chips, B6 packaging
+(GateTest/Bench `#if DEBUG`, icon unify, cruft cleanup).
+
+**Original suggested scope (for reference):**
+B2 (throwing loaders + alert + Bugsink), B1+B10 device-input guards, B3
+stderr, B4 duplicate-detection banner, B8 outcome enum, B13 pipe drain.
+Defer: B9/B11 reader restructure (bigger surgery — own change), B5, B6,
+B4-tagging chip. Rough effort for the ship set: ~1–2 days.
 
 ---
 
@@ -597,9 +785,10 @@ over the same link.
   transport. Measured on akm16pro / 152 MB over Wi-Fi: **~56–63 MB/s** (1 MB
   chunk wins), *above* the old ~30 MB/s USB-2 baseline — Wi-Fi is not the
   bottleneck on this link. Large-file sync over Wi-Fi confirmed via smoke-test.
-- **Device-sleep caveat** (doc/UX): a sleeping device stops advertising
-  `_apple-mobdev2._tcp` and drops off within ~2 min (Auto-Lock Never isn't always
-  enough). Worth a user-facing note for Wi-Fi sync.
+- ✅ **Device-sleep caveat** (shipped 0.8.1, 8f26f40): Wi-Fi drop failures now
+  surface a user-facing hint (sleeping device stops advertising
+  `_apple-mobdev2._tcp` and drops off within ~2 min; Auto-Lock Never isn't
+  always enough).
 - One-time `wifi-connections` enable (over USB) is the precondition for a device
   to advertise for network sync.
 

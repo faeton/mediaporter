@@ -7,6 +7,8 @@ tags: [xpc, ampdevices, media-sync, ios, macos, reverse-engineering]
 
 # AMPDevicesAgent XPC Interface Research
 
+> **ARCHIVED:** dead-end approach, superseded by the runtime-`dlopen` design (`MacApp/MediaPorter/Sources/Sync/Frameworks.swift`; see CLAUDE.md "Design priorities"). Kept as a record of why XPC was rejected.
+
 ## Executive Summary
 
 AMPDevicesAgent is the macOS per-user daemon that Finder delegates all iOS device sync/backup operations to (introduced in macOS Catalina when iTunes was decomposed). It communicates via NSXPCConnection using the `AMPDevicesProtocol`. Class-dump headers exist for this protocol and reveal methods directly relevant to our use case -- notably `copyFiles:toDevice:withReply:` and `copyObjects:toDevice:withReply:`. However, connecting to this XPC service from a third-party process almost certainly requires Apple-signed entitlements, making direct XPC calls infeasible without code injection or entitlement spoofing.

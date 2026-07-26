@@ -4,6 +4,18 @@ import Base from "../layouts/Base.astro";
 // Keeping it static now to avoid coupling the site build to source layout changes in MacApp/.
 const releases = [
   {
+    version: "0.8.2",
+    date: "2026-07-26",
+    notes: [
+      "Cold-start handshake tolerance — right after a device is connected or unlocked, its media daemon can take tens of seconds to answer the sync handshake. The first Send no longer fails here: it retries with a growing back-off, shows \"Device still waking up — retrying…\" so the wait reads as progress, and if it still can't connect it explains the likely cause (unlock the device, wait a few seconds, Send again) instead of a bare error.",
+      "Graceful on an incompatible macOS — if a future macOS update changes the private device APIs MediaPorter relies on, the app now shows a clear \"not compatible yet\" message and keeps analyze/transcode working, instead of crashing on launch.",
+      "No more mid-sync crashes on unexpected device data — malformed values from the device during the handshake now fail the sync with an error instead of hard-crashing.",
+      "Clearer result when a sync can't be confirmed — if the device drops the connection or never confirms the final commit, the run says so (\"check TV.app\") rather than reporting success.",
+      "Duplicate check tells you when it's off — if the device's library can't be read at the start of a run, the device panel shows a note that already-on-device files won't be flagged.",
+      "Smaller fixes — a Wi-Fi SSL-context stall is caught immediately instead of hanging ~60 s; a possible hang reading very large device libraries is fixed; the file list auto-scrolls to follow the file currently transcoding or uploading.",
+    ],
+  },
+  {
     version: "0.8.1",
     date: "2026-06-08",
     notes: [

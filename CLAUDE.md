@@ -24,6 +24,7 @@ Non-obvious — each silently fails if broken. Trace evidence in `research/docs/
 12. **ffmpeg subprocess**: drain stderr in a thread (full pipe deadlocks); set stdin to `/dev/null` (else SIGTTIN freeze); register Process/Popen handles globally so Cancel reaches them.
 13. **Artwork via Airlock** — poster JPEG → `/Airlock/Media/Artwork/<AssetID>` + `artwork_cache_id` in plist item dict.
 14. **`SyncAllowed` ≠ `SyncFinished`** — `SyncAllowed` arrives early ("you may proceed") and accumulates in the drainer inbox. Only `SyncFinished` confirms the row is committed. Treating `SyncAllowed` as terminal → row with `base_location_id=0`, file GC-swept, TV.app shows title with no playable file. See HISTORY.md "2026-05-14 — SyncAllowed is NOT terminal".
+15. **Wi-Fi AFC needs the secure-service path** — `AMDeviceSecureStartService` (NOT `AMDeviceStartService` → `0xE8000012` on network sessions), then `AFCConnectionOpen` on the service connection's **socket fd** via `AMDServiceConnectionGetSocket` (passing the `AMDServiceConnectionRef` instead → AFC error 11 on first file op), then `AFCConnectionSetSecureContext` with `AMDServiceConnectionGetSecureIOContext` (skipping it → plaintext into the SSL stream → 60 s Wi-Fi stalls). Over USB the secure context is nil → harmless no-op; one path serves both transports. See CHANGELOG 0.8.0 + plan.md F1.
 
 ## Design priorities
 

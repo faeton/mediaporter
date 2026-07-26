@@ -94,6 +94,13 @@ class AFCClient {
         // invalidated (matches the legacy non-cleanup behaviour).
         let sslCtx = MD.serviceConnectionGetSecureIOContext(svc)
         let setRC = MD.afcSetSecureContext(c, sslCtx)
+        // B12: when there IS an SSL context and wiring it fails, proceeding
+        // guarantees the plaintext-into-SSL stall described above — fail the
+        // connect instead. A nil context (USB) can't fail meaningfully.
+        if sslCtx != nil && setRC != 0 {
+            _ = MD.afcClose(c)
+            throw fail("AFCConnectionSetSecureContext", setRC)
+        }
         DebugLog.notice("afc.connect",
                         "connected via SecureStartService (\(sslCtx != nil ? "ssl/wifi" : "plaintext/usb")) fd=\(sock) setCtx=\(hx(setRC))")
 
@@ -139,7 +146,11 @@ class AFCClient {
         chunkSizeOverride: Int? = nil
     ) throws {
         guard let c = conn else { return }
-        let fileSize = try FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as! Int
+        // Guarded cast (B1) — a missing/odd .size attribute throws instead
+        // of crashing the upload. Same error shape as the InputStream guard.
+        guard let fileSize = (try FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as? NSNumber)?.intValue else {
+            throw AFCError.openFailed(localURL.path, -1)
+        }
         // Per-call chunk size lets one long-lived AFC connection upload
         // a mix of small files (4 MB chunk — modest memory) and large
         // files (16 MB chunk — better throughput on >300 MB). Without

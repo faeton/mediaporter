@@ -1,5 +1,7 @@
 # mediaporter Architecture
 
+> **ARCHIVED (2026-07-26):** this documents the original **Python CLI** (now frozen under `python-reference/`). The shipping product is the Swift app under `MacApp/` — see the repo README and `CLAUDE.md` "Where things live" for the current layout. Kept as a protocol/design reference; file paths below refer to the Python tree and some scripts it mentions no longer exist.
+
 ## Project Goal
 
 Open-source CLI tool to transfer video files to iOS devices over USB-C with:

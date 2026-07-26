@@ -1,5 +1,7 @@
 # Sudo-Free Tunnel Research
 
+> **ARCHIVED:** the question this answered is settled — the Swift app `dlopen`s `MobileDevice.framework`/`AirTrafficHost.framework` and talks to the system `remoted`/`usbmuxd`, so no sudo/tunnel is needed (see CLAUDE.md "Design priorities"). The `sudo pymobiledevice3 remote start-tunnel` step applies only to the frozen python-reference.
+
 ## Findings
 
 ### macOS Services Running

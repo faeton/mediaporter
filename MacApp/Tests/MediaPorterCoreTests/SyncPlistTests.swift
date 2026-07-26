@@ -91,9 +91,9 @@ final class SyncPlistTests: XCTestCase {
 
     // MARK: - movie path
 
-    func testMoviePlistRootShape() {
+    func testMoviePlistRootShape() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeMovieFile()], anchor: 42)
+        let data = try session.buildSyncPlist(files: [makeMovieFile()], anchor: 42)
         let root = parsePlist(data)
 
         XCTAssertEqual(root["revision"] as? Int, 42)
@@ -110,9 +110,9 @@ final class SyncPlistTests: XCTestCase {
         XCTAssertEqual(inserts.count, 1, "one insert_track per file")
     }
 
-    func testMovieInsertTrackHasMovieFlagAndNoTVKeys() {
+    func testMovieInsertTrackHasMovieFlagAndNoTVKeys() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeMovieFile(assetID: 999)], anchor: 1)
+        let data = try session.buildSyncPlist(files: [makeMovieFile(assetID: 999)], anchor: 1)
         let op = insertTrack(in: parsePlist(data))
 
         XCTAssertEqual(op["pid"] as? Int, 999)
@@ -132,9 +132,9 @@ final class SyncPlistTests: XCTestCase {
         XCTAssertNil(videoInfo["episode_sort_id"])
     }
 
-    func testMovieLocationKindIsMpeg4VideoFile() {
+    func testMovieLocationKindIsMpeg4VideoFile() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeMovieFile()], anchor: 1)
+        let data = try session.buildSyncPlist(files: [makeMovieFile()], anchor: 1)
         let op = insertTrack(in: parsePlist(data))
 
         let location = op["location"] as! [String: Any]
@@ -143,9 +143,9 @@ final class SyncPlistTests: XCTestCase {
 
     // MARK: - TV-episode path (CLAUDE.md rule #6 invariants)
 
-    func testEpisodeSeriesKeysLiveInVideoInfo() {
+    func testEpisodeSeriesKeysLiveInVideoInfo() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
+        let data = try session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
         let op = insertTrack(in: parsePlist(data))
         let videoInfo = op["video_info"] as! [String: Any]
 
@@ -156,9 +156,9 @@ final class SyncPlistTests: XCTestCase {
         XCTAssertEqual(videoInfo["episode_sort_id"] as? Int, 10001)
     }
 
-    func testEpisodeItemDictHasArtistAlbumSortFields() {
+    func testEpisodeItemDictHasArtistAlbumSortFields() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
+        let data = try session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
         let op = insertTrack(in: parsePlist(data))
         let item = op["item"] as! [String: Any]
 
@@ -176,9 +176,9 @@ final class SyncPlistTests: XCTestCase {
     // episode_sort_id is duplicated: video_info AND item top-level.
     // Per CLAUDE.md #6: current iOS expects the int at item top-level;
     // older schema kept it on video_info. We ship both for safety.
-    func testEpisodeSortIDIsAtBothItemTopLevelAndVideoInfo() {
+    func testEpisodeSortIDIsAtBothItemTopLevelAndVideoInfo() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
+        let data = try session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
         let op = insertTrack(in: parsePlist(data))
         let item = op["item"] as! [String: Any]
         let videoInfo = op["video_info"] as! [String: Any]
@@ -192,9 +192,9 @@ final class SyncPlistTests: XCTestCase {
     // silently dropped because the canonical cluster routes them
     // through video_info only. If a future refactor moves them, this
     // test fails before it reaches device.
-    func testEpisodeSeriesKeysAreNotAtItemTopLevel() {
+    func testEpisodeSeriesKeysAreNotAtItemTopLevel() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
+        let data = try session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
         let op = insertTrack(in: parsePlist(data))
         let item = op["item"] as! [String: Any]
 
@@ -209,9 +209,9 @@ final class SyncPlistTests: XCTestCase {
     // Forbidden by rule #6: kebab-case keys hit iTunes-Store cluster at
     // strings 0x770800, not the insert_track cluster — different code
     // path, silently ignored by medialibraryd.
-    func testNoKebabCaseKeysAnywhere() {
+    func testNoKebabCaseKeysAnywhere() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
+        let data = try session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
         let op = insertTrack(in: parsePlist(data))
 
         for subKey in ["item", "video_info"] {
@@ -229,9 +229,9 @@ final class SyncPlistTests: XCTestCase {
         }
     }
 
-    func testVideoInfoCarriesAudioAndSubtitleFlags() {
+    func testVideoInfoCarriesAudioAndSubtitleFlags() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
+        let data = try session.buildSyncPlist(files: [makeEpisodeFile()], anchor: 1)
         let op = insertTrack(in: parsePlist(data))
         let vi = op["video_info"] as! [String: Any]
 
@@ -244,9 +244,9 @@ final class SyncPlistTests: XCTestCase {
 
     // MARK: - mixed-batch
 
-    func testMixedBatchEmitsCorrectShapePerFile() {
+    func testMixedBatchEmitsCorrectShapePerFile() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(
+        let data = try session.buildSyncPlist(
             files: [makeMovieFile(assetID: 100), makeEpisodeFile(assetID: 200)],
             anchor: 7
         )
@@ -280,9 +280,9 @@ final class SyncPlistTests: XCTestCase {
     // pass every other test in this file while breaking TV.app metadata
     // panels or audio routing. Per codex review 2026-05-18.
 
-    func testUpdateDbInfoShape() {
+    func testUpdateDbInfoShape() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeMovieFile()], anchor: 1)
+        let data = try session.buildSyncPlist(files: [makeMovieFile()], anchor: 1)
         let ops = opsIn(parsePlist(data))
         // op[0] is contract per CLAUDE.md rule #13
         let dbInfoOp = ops[0]
@@ -295,9 +295,9 @@ final class SyncPlistTests: XCTestCase {
         XCTAssertEqual(dbInfo["primary_container_pid"] as? Int, 0)
     }
 
-    func testInsertTrackHasAvformatInfo() {
+    func testInsertTrackHasAvformatInfo() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(
+        let data = try session.buildSyncPlist(
             files: [makeEpisodeFile()], anchor: 1
         )
         let op = insertTrack(in: parsePlist(data))
@@ -308,9 +308,9 @@ final class SyncPlistTests: XCTestCase {
             "channels from SyncItem.channels must reach avformat_info")
     }
 
-    func testInsertTrackHasItemStatsDefaults() {
+    func testInsertTrackHasItemStatsDefaults() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeMovieFile()], anchor: 1)
+        let data = try session.buildSyncPlist(files: [makeMovieFile()], anchor: 1)
         let op = insertTrack(in: parsePlist(data))
         let stats = op["item_stats"] as! [String: Any]
         // Five defaults — a struct refactor that drops one would surface
@@ -323,9 +323,9 @@ final class SyncPlistTests: XCTestCase {
         XCTAssertNotNil(stats["skip_count_recent"] as? Int)
     }
 
-    func testItemDictBaseFields() {
+    func testItemDictBaseFields() throws {
         let session = makeSession()
-        let data = session.buildSyncPlist(files: [makeMovieFile()], anchor: 1)
+        let data = try session.buildSyncPlist(files: [makeMovieFile()], anchor: 1)
         let op = insertTrack(in: parsePlist(data))
         let item = op["item"] as! [String: Any]
         XCTAssertEqual(item["title"] as? String, "Test Movie")
@@ -338,9 +338,9 @@ final class SyncPlistTests: XCTestCase {
 
     // MARK: - buildDeletePlist
 
-    func testDeletePlistHasOnlyDeleteTrackOps() {
+    func testDeletePlistHasOnlyDeleteTrackOps() throws {
         let session = makeSession()
-        let data = session.buildDeletePlist(syncIDs: [111, 222, 333], anchor: 99)
+        let data = try session.buildDeletePlist(syncIDs: [111, 222, 333], anchor: 99)
         let root = parsePlist(data)
 
         XCTAssertEqual(root["revision"] as? Int, 99)
@@ -354,9 +354,9 @@ final class SyncPlistTests: XCTestCase {
         XCTAssertEqual(pids, [111, 222, 333])
     }
 
-    func testDeletePlistDoesNotIncludeUpdateDbInfo() {
+    func testDeletePlistDoesNotIncludeUpdateDbInfo() throws {
         let session = makeSession()
-        let data = session.buildDeletePlist(syncIDs: [42], anchor: 1)
+        let data = try session.buildDeletePlist(syncIDs: [42], anchor: 1)
         let ops = opsIn(parsePlist(data))
         XCTAssertFalse(ops.contains { ($0["operation"] as? String) == "update_db_info" },
             "delete plist must not emit update_db_info — risks library-wide rewrite")

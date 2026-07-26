@@ -9,9 +9,9 @@ cd MacApp
 swift test
 ```
 
-Expected: **71/71 passed in <100ms**. Highlights:
+Expected: **75/75 passed in <100ms**. Highlights:
 
-- `SyncPlistTests` (12) — pins CLAUDE.md rule #6 wire-key placement on
+- `SyncPlistTests` (16) — pins CLAUDE.md rule #6 wire-key placement on
   `buildSyncPlist` and `buildDeletePlist`. Catches regressions where a
   TV-episode key slips into the wrong sub-dict (silent drop on device).
 - `EpisodeArtworkTests` (6) — episode poster preference + landscape
@@ -80,8 +80,9 @@ If suspicious of AFC regression after changing AFC code:
     --chunks 4M,16M --passes 2
 ```
 
-Expected ~30–40 MB/s on Lightning, 100+ MB/s on USB-3. Big drop in
-`>>> Winner` MB/s vs. the prior session is a red flag.
+Expected ~30–40 MB/s on Lightning, 100+ MB/s on USB-3, ~55–65 MB/s over
+Wi-Fi (the bench prints the transport). Big drop in `>>> Winner` MB/s vs.
+the prior session is a red flag.
 
 ## 4. UI smoke (manual)
 

@@ -41,6 +41,35 @@ public enum DeviceLibraryQueryError: LocalizedError {
 private let dbDir = "/iTunes_Control/iTunes"
 private let dbFiles = ["MediaLibrary.sqlitedb", "MediaLibrary.sqlitedb-wal", "MediaLibrary.sqlitedb-shm"]
 
+/// Run /usr/bin/sqlite3 and return its stdout. Drains the pipe to EOF
+/// BEFORE waiting for exit — a result larger than the ~64 KB pipe buffer
+/// would otherwise block sqlite3 on write while we block on wait
+/// (CLAUDE.md rule #12). EOF arrives when the child exits, so the
+/// subsequent waitUntilExit returns promptly. stderr is expected to stay
+/// tiny (error messages only), so a sequential read after stdout is safe.
+private func runSQLite3(_ arguments: [String], captureStderr: Bool = false) throws -> String {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    proc.arguments = arguments
+    proc.standardInput = FileHandle.nullDevice
+    let out = Pipe()
+    proc.standardOutput = out
+    let err = Pipe()
+    proc.standardError = captureStderr ? err : FileHandle.nullDevice
+    do { try proc.run() } catch {
+        throw DeviceLibraryQueryError.queryFailed(error.localizedDescription)
+    }
+    let raw = out.fileHandleForReading.readDataToEndOfFile()
+    let errData = captureStderr ? err.fileHandleForReading.readDataToEndOfFile() : Data()
+    proc.waitUntilExit()
+    guard proc.terminationStatus == 0 else {
+        let errText = String(data: errData, encoding: .utf8) ?? ""
+        throw DeviceLibraryQueryError.queryFailed(
+            "sqlite3 exit \(proc.terminationStatus)" + (errText.isEmpty ? "" : ": \(errText)"))
+    }
+    return String(data: raw, encoding: .utf8) ?? ""
+}
+
 /// Pull the device's MediaLibrary.sqlitedb and return every (title,
 /// total_time_ms) row. Returns an empty array if the device is offline or
 /// the DB can't be parsed — callers treat that as "no dedup info" rather
@@ -76,31 +105,14 @@ public func loadDeviceLibrary(device: DeviceInfo) throws -> [DeviceLibraryEntry]
     guard mainPulled else { return [] }
 
     let dbPath = tmp.appendingPathComponent(dbFiles[0]).path
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-    proc.arguments = [
+    let text = try runSQLite3([
         "-readonly", "-separator", "\t", dbPath,
         // Filter to entries that actually correspond to video files we'd
         // sync — saves parsing musical content / podcasts / etc. on busy
         // devices. media_kind 2 = movie, 32 = TV show (per
         // research/docs/MEDIA_LIBRARY_DB.md).
         "SELECT title, CAST(total_time_ms AS INTEGER) FROM item_extra WHERE media_kind IN (2, 32);"
-    ]
-    let out = Pipe()
-    proc.standardOutput = out
-    proc.standardError = FileHandle.nullDevice
-    do {
-        try proc.run()
-        proc.waitUntilExit()
-    } catch {
-        throw DeviceLibraryQueryError.queryFailed(error.localizedDescription)
-    }
-    guard proc.terminationStatus == 0 else {
-        throw DeviceLibraryQueryError.queryFailed("sqlite3 exit \(proc.terminationStatus)")
-    }
-
-    let raw = out.fileHandleForReading.readDataToEndOfFile()
-    guard let text = String(data: raw, encoding: .utf8) else { return [] }
+    ])
 
     var entries: [DeviceLibraryEntry] = []
     for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
@@ -184,21 +196,8 @@ public func findDeleteCandidates(
     LEFT JOIN base_location bl ON bl.base_location_id = i.base_location_id
     WHERE LOWER(e.title) LIKE LOWER('%\(escaped)%');
     """
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-    proc.arguments = ["-readonly", "-separator", "\t", dbPath, sql]
-    let out = Pipe()
-    let err = Pipe()
-    proc.standardOutput = out
-    proc.standardError = err
-    do { try proc.run(); proc.waitUntilExit() }
-    catch { throw DeviceLibraryQueryError.queryFailed(error.localizedDescription) }
-    let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-    guard proc.terminationStatus == 0 else {
-        throw DeviceLibraryQueryError.queryFailed("sqlite3 exit \(proc.terminationStatus): \(errText)")
-    }
-    let raw = out.fileHandleForReading.readDataToEndOfFile()
-    guard let text = String(data: raw, encoding: .utf8) else { return [] }
+    let text = try runSQLite3(["-readonly", "-separator", "\t", dbPath, sql],
+                              captureStderr: true)
 
     var candidates: [DeleteCandidate] = []
     for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
@@ -271,21 +270,9 @@ public func findDeleteCandidate(bySyncID syncID: Int64, device: DeviceInfo) thro
     WHERE s.sync_id = \(syncID)
     LIMIT 1;
     """
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-    proc.arguments = ["-readonly", "-separator", "\t", dbPath, sql]
-    let out = Pipe()
-    let err = Pipe()
-    proc.standardOutput = out
-    proc.standardError = err
-    do { try proc.run(); proc.waitUntilExit() }
-    catch { throw DeviceLibraryQueryError.queryFailed(error.localizedDescription) }
-    let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-    guard proc.terminationStatus == 0 else {
-        throw DeviceLibraryQueryError.queryFailed("sqlite3 exit \(proc.terminationStatus): \(errText)")
-    }
-    let raw = out.fileHandleForReading.readDataToEndOfFile()
-    guard let text = String(data: raw, encoding: .utf8), !text.isEmpty else { return nil }
+    let text = try runSQLite3(["-readonly", "-separator", "\t", dbPath, sql],
+                              captureStderr: true)
+    guard !text.isEmpty else { return nil }
 
     for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
         let parts = line.split(separator: "\t", maxSplits: 5, omittingEmptySubsequences: false)
@@ -361,13 +348,11 @@ public func loadDeviceRegisteredPaths(device: DeviceInfo) throws -> RegisteredPa
     guard mainPulled else { return RegisteredPaths(paths: [], pendingSlots: []) }
 
     let dbPath = tmp.appendingPathComponent(dbFiles[0]).path
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
     // Outer left join — we want rows where base_location_id > 0 even if
     // item_extra.location hasn't been populated yet (post-sync binding lag,
     // observed during the re-upload diagnostic). For those we report just
     // the slot dir in pendingSlots and skip the path entry.
-    proc.arguments = [
+    let text = try runSQLite3([
         "-readonly", "-separator", "\t", dbPath,
         """
         SELECT COALESCE(bl.path, ''), COALESCE(e.location, '')
@@ -376,24 +361,7 @@ public func loadDeviceRegisteredPaths(device: DeviceInfo) throws -> RegisteredPa
         LEFT JOIN item_extra e ON e.item_pid = i.item_pid
         WHERE i.base_location_id > 0;
         """
-    ]
-    let out = Pipe()
-    proc.standardOutput = out
-    proc.standardError = FileHandle.nullDevice
-    do {
-        try proc.run()
-        proc.waitUntilExit()
-    } catch {
-        throw DeviceLibraryQueryError.queryFailed(error.localizedDescription)
-    }
-    guard proc.terminationStatus == 0 else {
-        throw DeviceLibraryQueryError.queryFailed("sqlite3 exit \(proc.terminationStatus)")
-    }
-
-    let raw = out.fileHandleForReading.readDataToEndOfFile()
-    guard let text = String(data: raw, encoding: .utf8) else {
-        return RegisteredPaths(paths: [], pendingSlots: [])
-    }
+    ])
 
     var paths = Set<String>()
     var pendingSlots = Set<String>()

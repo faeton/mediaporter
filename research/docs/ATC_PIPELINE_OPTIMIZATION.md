@@ -1,5 +1,7 @@
 # ATC Pipeline Optimization Punch-List
 
+> **Status (2026-07-26):** largely actioned. Top-3 all shipped — remote `st_size` verify (0.7.0, A1), graceful-cancel `finishSync` flush (1f9d9c5), AFC chunk bench + adaptive 16 MB default (`bench-upload --chunks/--passes`, a64e1de + a8c675e; HISTORY 2026-05-18). Items below carry DONE marks; the only still-open EVALUATE is the pre-handshake settle-sleep benchmark (Handshake #1).
+
 This note compares MediaPorter's current ATC/AFC upload pipeline against external open-source implementations where source code or repository documentation could be inspected. The strongest external evidence is AFC transport behavior from pymobiledevice3 and libimobiledevice; ATC media-sync evidence remains thinner because most public projects either cover generic AFC/app install or Grappa authorization rather than TV.app media sync.
 
 ## Handshake
@@ -22,7 +24,7 @@ This note compares MediaPorter's current ATC/AFC upload pipeline against externa
    - External impl + reference: libimobiledevice `src/afc.c::afc_file_write` in the cgit 1.0.3 snapshot uses `MAXIMUM_WRITE_SIZE = 1 << 15` and writes/acks each segment; current cgit `src/afc.c` still shows segmented `afc_dispatch_packet` calls around `afc_file_write`. pymobiledevice3 mirror `pymobiledevice3/services/afc.py::AfcService.fwrite` defines `MAXIMUM_WRITE_SIZE = 1 << 30` but still dispatches one AFC `WRITE` and waits for `_receive_data()` per chunk.
    - MediaPorter now: `AFCClient.writeFileStreaming` uses a 1 MB buffer and one `AFCFileRefWrite` per read (`AFC.swift` lines ~23-25, ~99-114).
    - Why their approach is better: the inspected libraries optimize for correctness and request/response framing, not necessarily giant writes. Larger chunks may reduce host-side call count, but they may also increase memory pressure or hit private MobileDevice/framework limits.
-   - Action: **EVALUATE**. Add a local throughput benchmark behind a debug flag for 256 KB, 1 MB, 4 MB, and 8 MB. Do not change the default until measured across Lightning, USB-C, and Wi-Fi-paired devices.
+   - Action: **DONE** (was EVALUATE). `mediaporterctl bench-upload --chunks/--passes` shipped (a64e1de); benches on 139 MB + 1.21 GB files led to the adaptive default — 16 MB chunks for files ≥300 MB, 4 MB otherwise (a8c675e; HISTORY 2026-05-18). Wi-Fi re-bench 2026-06-07: 1 MB chunk wins on that transport (~56–63 MB/s).
 
 2. **AFC operation batching is not supported by the inspected implementations.**
    - External impl + reference: libimobiledevice DeepWiki `src/afc.c::afc_dispatch_packet` describes one AFC request followed by one response; for file write, packet data is the handle and payload is the file bytes. The cgit 1.0.3 source comments explain two segments inside one AFC packet for write payload, not multiple AFC operations in one usbmuxd packet.
@@ -104,7 +106,7 @@ This note compares MediaPorter's current ATC/AFC upload pipeline against externa
    - External impl + reference: IpaInstall Phase 5 sends `MetadataSyncFinished` and waits for `SyncFinished` in its authorization flow; libimobiledevice AFC closes file handles and waits for AFC status on close (`src/afc.c::afc_file_close`, DeepWiki File Operations).
    - MediaPorter now: on upload failure or cancel, `PipelineController.runPipelined` calls `abandonAsset` for remaining assets, then `registerSession.close()` invalidates/releases ATC without waiting for `SyncFinished` (`PipelineController.swift` lines ~2070-2106; `SyncEngine.swift` lines ~230-236; `ATCSession.swift` lines ~838-846).
    - Why their approach is better: after all missing assets are cleared with `FileError(0)`, a short wait for `SyncFinished` may let the device close the revision cleanly and reduce next-session settle delays.
-   - Action: **EVALUATE**. On user cancel, after abandoning remaining assets, call a bounded `finishSync(timeout: 10-15s)` variant before invalidate. On transport errors, keep immediate close.
+   - Action: **DONE** (was EVALUATE). Graceful cancel now flushes `FileError(0)` abandons through a short-deadline `finishSync` before teardown (1f9d9c5, 0.7.0). Transport errors keep immediate close.
 
 2. **Normal successful shutdown is already correct.**
    - External impl + reference: libimobiledevice's AFC close path sends `AFC_OP_FILE_CLOSE` and receives status; IpaInstall waits for terminal sync completion in Phase 5.
@@ -118,7 +120,7 @@ This note compares MediaPorter's current ATC/AFC upload pipeline against externa
    - External impl + reference: libimobiledevice `afc_get_file_info` returns metadata including `st_size`; pymobiledevice3 `AfcService.stat` parses `st_size`; libimobiledevice `afc_file_write` reports `bytes_written`.
    - MediaPorter now: local read count is logged as OK/TRUNCATED, but remote `st_size` is not checked in the upload path (`AFC.swift` lines ~116-117, ~174-197; `SyncEngine.swift` lines ~47-60).
    - Why their approach is better: it catches corruption before ATC commit and gives the user a deterministic retry path.
-   - Action: **CONFIRMED**. Add remote stat validation after upload and before `completeFile`.
+   - Action: **DONE** (was CONFIRMED). `AFCUploader.upload` re-stats the remote file after the AFC write and throws `AFCError.sizeMismatch` on any delta; the pipeline emits `FileError(0)` for the asset (0.7.0, closes audit A1).
 
 2. **Current Grappa/CIG strategy remains acceptable; no fresher public replacement found.**
    - External impl + reference: go-tunes `proto.go::deviceGrapa` / `cig.cpp::cigCalc` are the known public source of the replay blob and CIG engine in existing MediaPorter research; IpaInstall `Handle.cpp::AirFairSyncGrappaCreate` demonstrates dynamic Grappa generation through iTunes/AirTrafficHost internals for DRM authorization, not media upload.
@@ -128,8 +130,8 @@ This note compares MediaPorter's current ATC/AFC upload pipeline against externa
 
 ## Top-3 Priority List
 
-1. **CONFIRMED: Add remote AFC `st_size` verification after every media upload.** Highest robustness gain: catches truncation before `FileComplete` and turns silent unplayable rows into explicit retryable upload errors.
+1. ✅ **DONE — remote AFC `st_size` verification after every media upload** (0.7.0, audit A1). Catches truncation before `FileComplete`; silent unplayable rows became explicit retryable upload errors.
 
-2. **EVALUATE: Short graceful cancel finalization after `FileError(0)` for abandoned assets.** Likely reduces stale device state and may allow shortening future handshake settle sleeps.
+2. ✅ **DONE — short graceful cancel finalization after `FileError(0)`** (1f9d9c5, 0.7.0). Abandons flush through a bounded `finishSync` before teardown.
 
-3. **EVALUATE: Benchmark AFC chunk sizes under a debug flag.** The current 1 MB default is reasonable, but measured data is needed before trying 4-8 MB; external implementations do not prove larger chunks are safe or faster.
+3. ✅ **DONE — AFC chunk-size benchmark + adaptive default** (a64e1de + a8c675e). 16 MB for ≥300 MB files, 4 MB otherwise; 1 MB wins over Wi-Fi. See HISTORY 2026-05-18 / 2026-06-07.

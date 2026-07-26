@@ -55,18 +55,31 @@ struct SyncFileInfo {
 
 enum SyncError: LocalizedError {
     case handshakeFailed(String)
+    /// The handshake missed on every retry — the cold-start signature. The
+    /// device is reachable (AFC connected) but its ATC/medialibraryd service
+    /// isn't answering the sync handshake yet, typically because it's still
+    /// waking up or finishing its initial media scan right after being
+    /// connected/unlocked. Distinct from `handshakeFailed` so the UI can
+    /// explain the likely cause instead of dumping the raw protocol reason.
+    case deviceNotReady(attempts: Int)
     case noManifest
     case cigFailed
     case rejected
     case connectionLost(String)
+    case protocolError(String)
 
     var errorDescription: String? {
         switch self {
         case .handshakeFailed(let msg): return "ATC handshake failed: \(msg)"
+        case .deviceNotReady(let attempts):
+            return "The device didn't answer the sync handshake (tried \(attempts) times). "
+                + "This usually means it's still waking up or indexing media right after "
+                + "being connected or unlocked. Unlock the device, wait a few seconds, then Send again."
         case .noManifest: return "No AssetManifest received from device"
         case .cigFailed: return "CIG computation failed"
         case .rejected: return "Device rejected sync"
         case .connectionLost(let at): return "ATC connection lost during \(at)"
+        case .protocolError(let msg): return "ATC protocol error: \(msg)"
         }
     }
 }
@@ -140,7 +153,9 @@ class ATCSession {
             "Dataclasses": ["Media", "Keybag"] as NSArray,
             "HostInfo": hostInfoForSync,
         ]
-        let msg = ATH.messageCreate(0, "RequestingSync" as CFString, params as CFDictionary)!
+        guard let msg = ATH.messageCreate(0, "RequestingSync" as CFString, params as CFDictionary) else {
+            throw SyncError.handshakeFailed("AirTrafficHost couldn't build RequestingSync message")
+        }
         check("RequestingSync", ATH.sendMessage(conn!, msg))
         log("  >> RequestingSync (with Grappa)")
 
@@ -149,24 +164,35 @@ class ATCSession {
         }
         log("  << ReadyForSync")
 
-        // Extract device grappa
+        // Extract device grappa. Every value here is device-supplied —
+        // type-check before bridging (B10: a blind fromOpaque cast on the
+        // wrong CF type is undefined behavior, not a catchable error).
         guard let di = ATH.messageParam(readyMsg, "DeviceInfo" as CFString) else {
             throw SyncError.handshakeFailed("No DeviceInfo in ReadyForSync")
+        }
+        guard CFGetTypeID(unsafeBitCast(di, to: CFTypeRef.self)) == CFDictionaryGetTypeID() else {
+            throw SyncError.handshakeFailed("DeviceInfo is not a dictionary")
         }
         let diDict = Unmanaged<CFDictionary>.fromOpaque(di).takeUnretainedValue()
         guard let grappaRef = CFDictionaryGetValue(diDict, Unmanaged.passUnretained("Grappa" as CFString).toOpaque()) else {
             throw SyncError.handshakeFailed("No Grappa in DeviceInfo")
+        }
+        guard CFGetTypeID(unsafeBitCast(grappaRef, to: CFTypeRef.self)) == CFDataGetTypeID() else {
+            throw SyncError.handshakeFailed("Grappa in DeviceInfo is not data")
         }
         let grappaCF = Unmanaged<CFData>.fromOpaque(grappaRef).takeUnretainedValue()
         let grappa = Data(referencing: grappaCF as NSData)
         self.deviceGrappa = grappa
         log("  Device grappa: \(grappa.count)B")
 
-        // Extract anchor
+        // Extract anchor — tolerate a missing/mis-typed anchors dict (keep
+        // the "0" default), but never bridge without a type check.
         var anchor = "0"
-        if let anchorsRaw = ATH.messageParam(readyMsg, "DataclassAnchors" as CFString) {
+        if let anchorsRaw = ATH.messageParam(readyMsg, "DataclassAnchors" as CFString),
+           CFGetTypeID(unsafeBitCast(anchorsRaw, to: CFTypeRef.self)) == CFDictionaryGetTypeID() {
             let anchorsDict = Unmanaged<CFDictionary>.fromOpaque(anchorsRaw).takeUnretainedValue()
-            if let mediaRef = CFDictionaryGetValue(anchorsDict, Unmanaged.passUnretained("Media" as CFString).toOpaque()) {
+            if let mediaRef = CFDictionaryGetValue(anchorsDict, Unmanaged.passUnretained("Media" as CFString).toOpaque()),
+               CFGetTypeID(unsafeBitCast(mediaRef, to: CFTypeRef.self)) == CFStringGetTypeID() {
                 let mediaCF = Unmanaged<CFString>.fromOpaque(mediaRef).takeUnretainedValue()
                 anchor = mediaCF as String
             }
@@ -176,7 +202,7 @@ class ATCSession {
         return (grappa, anchor)
     }
 
-    func buildSyncPlist(files: [SyncFileInfo], anchor: Int) -> Data {
+    func buildSyncPlist(files: [SyncFileInfo], anchor: Int) throws -> Data {
         let now = Date()
         var operations: [[String: Any]] = [
             [
@@ -331,11 +357,17 @@ class ATCSession {
             DebugLog.write("atc.plist.identity", parts.joined(separator: " "))
         }
 
-        return try! PropertyListSerialization.data(
-            fromPropertyList: plist,
-            format: .binary,
-            options: 0
-        )
+        do {
+            return try PropertyListSerialization.data(
+                fromPropertyList: plist,
+                format: .binary,
+                options: 0
+            )
+        } catch {
+            // Only reachable if a non-plist type sneaks into the dict —
+            // pinned against by SyncPlistTests, but crash-free regardless (B1).
+            throw SyncError.protocolError("sync plist serialization failed: \(error.localizedDescription)")
+        }
     }
 
     /// Build a delete-only sync plist — single `delete_track` op per
@@ -347,7 +379,7 @@ class ATCSession {
     /// resolves deletes by `item_store.sync_id`, not by `item.item_pid`
     /// (codex review 2026-05-17 + research/docs/HISTORY.md 2026-05-16
     /// on pid-renumbering semantics).
-    func buildDeletePlist(syncIDs: [Int], anchor: Int) -> Data {
+    func buildDeletePlist(syncIDs: [Int], anchor: Int) throws -> Data {
         let ops: [[String: Any]] = syncIDs.map { sid in
             ["operation": "delete_track", "pid": sid]
         }
@@ -358,8 +390,12 @@ class ATCSession {
         ]
         DebugLog.write("atc.plist.delete",
             "anchor=\(anchor) count=\(syncIDs.count) syncIDs=\(syncIDs.map { String($0) }.joined(separator: ","))")
-        return try! PropertyListSerialization.data(
-            fromPropertyList: plist, format: .binary, options: 0)
+        do {
+            return try PropertyListSerialization.data(
+                fromPropertyList: plist, format: .binary, options: 0)
+        } catch {
+            throw SyncError.protocolError("delete plist serialization failed: \(error.localizedDescription)")
+        }
     }
 
     func computeCIG(deviceGrappa: Data, plistData: Data) throws -> Data {
@@ -445,12 +481,12 @@ class ATCSession {
             let aid = String(f.assetID)
 
             log("  >> FileBegin (asset=\(aid))")
-            try checkOrThrow("FileBegin", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileBegin" as CFString, [
+            try sendMsgOrThrow("FileBegin", [
                 "AssetID": aid,
                 "FileSize": f.item.fileSize,
                 "TotalSize": f.item.fileSize,
                 "Dataclass": "Media",
-            ] as NSDictionary as CFDictionary)!))
+            ])
 
             // Upload artwork if available
             if let poster = f.item.posterData {
@@ -465,19 +501,19 @@ class ATCSession {
                 try afc.writeFile(artPath, data: showPoster)
             }
 
-            check("FileProgress", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileProgress" as CFString, [
+            sendMsg("FileProgress", [
                 "AssetID": aid,
                 "AssetProgress": 1.0,
                 "OverallProgress": 1.0,
                 "Dataclass": "Media",
-            ] as NSDictionary as CFDictionary)!))
+            ])
 
             log("  >> FileComplete (path=\(f.devicePath))")
-            try checkOrThrow("FileComplete", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileComplete" as CFString, [
+            try sendMsgOrThrow("FileComplete", [
                 "AssetID": aid,
                 "AssetPath": f.devicePath,
                 "Dataclass": "Media",
-            ] as NSDictionary as CFDictionary)!))
+            ])
 
             // Hook for the gating experiment (#8): caller can probe device
             // state between FileCompletes. Production callers leave this nil.
@@ -491,11 +527,11 @@ class ATCSession {
             log("  Clearing \(staleIDs.count) stale pending asset(s)...")
             for sid in staleIDs {
                 log("  >> FileError (stale asset=\(sid))")
-                check("FileError", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileError" as CFString, [
+                sendMsg("FileError", [
                     "AssetID": sid,
                     "Dataclass": "Media",
                     "ErrorCode": 0,
-                ] as NSDictionary as CFDictionary)!))
+                ])
             }
         }
 
@@ -608,11 +644,11 @@ class ATCSession {
             log("  Clearing \(staleIDs.count) stale pending asset(s)...")
             DebugLog.notice("atc.FileError.stale", "count=\(staleIDs.count) ids=\(staleIDs.joined(separator: ","))")
             for sid in staleIDs {
-                check("FileError", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileError" as CFString, [
+                sendMsg("FileError", [
                     "AssetID": sid,
                     "Dataclass": "Media",
                     "ErrorCode": 0,
-                ] as NSDictionary as CFDictionary)!))
+                ])
             }
         }
 
@@ -700,12 +736,12 @@ class ATCSession {
         DebugLog.write("atc.FileBegin",
             "asset=\(aid) path=\(f.devicePath) size=\(f.item.fileSize)")
         log("  >> FileBegin (asset=\(aid))")
-        check("FileBegin", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileBegin" as CFString, [
+        sendMsg("FileBegin", [
             "AssetID": aid,
             "FileSize": f.item.fileSize,
             "TotalSize": f.item.fileSize,
             "Dataclass": "Media",
-        ] as NSDictionary as CFDictionary)!))
+        ])
     }
 
     /// Send artwork upload + FileProgress + FileComplete. Call AFTER the AFC
@@ -727,20 +763,20 @@ class ATCSession {
             try afc.writeFile(artPath, data: showPoster)
         }
 
-        check("FileProgress", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileProgress" as CFString, [
+        sendMsg("FileProgress", [
             "AssetID": aid,
             "AssetProgress": 1.0,
             "OverallProgress": 1.0,
             "Dataclass": "Media",
-        ] as NSDictionary as CFDictionary)!))
+        ])
 
         log("  >> FileComplete (path=\(f.devicePath))")
         DebugLog.write("atc.FileComplete", "asset=\(aid) path=\(f.devicePath)")
-        check("FileComplete", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileComplete" as CFString, [
+        sendMsg("FileComplete", [
             "AssetID": aid,
             "AssetPath": f.devicePath,
             "Dataclass": "Media",
-        ] as NSDictionary as CFDictionary)!))
+        ])
     }
 
     /// Legacy bundled call — FileBegin + artwork + FileProgress + FileComplete
@@ -762,12 +798,12 @@ class ATCSession {
     func sendProgress(assetID: Int, fraction: Double) {
         let aid = String(assetID)
         let p = max(0.0, min(1.0, fraction))
-        check("FileProgress", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileProgress" as CFString, [
+        sendMsg("FileProgress", [
             "AssetID": aid,
             "AssetProgress": p,
             "OverallProgress": p,
             "Dataclass": "Media",
-        ] as NSDictionary as CFDictionary)!))
+        ])
         DebugLog.write("atc.FileProgress", "asset=\(assetID) frac=\(String(format: "%.2f", p))")
     }
 
@@ -777,11 +813,22 @@ class ATCSession {
     func abandonAsset(assetID: Int) {
         log("  >> FileError (abandon asset=\(assetID))")
         DebugLog.notice("atc.abandonAsset", "id=\(assetID)")
-        check("FileError", ATH.sendMessage(conn!, ATH.messageCreate(0, "FileError" as CFString, [
+        sendMsg("FileError", [
             "AssetID": String(assetID),
             "Dataclass": "Media",
             "ErrorCode": 0,
-        ] as NSDictionary as CFDictionary)!))
+        ])
+    }
+
+    /// How the wait for `SyncFinished` actually ended. Only `.finished`
+    /// means the device confirmed the commit; the caller decides how loudly
+    /// to surface the rest (B8 — a timeout used to be indistinguishable
+    /// from success).
+    enum SyncFinishOutcome: Sendable {
+        case finished           // real SyncFinished — row committed
+        case allowedFallback    // SyncAllowed + 30 s grace, device never confirmed
+        case connectionLost     // transport died before SyncFinished
+        case timeout            // hard deadline hit with no signal at all
     }
 
     /// Phase 3. Waits for SyncFinished by polling the drainer's inbox (no
@@ -805,7 +852,8 @@ class ATCSession {
     /// 3. Fallback: if `SyncAllowed` arrives but no `SyncFinished` follows
     ///    within 30 s, accept it with a warning so we don't hang forever on
     ///    a misbehaving device.
-    func finishSync(deadlineSeconds: TimeInterval = 120) {
+    @discardableResult
+    func finishSync(deadlineSeconds: TimeInterval = 120) -> SyncFinishOutcome {
         log("  Waiting for SyncFinished...")
         DebugLog.write("atc.finishSync.wait", "deadline=\(Int(deadlineSeconds))s")
         let start = Date()
@@ -827,7 +875,7 @@ class ATCSession {
                     log("  *** SYNC COMPLETE (SyncFinished) ***")
                     DebugLog.write("atc.finishSync.done", "via=SyncFinished elapsed=\(Int(Date().timeIntervalSince(start)))s")
                     stopDrainer()
-                    return
+                    return .finished
                 }
                 if name == "SyncAllowed" && syncAllowedAt == nil {
                     syncAllowedAt = Date()
@@ -839,7 +887,7 @@ class ATCSession {
                 log("  *** SYNC COMPLETE (SyncAllowed fallback, no SyncFinished) ***")
                 DebugLog.notice("atc.finishSync.done", "via=SyncAllowed_fallback elapsed=\(Int(Date().timeIntervalSince(start)))s")
                 stopDrainer()
-                return
+                return .allowedFallback
             }
             // Connection dropped mid-wait (after the inbox above was drained, so
             // any SyncFinished that landed first already won). No point burning
@@ -848,13 +896,14 @@ class ATCSession {
                 log("  *** ATC connection lost before SyncFinished ***")
                 DebugLog.error("atc.finishSync.dead", "connection died after \(Int(Date().timeIntervalSince(start)))s — no SyncFinished")
                 stopDrainer()
-                return
+                return .connectionLost
             }
             Thread.sleep(forTimeInterval: 0.2)
         }
         log("  SyncFinished not received (\(Int(deadlineSeconds)) s timeout)")
         DebugLog.error("atc.finishSync.timeout", "elapsed=\(Int(deadlineSeconds))s")
         stopDrainer()
+        return .timeout
     }
 
     /// Atomically pull and clear all pending message names from the drainer's
@@ -1043,7 +1092,30 @@ class ATCSession {
 
     private func sendPong() {
         log("  >> Pong")
-        check("Pong", ATH.sendMessage(conn!, ATH.messageCreate(0, "Pong" as CFString, [:] as NSDictionary as CFDictionary)!))
+        sendMsg("Pong", [:])
+    }
+
+    /// Build + send an ATC message with `check` semantics. AirTrafficHost's
+    /// messageCreate can return nil (B1 — was force-unwrapped at every send
+    /// site); a nil here means the framework itself is broken, so we log at
+    /// error level and skip the send rather than crash.
+    private func sendMsg(_ name: String, _ params: NSDictionary) {
+        guard let c = conn,
+              let msg = ATH.messageCreate(0, name as CFString, params as CFDictionary) else {
+            DebugLog.error("atc.messageCreate", "\(name): AirTrafficHost returned nil — message not sent")
+            return
+        }
+        check(name, ATH.sendMessage(c, msg))
+    }
+
+    /// `sendMsg` for MUST-ACK messages — throws on messageCreate nil and on
+    /// a drainer-flagged dead connection (checkOrThrow semantics).
+    private func sendMsgOrThrow(_ name: String, _ params: NSDictionary) throws {
+        guard let c = conn,
+              let msg = ATH.messageCreate(0, name as CFString, params as CFDictionary) else {
+            throw SyncError.protocolError("AirTrafficHost couldn't build \(name) message")
+        }
+        try checkOrThrow(name, ATH.sendMessage(c, msg))
     }
 
     @discardableResult

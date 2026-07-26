@@ -5,59 +5,144 @@ import Foundation
 
 // MARK: - Framework Handles
 
-private var _md: UnsafeMutableRawPointer?
-private var _ath: UnsafeMutableRawPointer?
-private var _cig: UnsafeMutableRawPointer?
+/// Typed failure for a private-framework load (B2). These paths used to be
+/// `fatalError` — the most likely macOS-upgrade failure mode, crashing the
+/// GUI with no message. Callers gate device features on
+/// `preflightPrivateFrameworks()` instead.
+public enum FrameworkError: LocalizedError, Sendable {
+    case libraryNotFound(String, String)      // library, dlerror/reason
+    case symbolMissing(String, String)        // library, symbol
 
-/// Load MobileDevice.framework at runtime.
-func loadMobileDevice() -> UnsafeMutableRawPointer {
-    if let md = _md { return md }
+    public var errorDescription: String? {
+        switch self {
+        case .libraryNotFound(let lib, let why):
+            return "\(lib) could not be loaded: \(why)"
+        case .symbolMissing(let lib, let sym):
+            return "\(lib) is missing \(sym)"
+        }
+    }
+}
+
+// Handles are lazily-initialized globals — Swift guarantees thread-safe
+// one-time initialization, which also closes the old unsynchronized
+// double-dlopen race between MainActor and detached uploader tasks (B3).
+private let _mdResult: Result<UnsafeMutableRawPointer, FrameworkError> = {
     guard let handle = dlopen(
         "/System/Library/PrivateFrameworks/MobileDevice.framework/MobileDevice",
         RTLD_LAZY
     ) else {
-        fatalError("Failed to load MobileDevice.framework: \(String(cString: dlerror()))")
+        return .failure(.libraryNotFound("MobileDevice.framework", String(cString: dlerror())))
     }
-    _md = handle
     // Suppress framework debug logging (kevent, USBMux, AFC packet traces)
-    // AMDSetLogLevel doesn't cover AFC internals, so redirect stderr
+    // AMDSetLogLevel doesn't cover AFC internals, so also redirect stderr
     typealias AMDSetLogLevelFn = @convention(c) (Int32) -> Void
     if let sym = dlsym(handle, "AMDSetLogLevel") {
         let setLogLevel = unsafeBitCast(sym, to: AMDSetLogLevelFn.self)
         setLogLevel(0)
     }
-    suppressFrameworkStderr()
-    return handle
-}
+    redirectFrameworkStderr()
+    return .success(handle)
+}()
 
-/// Load AirTrafficHost.framework at runtime.
-func loadAirTrafficHost() -> UnsafeMutableRawPointer {
-    if let ath = _ath { return ath }
+private let _athResult: Result<UnsafeMutableRawPointer, FrameworkError> = {
     // MobileDevice must be loaded first
-    _ = loadMobileDevice()
+    if case .failure(let e) = _mdResult { return .failure(e) }
     guard let handle = dlopen(
         "/System/Library/PrivateFrameworks/AirTrafficHost.framework/AirTrafficHost",
         RTLD_LAZY
     ) else {
-        fatalError("Failed to load AirTrafficHost.framework: \(String(cString: dlerror()))")
+        return .failure(.libraryNotFound("AirTrafficHost.framework", String(cString: dlerror())))
     }
-    _ath = handle
-    return handle
+    return .success(handle)
+}()
+
+private let _cigResult: Result<UnsafeMutableRawPointer, FrameworkError> = {
+    guard let path = Bundle.module.path(forResource: "libcig", ofType: "dylib") else {
+        return .failure(.libraryNotFound("libcig.dylib", "not found in app bundle"))
+    }
+    guard let handle = dlopen(path, RTLD_LAZY) else {
+        return .failure(.libraryNotFound("libcig.dylib", String(cString: dlerror())))
+    }
+    return .success(handle)
+}()
+
+/// Load MobileDevice.framework at runtime.
+func loadMobileDevice() -> UnsafeMutableRawPointer {
+    switch _mdResult {
+    case .success(let h): return h
+    // Unreachable when the caller gated on preflightPrivateFrameworks()
+    // (GUI launch check / CLI device commands) — last-resort backstop only.
+    case .failure(let e): fatalError(e.localizedDescription)
+    }
+}
+
+/// Load AirTrafficHost.framework at runtime.
+func loadAirTrafficHost() -> UnsafeMutableRawPointer {
+    switch _athResult {
+    case .success(let h): return h
+    case .failure(let e): fatalError(e.localizedDescription)
+    }
 }
 
 /// Load libcig.dylib from the app bundle.
 func loadCIG() -> UnsafeMutableRawPointer {
-    if let cig = _cig { return cig }
-    let bundle = Bundle.module
-    guard let path = bundle.path(forResource: "libcig", ofType: "dylib") else {
-        fatalError("libcig.dylib not found in app bundle")
+    switch _cigResult {
+    case .success(let h): return h
+    case .failure(let e): fatalError(e.localizedDescription)
     }
-    guard let handle = dlopen(path, RTLD_LAZY) else {
-        fatalError("Failed to load libcig.dylib: \(String(cString: dlerror()))")
-    }
-    _cig = handle
-    return handle
 }
+
+// MARK: - Preflight (B2)
+
+// KEEP IN SYNC with the MD / ATH / CIG accessor tables below — the
+// preflight is only as exhaustive as these lists.
+private let _mdSymbols = [
+    "AMDeviceNotificationSubscribe", "AMDeviceCopyDeviceIdentifier",
+    "AMDeviceCopyValue", "AMDeviceRetain", "AMDeviceRelease",
+    "AMDeviceGetInterfaceType", "AMDeviceConnect", "AMDeviceStartSession",
+    "AMDeviceStartService", "AMDeviceSecureStartService",
+    "AMDServiceConnectionGetSocket", "AMDServiceConnectionGetSecureIOContext",
+    "AFCConnectionSetSecureContext", "AFCConnectionOpen", "AFCConnectionClose",
+    "AFCDirectoryCreate", "AFCFileRefOpen", "AFCFileRefWrite", "AFCFileRefRead",
+    "AFCFileRefClose", "AFCRemovePath", "AFCDirectoryOpen", "AFCDirectoryRead",
+    "AFCDirectoryClose", "AFCFileInfoOpen", "AFCKeyValueRead", "AFCKeyValueClose",
+]
+private let _athSymbols = [
+    "ATHostConnectionCreateWithLibrary", "ATHostConnectionSendHostInfo",
+    "ATHostConnectionReadMessage", "ATHostConnectionSendMessage",
+    "ATHostConnectionSendMetadataSyncFinished", "ATHostConnectionSendPowerAssertion",
+    "ATHostConnectionInvalidate", "ATHostConnectionRelease",
+    "ATCFMessageGetName", "ATCFMessageGetParam", "ATCFMessageCreate",
+]
+private let _cigSymbols = ["cig_calc"]
+
+private let _preflightResult: FrameworkError? = {
+    let checks: [(Result<UnsafeMutableRawPointer, FrameworkError>, String, [String])] = [
+        (_mdResult, "MobileDevice.framework", _mdSymbols),
+        (_athResult, "AirTrafficHost.framework", _athSymbols),
+        (_cigResult, "libcig.dylib", _cigSymbols),
+    ]
+    for (result, lib, symbols) in checks {
+        switch result {
+        case .failure(let e):
+            return e
+        case .success(let handle):
+            for sym in symbols where dlsym(handle, sym) == nil {
+                return .symbolMissing(lib, sym)
+            }
+        }
+    }
+    return nil
+}()
+
+/// dlopen all three private libraries and dlsym every symbol the accessor
+/// tables reference. Returns nil when everything is present; a
+/// `FrameworkError` otherwise (typically after a macOS update renamed or
+/// removed a private API). Cached and thread-safe. The GUI checks this at
+/// launch — compatibility alert + device features disabled — and CLI
+/// device commands exit nonzero, so the `fatalError` backstops in the
+/// loaders and `lookup` stay unreachable.
+public func preflightPrivateFrameworks() -> FrameworkError? { _preflightResult }
 
 // MARK: - Function Lookup Helper
 
@@ -268,26 +353,44 @@ func loadSyncAuthSeed() throws -> Data {
     )
 }
 
-// MARK: - Stderr Suppression
+// MARK: - Stderr Redirect
 
+/// Where framework stderr lands after the redirect. Included in Send
+/// Diagnostic alongside the debug log.
+public let frameworkStderrLogPath = "/tmp/mediaporter-stderr.log"
+
+/// Original stderr, saved before the redirect. -1 until the redirect runs.
+/// Written once from the `_mdResult` lazy initializer (thread-safe init),
+/// read-only afterwards.
 private var _originalStderr: Int32 = -1
 
-/// Redirect stderr to /dev/null to suppress MobileDevice.framework debug spam.
-/// The framework logs kevent/AFC/USBMux traces directly to fd 2.
-func suppressFrameworkStderr() {
-    guard _originalStderr == -1 else { return }
+/// Redirect stderr to a bounded log file to keep MobileDevice.framework
+/// debug spam (kevent/AFC/USBMux traces on fd 2) out of the terminal.
+///
+/// B3: this used to point at /dev/null, which permanently destroyed ALL
+/// fd-2 output for the process — including Swift runtime crash reasons —
+/// after the first device touch. dup2 is process-global, and the framework
+/// keeps writing to fd 2 for the connection's lifetime, so a scoped
+/// save/restore can't work; a file keeps the bytes recoverable instead.
+/// Truncated at each redirect (once per launch). Called only from the
+/// `_mdResult` initializer, so the one-shot guard is the lazy-global init.
+private func redirectFrameworkStderr() {
     _originalStderr = dup(STDERR_FILENO)
-    let devNull = open("/dev/null", O_WRONLY)
-    if devNull >= 0 {
-        dup2(devNull, STDERR_FILENO)
-        close(devNull)
+    let fd = open(frameworkStderrLogPath, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+    if fd >= 0 {
+        dup2(fd, STDERR_FILENO)
+        close(fd)
     }
 }
 
-/// Restore stderr (e.g. if you need error output for debugging).
-func restoreStderr() {
-    guard _originalStderr >= 0 else { return }
-    dup2(_originalStderr, STDERR_FILENO)
-    close(_originalStderr)
-    _originalStderr = -1
+/// Write a user-facing line to the REAL terminal stderr, bypassing the
+/// framework redirect (before any redirect this is just stderr). The CLI
+/// uses this for its error messages — without it they'd silently land in
+/// the framework log file the moment a device call has been made.
+public func writeUserStderr(_ line: String) {
+    let fd = _originalStderr >= 0 ? _originalStderr : STDERR_FILENO
+    let out = line.hasSuffix("\n") ? line : line + "\n"
+    Array(out.utf8).withUnsafeBufferPointer { buf in
+        _ = write(fd, buf.baseAddress, buf.count)
+    }
 }

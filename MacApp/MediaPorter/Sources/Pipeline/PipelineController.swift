@@ -80,6 +80,17 @@ public class PipelineController {
     /// pull failed — analyze still works, just no dedup flags.
     public var deviceLibrarySnapshot: [DeviceLibraryEntry] = []
 
+    /// Non-nil when the private-framework preflight failed at launch (B2 —
+    /// typically a macOS update renamed a private API). Device features are
+    /// disabled for the whole run; local analyze/transcode still works.
+    public var frameworkCompatibilityError: String?
+
+    /// Non-nil when the last analyze couldn't pull the device library, i.e.
+    /// duplicate detection is OFF for this batch (B4 — previously the
+    /// failure was indistinguishable from an empty library). Cleared on the
+    /// next successful pull. Surfaced as an amber note in the device column.
+    public var duplicateCheckUnavailable: String?
+
     /// Clusters where TMDb couldn't auto-pick a show — surfaced to the UI so
     /// the user can pick once for the whole cluster instead of N times.
     public var pendingShowPicks: [PendingShowPick] = []
@@ -1246,12 +1257,21 @@ public class PipelineController {
         // MainActor — sqlite3 + AFC pull together take ~1-2 s.
         if let device = deviceInfo {
             let devCopy = device
-            deviceLibrarySnapshot = (try? await Task.detached {
-                try loadDeviceLibrary(device: devCopy)
-            }.value) ?? []
-            DebugLog.write("device.library", "snapshot \(deviceLibrarySnapshot.count) entries")
+            do {
+                deviceLibrarySnapshot = try await Task.detached {
+                    try loadDeviceLibrary(device: devCopy)
+                }.value
+                duplicateCheckUnavailable = nil
+                DebugLog.write("device.library", "snapshot \(deviceLibrarySnapshot.count) entries")
+            } catch {
+                deviceLibrarySnapshot = []
+                duplicateCheckUnavailable = error.localizedDescription
+                DebugLog.notice("device.library",
+                    "pull failed — duplicate check OFF for this batch: \(error.localizedDescription)")
+            }
         } else {
             deviceLibrarySnapshot = []
+            duplicateCheckUnavailable = nil
         }
 
         // Process in waves: at each iteration, snapshot all currently-pending
@@ -1912,7 +1932,16 @@ public class PipelineController {
             }.value
         } catch {
             uploader.close()
-            overallStatus = "Sync session failed: \(error.localizedDescription)"
+            // deviceNotReady already carries a complete, user-facing
+            // explanation (unlock/wait/retry) — show it verbatim rather than
+            // burying it under a generic "Sync session failed:" prefix. Jobs
+            // fall back to .analyzed either way, so the user can just Send
+            // again once the device has settled.
+            if case SyncError.deviceNotReady = error {
+                overallStatus = error.localizedDescription
+            } else {
+                overallStatus = "Sync session failed: \(error.localizedDescription)"
+            }
             for (job, _) in preparedPairs { job.status = .analyzed }
             isRunning = false
             lastRunStats = stats
@@ -2253,9 +2282,19 @@ public class PipelineController {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
-        await Task.detached { registerSession.finish() }.value
+        let finishOutcome = await Task.detached { registerSession.finish() }.value
         elapsedTask.cancel()
-        overallStatus = "\(synced)/\(preparedPairs.count) synced"
+        switch finishOutcome {
+        case .finished:
+            overallStatus = "\(synced)/\(preparedPairs.count) synced"
+        case .allowedFallback:
+            overallStatus = "\(synced)/\(preparedPairs.count) synced — device didn't confirm the final commit; spot-check TV.app"
+            DebugLog.notice("pipeline.finish", "allowedFallback outcome surfaced to user")
+        case .connectionLost, .timeout:
+            let why = finishOutcome == .timeout ? "timed out waiting for confirmation" : "connection lost before confirmation"
+            overallStatus = "\(synced)/\(preparedPairs.count) uploaded — \(why). Rows may not be committed; check TV.app and re-sync missing files"
+            DebugLog.error("pipeline.finish", "unconfirmed sync: \(why)")
+        }
 
         // Invalidate the device-library snapshot — the rows we just added
         // would otherwise falsely flag the next analyze as duplicates.

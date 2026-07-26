@@ -2,6 +2,28 @@
 
 The Swift MacApp under `MacApp/` is the shipping target. Versions starting with 0.4.0 track the MacApp; the 0.1.x – 0.3.x entries describe the now-frozen Python CLI under `python-reference/`.
 
+## 0.8.2 — 2026-07-26
+
+Reliability release. Hardening from a full code audit — graceful behavior when Apple's private frameworks or the device aren't in the expected state, clearer messaging when a sync can't be confirmed, and cold-start handshake tolerance so the first Send after plugging in doesn't fail spuriously. Verified on-device (AkmPad12 over USB) — a real transcode-and-sync of a 240 MB file plus the end-to-end smoke test.
+
+### New
+
+- **File list follows the active job** — during a run, the middle column auto-scrolls to keep the currently transcoding/uploading file in view (652a0f6).
+
+### Reliability
+
+- **Graceful failure on an incompatible macOS** — MediaPorter loads Apple's private device frameworks at runtime. If a future macOS renames or removes one of those APIs, the app now shows "MediaPorter isn't compatible with this version of macOS yet" (with a link to porter.md) and keeps analyze/transcode working, instead of crashing on launch. `mediaporterctl` exits with a clear message. A one-line diagnostic is sent so we hear about the breakage.
+- **No more mid-sync crashes on unexpected device data** — malformed values from the device during the ATC handshake (a non-numeric sync anchor, a missing message field, an odd file attribute) now fail the sync with an error instead of hard-crashing the app.
+- **Clear result when a sync can't be confirmed** — if the device drops the connection or never confirms the final commit, the run now says so ("device didn't confirm the final commit — check TV.app") rather than reporting success.
+- **Duplicate check tells you when it's off** — if the device's library can't be read at the start of a run, the device panel now shows an amber note that already-on-device files won't be flagged, instead of silently treating everything as new.
+- **Fixed a Wi-Fi stall path** — a failure to attach the SSL context to the AFC connection over Wi-Fi is now caught immediately instead of stalling ~60 s.
+- **Fixed a possible hang reading large device libraries** — the on-device SQLite query now drains its output while the query runs, avoiding a pipe-buffer deadlock on very large libraries.
+- **Cold-start handshake tolerance** — right after a device is connected or unlocked, its media daemon can take tens of seconds to answer the sync handshake (it's still waking up / scanning). The first Send used to fail here with a bare "handshake failed" after only two quick tries. It now retries up to four times with a growing back-off (~26 s of settle across attempts), shows "Device still waking up — retrying (N/4)…" so the wait reads as progress, and if it still can't connect explains the likely cause plainly ("still waking up or indexing… unlock the device, wait a few seconds, then Send again") instead of dumping the raw protocol reason. Verified on-device (AkmPad12, USB).
+
+### Diagnostics
+
+- **Framework logging preserved** — private-framework stderr now goes to `/tmp/mediaporter-stderr.log` (and rides along with Send Diagnostic) instead of `/dev/null`, so crash reasons are no longer lost after the first device connection.
+
 ## 0.8.1 — 2026-06-08
 
 Patch release. A few quality-of-life touches on top of 0.8.0.

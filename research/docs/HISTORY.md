@@ -364,3 +364,25 @@ Added two pre-tag gates:
 2. **End-to-end smoke command** (`mediaporterctl smoke-test`). Sync the bundled fixture `Mediaporter.Alpha.S01E01.mp4` → verify the DB row landed bound with `base_location_id != 0` and the MP4 is on device → delete → verify the row + file are gone. One process, exit 0/1. Validates the full ATC + AFC + delete pipeline against a connected device. Verified PASS on akm16pro 2026-05-18.
 
 Release recipe in `research/docs/RELEASE_TESTING.md`.
+
+## 2026-06-07 — Wi-Fi AFC: the secure-service path (F1 root cause)
+
+Enumeration + lockdown already worked over Wi-Fi; the blocker was AFC. The legacy `AMDeviceStartService` skips the SSL service handshake that network lockdown sessions require → `0xE8000012` over Wi-Fi (fine over USB). Proven the OS supports AFC-over-Wi-Fi first: libimobiledevice `afcclient -n ls /` listed the AFC root over the same link.
+
+Fix is a three-step secure path in `Sync/AFC.swift::AFCClient.init` (now CLAUDE.md rule #15):
+
+1. `AMDeviceSecureStartService("com.apple.afc")` — performs the SSL handshake.
+2. `AFCConnectionOpen` on the service connection's **socket fd** (`AMDServiceConnectionGetSocket`) — passing the `AMDServiceConnectionRef` itself → AFC error 11 (service-not-connected) on the first file op. Matches `research/scripts/afc_plus_atc.py:153`.
+3. `AFCConnectionSetSecureContext(conn, AMDServiceConnectionGetSecureIOContext(svc))` — routes AFC I/O through the SSL context. Without it, Wi-Fi I/O pushes plaintext into the SSL stream → 60 s stalls/hangs. Over USB the context is nil → harmless no-op, so one code path serves both transports.
+
+Verified end-to-end (`mediaporterctl smoke-test`) on akm16pro over both transports. Wi-Fi throughput ~56–63 MB/s on this link (1 MB chunk wins) — above the ~30 MB/s Lightning-class USB baseline. Caveat: a sleeping device stops advertising `_apple-mobdev2._tcp` and drops off within ~2 min (0.8.1 surfaces a user-facing hint).
+
+## 2026-06-07 — ATC send return codes are meaningless as a liveness signal (A2)
+
+Throwaway telemetry (438eeb5, since removed) logged the rc of every ATC send across successful syncs: must-ack sends return wild nonzero codes on perfectly healthy sessions — `MetadataSyncFinished` → `0xf69a43c0`, `Pong` → `1`. The originally planned "throw on rc != 0" would have aborted every sync.
+
+The correct liveness signal is the **drainer**: its blocking read returning nil for an unexpected reason (transport error / peer death, distinguished from our own `stopDrainer`) sets `connectionDead`; `checkOrThrow` then throws `SyncError.connectionLost` at the next must-ack send (`FileBegin`/`FileComplete`/`MetadataSyncFinished`). Result: mid-sync connection death aborts at the next send instead of stalling to the 120 s `finishSync` deadline. Shipped in 1810ae0 (0.8.0).
+
+## 2026-06-07 — All transcode outputs coexist until end-of-run (A8 correction)
+
+Preflight assumption "the Mac keeps ~1 transcoded output in flight" is false: `cleanupTempOutputs` only deletes temp `.m4v` files once *every* job is `.synced` — there is no per-file delete in the upload loop and transcode lookahead has no upload backpressure. So Mac-temp requirement is a **sum** over transcode/remux jobs (`Σ(source × 1.1)` + mux-sidecar bytes + one largest-source reserve), with copy-only jobs excluded entirely (they stream from the source, zero temp). Device side is sized on predicted *output* bytes (`Σ × 1.05`), backstopped by the per-file mid-sync poll. Shipped in f7c5c28 (0.8.0).
