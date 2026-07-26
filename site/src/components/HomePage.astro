@@ -1,7 +1,7 @@
 ---
 import Base from "../layouts/Base.astro";
 import MarkAnimated from "./MarkAnimated.astro";
-import { type Locale, STRINGS, localizePath } from "../i18n/locales";
+import { type Locale, APP_VERSION, STRINGS, localizePath, pagePath } from "../i18n/locales";
 
 interface Props {
   locale: Locale;
@@ -24,14 +24,15 @@ const faqLd = {
   })),
 };
 
-const changelogLink = `<a href="${localizePath(locale, "/changelog")}" class="link">${t.navChangelog.toLowerCase()}</a>`;
+const changelogLink = `<a href="${pagePath(locale, "/changelog")}" class="link">${t.navChangelog.toLowerCase()}</a>`;
 const featuresLedeHtml = t.featuresLede.replace("{changelog}", changelogLink);
 
-// Shipping artifacts live on GitHub Releases. The site is rebuilt on each release
-// to bump RELEASE_TAG below; the URLs are stable per tag and CDN-cached by GitHub.
-const RELEASE_TAG = "v0.8.2";
-const DMG_BUNDLED = `https://github.com/faeton/mediaporter/releases/download/${RELEASE_TAG}/MediaPorter-0.8.2-with-ffmpeg.dmg`;
-const DMG_MINIMAL = `https://github.com/faeton/mediaporter/releases/download/${RELEASE_TAG}/MediaPorter-0.8.2.dmg`;
+// Shipping artifacts live on GitHub Releases. The site is rebuilt on each release;
+// APP_VERSION in i18n/locales.ts is the single place to bump. URLs are stable per
+// tag and CDN-cached by GitHub.
+const RELEASE_TAG = `v${APP_VERSION}`;
+const DMG_BUNDLED = `https://github.com/faeton/mediaporter/releases/download/${RELEASE_TAG}/MediaPorter-${APP_VERSION}-with-ffmpeg.dmg`;
+const DMG_MINIMAL = `https://github.com/faeton/mediaporter/releases/download/${RELEASE_TAG}/MediaPorter-${APP_VERSION}.dmg`;
 ---
 <Base locale={locale} jsonLd={[faqLd]}>
   <!-- HERO -->
@@ -49,7 +50,7 @@ const DMG_MINIMAL = `https://github.com/faeton/mediaporter/releases/download/${R
         <div class="cta-row">
           <a href={localizePath(locale, "/") + "#download"} class="btn btn-primary">
             {t.ctaDownload}
-            <span class="md-tag" style="background: rgba(10,10,12,0.15); border-color: transparent; color: #0A0A0C;">v0.8.2</span>
+            <span class="md-tag" style="background: rgba(10,10,12,0.15); border-color: transparent; color: #0A0A0C;">{RELEASE_TAG}</span>
           </a>
           <a href="https://github.com/faeton/mediaporter" class="btn btn-ghost" rel="noopener">{t.ctaSource}</a>
         </div>

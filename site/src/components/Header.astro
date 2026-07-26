@@ -6,7 +6,9 @@ import {
   LOCALE_LABEL,
   HTML_LANG,
   STRINGS,
+  isLocalized,
   localizePath,
+  pagePath,
   stripLocale,
 } from "../i18n/locales";
 
@@ -24,12 +26,16 @@ const path = Astro.url.pathname
 const basePath = stripLocale(path);
 
 const links: { href: string; label: string }[] = [
-  { href: localizePath(locale, "/guides/anime-on-iphone-and-ipad"), label: t.navGuides },
-  { href: localizePath(locale, "/setup"), label: t.navSetup },
-  { href: localizePath(locale, "/changelog"), label: t.navChangelog },
-  { href: localizePath(locale, "/support"), label: t.navSupport },
-  { href: localizePath(locale, "/privacy"), label: t.navPrivacy },
+  { href: pagePath(locale, "/guides/anime-on-iphone-and-ipad"), label: t.navGuides },
+  { href: pagePath(locale, "/setup"), label: t.navSetup },
+  { href: pagePath(locale, "/changelog"), label: t.navChangelog },
+  { href: pagePath(locale, "/support"), label: t.navSupport },
+  { href: pagePath(locale, "/privacy"), label: t.navPrivacy },
 ];
+
+// On English-only pages the language switcher targets the locale homepage —
+// the localized URL for this page doesn't exist.
+const switchBase = isLocalized(basePath) ? basePath : "/";
 ---
 <header class="site-header">
   <div class="container row">
@@ -57,7 +63,7 @@ const links: { href: string; label: string }[] = [
     <div class="lang-switch" aria-label="Language">
       {LOCALES.map((l) => (
         <a
-          href={localizePath(l, basePath)}
+          href={localizePath(l, switchBase)}
           hreflang={HTML_LANG[l]}
           class:list={["lang", l === locale && "is-active"]}
           aria-current={l === locale ? "true" : undefined}

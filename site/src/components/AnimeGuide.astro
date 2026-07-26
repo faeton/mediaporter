@@ -1,6 +1,6 @@
 ---
 import Base from "../layouts/Base.astro";
-import { type Locale, STRINGS, localizePath, getGuide } from "../i18n/locales";
+import { type Locale, STRINGS, localizePath, pagePath, getGuide } from "../i18n/locales";
 
 interface Props {
   locale: Locale;
@@ -131,7 +131,7 @@ const breadcrumbLd = {
         <section class="related">
           <h3>{g.related}</h3>
           <ul>
-            <li><a href={localizePath(locale, "/changelog")}>{t.navChangelog}</a></li>
+            <li><a href={pagePath(locale, "/changelog")}>{t.navChangelog}</a></li>
             <li><a href={localizePath(locale, "/") + "#faq"}>{t.faqHeading}</a></li>
             <li><a href={localizePath(locale, "/") + "#download"}>{t.downloadCta}</a></li>
           </ul>

@@ -1,5 +1,8 @@
 export type Locale = "en" | "ru" | "zh" | "ko";
 
+/** Current shipped app version. Single source for JSON-LD, download URLs, and UI tags. */
+export const APP_VERSION = "0.8.2";
+
 export const LOCALES: Locale[] = ["en", "ru", "zh", "ko"];
 export const DEFAULT_LOCALE: Locale = "en";
 
@@ -48,8 +51,24 @@ export function stripLocale(pathname: string): string {
   return pathname.replace(/\/$/, "") || "/";
 }
 
-/** Hreflang alternates for a given base path (without locale prefix). */
+/** Base paths that exist in every locale. Pages outside this set are English-only
+ *  and must not advertise hreflang alternates (the localized URLs would 404). */
+const LOCALIZED_BASE_PATHS = new Set(["/", "/setup", "/guides/anime-on-iphone-and-ipad"]);
+
+export function isLocalized(basePath: string): boolean {
+  return LOCALIZED_BASE_PATHS.has(basePath);
+}
+
+/** Path to a page for a locale, falling back to the English (root) URL for
+ *  pages that only exist in English. Use for nav links. */
+export function pagePath(locale: Locale, basePath: string): string {
+  return isLocalized(basePath) ? localizePath(locale, basePath) : basePath;
+}
+
+/** Hreflang alternates for a given base path (without locale prefix).
+ *  Returns [] for English-only pages. */
 export function alternates(basePath: string, siteOrigin = "https://porter.md") {
+  if (!LOCALIZED_BASE_PATHS.has(basePath)) return [];
   return LOCALES.map((l) => ({
     hreflang: HTML_LANG[l],
     href: siteOrigin + localizePath(l, basePath),
@@ -166,7 +185,7 @@ const en: Strings = {
   heroEyebrow: "## porter.md",
   heroTitleLead: "Media,",
   heroTitleAccent: "ported.",
-  heroTitleMuted: "Deep on your devices.",
+  heroTitleMuted: "Natively on your devices.",
   heroLede:
     'A native macOS app that transcodes and syncs your video library straight into the built-in iOS/iPadOS <strong>TV app</strong>. No iCloud round-trip. No browser uploader. No "watch on the laptop" workaround.',
   ctaDownload: "Download for macOS",
@@ -419,7 +438,7 @@ const ru: Strings = {
   heroEyebrow: "## porter.md",
   heroTitleLead: "Медиа,",
   heroTitleAccent: "доставлено.",
-  heroTitleMuted: "Глубоко на ваших устройствах.",
+  heroTitleMuted: "Нативно на ваших устройствах.",
   heroLede:
     'Нативное macOS-приложение, которое перекодирует и заливает вашу видеоколлекцию прямо во встроенное приложение <strong>TV</strong> на iOS/iPadOS. Без iCloud, без браузерных загрузчиков, без «смотри на ноутбуке».',
   ctaDownload: "Скачать для macOS",
@@ -672,7 +691,7 @@ const zh: Strings = {
   heroEyebrow: "## porter.md",
   heroTitleLead: "媒体,",
   heroTitleAccent: "已就位.",
-  heroTitleMuted: "深植于你的设备。",
+  heroTitleMuted: "原生融入你的设备。",
   heroLede:
     "一款原生 macOS 应用，把你的视频库自动转码并直接同步到 iOS / iPadOS 的内置 <strong>TV 应用</strong>。不绕 iCloud，不用网页上传器，不再「只能在笔记本上看」。",
   ctaDownload: "下载 macOS 版",
@@ -924,7 +943,7 @@ const ko: Strings = {
   heroEyebrow: "## porter.md",
   heroTitleLead: "미디어,",
   heroTitleAccent: "옮겨졌습니다.",
-  heroTitleMuted: "기기 안 깊숙이.",
+  heroTitleMuted: "당신의 기기에 네이티브로.",
   heroLede:
     "비디오 라이브러리를 iOS / iPadOS의 내장 <strong>TV 앱</strong>으로 곧장 트랜스코드·동기화하는 네이티브 macOS 앱입니다. iCloud 우회 없음, 브라우저 업로더 없음, “노트북에서 봐야 하는” 불편 없음.",
   ctaDownload: "macOS용 다운로드",

@@ -1,5 +1,5 @@
 ---
-import { type Locale, DEFAULT_LOCALE, STRINGS, localizePath } from "../i18n/locales";
+import { type Locale, DEFAULT_LOCALE, STRINGS, localizePath, pagePath } from "../i18n/locales";
 
 interface Props {
   locale?: Locale;
@@ -24,14 +24,14 @@ const year = new Date().getFullYear();
           <li><a href={localizePath(locale, "/") + "#features"}>{t.footerFeatures}</a></li>
           <li><a href={localizePath(locale, "/guides/anime-on-iphone-and-ipad")}>{t.navGuides}</a></li>
           <li><a href={localizePath(locale, "/setup")}>{t.navSetup}</a></li>
-          <li><a href={localizePath(locale, "/changelog")}>{t.navChangelog}</a></li>
+          <li><a href={pagePath(locale, "/changelog")}>{t.navChangelog}</a></li>
         </ul>
       </nav>
       <nav aria-label="Footer">
         <h4>{t.footerHelp}</h4>
         <ul>
-          <li><a href={localizePath(locale, "/support")}>{t.navSupport}</a></li>
-          <li><a href={localizePath(locale, "/privacy")}>{t.navPrivacy}</a></li>
+          <li><a href={pagePath(locale, "/support")}>{t.navSupport}</a></li>
+          <li><a href={pagePath(locale, "/privacy")}>{t.navPrivacy}</a></li>
         </ul>
       </nav>
     </div>
