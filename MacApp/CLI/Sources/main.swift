@@ -54,6 +54,28 @@ func usage() -> Never {
                               the device isn't left with stale assets.
       recover                 register orphaned uploads on the device using
                               tagged .m4v files left in the system tempdir
+      keys                    show which TMDb / OpenSubtitles credentials
+                              this binary resolves and from where (presence
+                              and provenance only — never the values).
+                              Needs no device.
+      heal [--dry-run]        inspect and clear assets stuck pending on the
+                              device. Lists every asset a prior sync failed
+                              to clear with FileError(0), whether its row is
+                              bound, and (without --dry-run) delete_tracks
+                              the unbound ones. A stuck asset blocks
+                              SyncFinished on EVERY later sync, so this is
+                              the recovery path when syncs start hanging at
+                              "finalizing…".
+      verify <syncID> [...]   read back rows by item_store.sync_id and report
+                              whether each is bound to a real file. Use the
+                              asset IDs from the atc.FileBegin log lines.
+      idle-test <file> [--idle 0,60,120]
+                              measure the device's asset delivery window:
+                              sync one small file per idle value, holding
+                              the open session idle that many seconds
+                              between AssetManifest and FileBegin, and
+                              report whether the row bound. Cleans up
+                              after each point.
       pull <remote> [local]   copy a file off the device via AFC. Default
                               local path is the basename of the remote.
                               Useful for inspecting MediaLibrary.sqlitedb,
@@ -147,6 +169,20 @@ case "gate-test":
 case "streaming-test":
     guard argv.count >= 4 else { usage() }
     runStreamingTest(f1: argv[2], f2: argv[3])
+case "keys":
+    runKeys()
+case "heal":
+    runHeal(dryRun: argv.contains("--dry-run"))
+case "verify":
+    guard argv.count >= 3 else { usage() }
+    runVerify(syncIDs: argv[2...].compactMap { Int64($0) })
+case "idle-test":
+    guard argv.count >= 3 else { usage() }
+    var idles: [Double] = [0, 60, 120, 180]
+    if let i = argv.firstIndex(of: "--idle"), i + 1 < argv.count {
+        idles = argv[i + 1].split(separator: ",").compactMap { Double($0) }
+    }
+    runIdleTest(path: argv[2], idleSecs: idles)
 case "-h", "--help", "help":
     usage()
 default:
@@ -443,6 +479,50 @@ func runGateTest(f1: String, f2: String, sleepSec: Double) {
     }
 }
 
+// MARK: - idle-test
+
+/// Sweep the AssetManifest → first-FileBegin gap. See `idleWindowTest`.
+func runIdleTest(path: String, idleSecs: [Double]) -> Never {
+    let url = URL(fileURLWithPath: path)
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        writeUserStderr("not found: \(url.path)\n")
+        exit(1)
+    }
+
+    var results: [IdleWindowResult] = []
+    for secs in idleSecs {
+        print("\n=== idle = \(Int(secs)) s ===")
+        let sema = DispatchSemaphore(value: 0)
+        var result: Result<IdleWindowResult, Error>!
+        Task {
+            do { result = .success(try await idleWindowTest(file: url, idleSeconds: secs)) }
+            catch { result = .failure(error) }
+            sema.signal()
+        }
+        sema.wait()
+        switch result! {
+        case .success(let r): results.append(r)
+        case .failure(let e):
+            writeUserStderr("idle-test (\(Int(secs)) s) failed: \(e.localizedDescription)\n")
+        }
+    }
+
+    print("")
+    print("=== Idle Window Verdict ===")
+    for r in results {
+        print(String(format: "  idle %4.0f s  ->  %@   finish=%@",
+                     r.idleSeconds, r.bound ? "BOUND  " : "UNBOUND", r.finishOutcome))
+    }
+    let firstFail = results.first { !$0.bound }
+    if let f = firstFail {
+        print("\n>>> Bind fails from \(Int(f.idleSeconds)) s of post-manifest idle onward.")
+        print("    The session must not be opened before the first file can ship.")
+    } else if !results.isEmpty {
+        print("\n>>> All idles bound. The manifest→FileBegin gap is NOT the variable.")
+    }
+    exit(results.contains { !$0.bound } ? 1 : 0)
+}
+
 private func format(_ found: Set<String>, _ all: [String]) -> String {
     all.map { "\($0)=\(found.contains($0) ? "YES" : "no")" }.joined(separator: "  ")
 }
@@ -506,6 +586,163 @@ func runRecover() {
 /// another actor hops to the main queue. A semaphore on the main thread
 /// blocks the main queue and the hop never completes — the process
 /// hangs forever waiting on a Task that can't be scheduled. With
+/// Report which credentials this binary resolves and from where. Values are
+/// never printed — only presence, length and provenance — so the output is
+/// safe to paste into a bug report. Needs no device, which makes it the way
+/// to check key plumbing when nothing is plugged in.
+func runKeys() -> Never {
+    func describe(_ name: String, _ value: String?, _ source: Credentials.Source) {
+        if let v = value, !v.isEmpty {
+            print("  \(name.padding(toLength: 24, withPad: " ", startingAt: 0)) set (\(v.count) chars, \(source.label))")
+        } else {
+            print("  \(name.padding(toLength: 24, withPad: " ", startingAt: 0)) not set")
+        }
+    }
+
+    print("Credential resolution for \(Bundle.main.bundleIdentifier ?? "mediaporterctl"):")
+    print("")
+    describe("TMDb API key", Credentials.tmdbAPIKey(), Credentials.tmdbSource())
+    describe("OpenSubtitles API key", Credentials.openSubtitlesAPIKey(), Credentials.openSubtitlesSource())
+    describe("OpenSubtitles username", Credentials.openSubtitlesUsername(),
+             Credentials.source(defaultsKey: Credentials.osUsernameDefaultsKey,
+                                env: "OPENSUBTITLES_USERNAME", toml: "opensubtitles_username"))
+    describe("OpenSubtitles password", Credentials.openSubtitlesPassword(),
+             Credentials.source(defaultsKey: Credentials.osPasswordDefaultsKey,
+                                env: "OPENSUBTITLES_PASSWORD", toml: "opensubtitles_password"))
+    let langs = Credentials.openSubtitlesLanguages()
+    print("  \("OpenSubtitles languages".padding(toLength: 24, withPad: " ", startingAt: 0)) \(langs.isEmpty ? "not set" : langs)")
+    print("")
+    print("TMDb enrichment: \(Credentials.tmdbAPIKey() != nil ? "ON" : "off")")
+    print("Subtitle fetch:  \(Credentials.openSubtitlesEnabled() ? "ON" : "off (needs key + username + password + languages)")")
+    exit(0)
+}
+
+// MARK: - heal / verify
+
+/// Inspect (and optionally clear) assets stuck pending on the device.
+///
+/// A pending asset that `FileError(0)` can't clear blocks `SyncFinished` for
+/// every later sync — the symptom is a run that uploads fine and then hangs on
+/// "finalizing…" until the 120 s deadline, forever, even for a tiny file. See
+/// CLAUDE.md #16.
+func runHeal(dryRun: Bool) -> Never {
+    let device: DeviceInfo
+    do { device = try discoverDevice() }
+    catch {
+        writeUserStderr("error: \(error.localizedDescription)\n")
+        exit(1)
+    }
+
+    let tracked = StuckAssetLedger.all(udid: device.udid)
+    guard !tracked.isEmpty else {
+        print("No stuck assets tracked for this device.")
+        print("")
+        print("The ledger only fills in when a sync sees the SAME pending asset in")
+        print("two AssetManifests with a FileError(0) sent in between. If syncs are")
+        print("hanging at \"finalizing…\" and nothing is listed here, run a sync so a")
+        print("manifest gets read, then run this again.")
+        exit(0)
+    }
+
+    print("Stuck assets tracked for \(device.udid.prefix(16))…:")
+    let ids = tracked.keys.sorted()
+    let rows = (try? findDeleteCandidates(bySyncIDs: ids, device: device)) ?? [:]
+    for id in ids {
+        let sightings = tracked[id] ?? 0
+        let state: String
+        if let row = rows[id] {
+            state = row.isBound
+                ? "BOUND -> \(row.mediaPath ?? "?") (will NOT be deleted)"
+                : "UNBOUND — \"\(row.title)\" has no file, unplayable"
+        } else {
+            state = "no row in MediaLibrary (nothing to delete)"
+        }
+        let mark = sightings >= StuckAssetLedger.escalationThreshold ? "!" : " "
+        print("  \(mark) \(id)  seen \(sightings)x  \(state)")
+    }
+    print("")
+
+    let escalatable = StuckAssetLedger.escalatable(udid: device.udid)
+    let deletable = escalatable.filter { rows[$0]?.isBound == false }
+    if deletable.isEmpty {
+        print("Nothing to delete: an asset must be seen \(StuckAssetLedger.escalationThreshold)x AND have an unbound row.")
+        exit(0)
+    }
+    if dryRun {
+        print("--dry-run: would delete_track \(deletable.count) unbound row(s): \(deletable.map(String.init).joined(separator: ", "))")
+        exit(0)
+    }
+
+    let result = healStuckAssets(device: device, verbose: true)
+    for p in result.problems { writeUserStderr("warning: \(p)\n") }
+    print("Deleted \(result.deleted.count) row(s).")
+    if !result.skippedBound.isEmpty {
+        print("Left \(result.skippedBound.count) bound row(s) alone.")
+    }
+    exit(result.problems.isEmpty ? 0 : 1)
+}
+
+/// Read rows back by wire pid and report whether each bound to a real file.
+/// The wire pids are the `asset=` values in the `atc.FileBegin` log lines.
+func runVerify(syncIDs: [Int64]) -> Never {
+    guard !syncIDs.isEmpty else {
+        writeUserStderr("error: no valid sync IDs given\n")
+        exit(2)
+    }
+    let device: DeviceInfo
+    do { device = try discoverDevice() }
+    catch {
+        writeUserStderr("error: \(error.localizedDescription)\n")
+        exit(1)
+    }
+    let rows: [Int64: DeleteCandidate]
+    do { rows = try findDeleteCandidates(bySyncIDs: syncIDs, device: device) }
+    catch {
+        writeUserStderr("error: \(error.localizedDescription)\n")
+        exit(1)
+    }
+    var bad = 0
+    for id in syncIDs {
+        guard let row = rows[id] else {
+            print("\(id)  MISSING — no row with this sync_id")
+            bad += 1
+            continue
+        }
+        if row.isBound {
+            print("\(id)  BOUND    \"\(row.title)\" -> \(row.mediaPath ?? "?")")
+        } else {
+            print("\(id)  UNBOUND  \"\(row.title)\" — base_location_id=0, won't play")
+            bad += 1
+        }
+    }
+    exit(bad == 0 ? 0 : 1)
+}
+
+/// Hand the pipeline the same TMDb / OpenSubtitles credentials the GUI uses.
+/// `Credentials` reads this process's defaults first, then the MediaPorter
+/// app's defaults domain, then env / config.toml / .env — so keys typed into
+/// Settings apply to CLI and test-harness runs without being re-entered, and
+/// a `sync` from the terminal exercises the same metadata path as a real one.
+@MainActor
+func applyCredentials(to pc: PipelineController) {
+    if let key = Credentials.tmdbAPIKey() {
+        pc.tmdbAPIKey = key
+        print("TMDb: enabled (\(Credentials.tmdbSource().label))")
+    } else {
+        print("TMDb: no key found — titles/posters won't be enriched")
+    }
+
+    pc.openSubtitlesAPIKey = Credentials.openSubtitlesAPIKey() ?? ""
+    pc.openSubtitlesUsername = Credentials.openSubtitlesUsername() ?? ""
+    pc.openSubtitlesPassword = Credentials.openSubtitlesPassword() ?? ""
+    pc.openSubtitlesLanguages = Credentials.openSubtitlesLanguages()
+    if pc.openSubtitlesReady {
+        print("OpenSubtitles: enabled (\(Credentials.openSubtitlesSource().label), langs=\(pc.openSubtitlesLanguages))")
+    } else if !pc.openSubtitlesAPIKey.isEmpty {
+        print("OpenSubtitles: key present but incomplete (needs username, password and languages)")
+    }
+}
+
 /// `dispatchMain()`, main is given over to the dispatch runtime and
 /// MainActor work flows; we terminate via `exit()` from the task.
 func runSync(paths: [String]) -> Never {
@@ -530,6 +767,7 @@ func runSync(paths: [String]) -> Never {
             return
         }
         print("Device: \(pc.deviceInfo!.displayName)")
+        applyCredentials(to: pc)
 
         // Append jobs directly — skip addFiles()'s auto-kickoff of
         // analyzeAll() so we don't race with our own awaited call.
@@ -807,6 +1045,7 @@ func runSmokeTest(fixturePath: String?, keep: Bool) -> Never {
         print("[1/3] sync")
         let pc = PipelineController()
         pc.deviceInfo = device
+        applyCredentials(to: pc)
         pc.jobs.append(FileJob(url: url))
 
         let printer = Task { @MainActor in

@@ -104,21 +104,54 @@ public func recoverOrphansEndToEnd(device: DeviceInfo) async throws -> OrphanRec
 }
 
 enum OrphanRecovery {
+    /// A tempdir .m4v that exists but can't be read back.
+    ///
+    /// An mp4 writes its `moov` atom last, so a transcode killed partway
+    /// through leaves a file with real bytes and no index — ffprobe reports
+    /// "moov atom not found" and `probe` returns nil. These used to be
+    /// invisible: dropped by the scanner, therefore absent from the leftover
+    /// banner, therefore never reclaimed. Four of them sat at 3.8 GB.
+    struct IncompleteTranscode: Sendable {
+        let url: URL
+        let size: Int64
+        let modified: Date
+    }
+
+    struct LocalScan: Sendable {
+        let candidates: [OrphanCandidate]
+        let incomplete: [IncompleteTranscode]
+    }
+
     /// Walk the tempdir for .m4v files left by previous pipeline runs.
     static func scanLocalCandidates() async -> [OrphanCandidate] {
+        await scanLocal().candidates
+    }
+
+    /// Same walk, but keeping the files that failed to probe instead of
+    /// discarding them — the caller decides whether unreadable debris is
+    /// reclaimable or an in-flight transcode it should leave alone.
+    static func scanLocal() async -> LocalScan {
         let tmp = FileManager.default.temporaryDirectory
         guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: tmp, includingPropertiesForKeys: [.fileSizeKey]
-        ) else { return [] }
+            at: tmp, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]
+        ) else { return LocalScan(candidates: [], incomplete: []) }
 
         var out: [OrphanCandidate] = []
+        var broken: [IncompleteTranscode] = []
         for url in entries {
             guard url.pathExtension.lowercased() == "m4v" else { continue }
             let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
             guard let size = attrs?[.size] as? Int64, size > 0 else { continue }
-            if let c = await probe(url: url, size: size) { out.append(c) }
+            if let c = await probe(url: url, size: size) {
+                out.append(c)
+            } else {
+                broken.append(IncompleteTranscode(
+                    url: url, size: size,
+                    modified: (attrs?[.modificationDate] as? Date) ?? .distantPast
+                ))
+            }
         }
-        return out
+        return LocalScan(candidates: out, incomplete: broken)
     }
 
     /// Read TV/movie metadata from a tagged .m4v.

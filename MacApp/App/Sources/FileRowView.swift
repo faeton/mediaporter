@@ -45,6 +45,9 @@ struct FileRowView: View {
     /// `id == clusterID`, so a non-nil value drives `.sheet(item:)`.
     @State private var showPickerInvocation: ShowPickerInvocation?
 
+    /// Movie-candidate picker, opened from the "N matches" badge.
+    @State private var showMoviePicker = false
+
     /// Args bundle for the on-demand picker (vs the auto-prompt path in
     /// ContentView which reads from pipeline.pendingShowPicks).
     private struct ShowPickerInvocation: Identifiable {
@@ -243,6 +246,26 @@ struct FileRowView: View {
                         .foregroundStyle(theme.chipSkipText)
                 }
             }
+            // TMDb matched, but not decisively — "Rambo First Blood" hits four
+            // plausible films. Surface the runners-up inline instead of
+            // silently committing to our guess.
+            if !movieAlternates.isEmpty {
+                MetaDot(theme: theme)
+                Button { showMoviePicker = true } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "questionmark.circle")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("\(movieAlternates.count + 1) matches")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(Color(hex: 0xFF9F0A).opacity(0.18),
+                                in: RoundedRectangle(cornerRadius: 3))
+                    .foregroundStyle(Color(hex: 0xFF9F0A))
+                }
+                .buttonStyle(.plain)
+                .help("TMDb wasn't sure — click to pick a different film")
+            }
             if let extrasLabel = externalTracksLabel {
                 MetaDot(theme: theme)
                 Text(extrasLabel)
@@ -285,6 +308,20 @@ struct FileRowView: View {
 
     private var tmdbKeyMissing: Bool {
         pipeline.tmdbAPIKey.isEmpty
+    }
+
+    /// Runners-up from the TMDb movie search, non-empty only when the match
+    /// was a judgement call (`MetadataLookup.isAmbiguousMatch`).
+    private var movieAlternates: [MovieCandidate] {
+        guard case .movie(let mm)? = job.metadata else { return [] }
+        return mm.alternates
+    }
+
+    /// The film we currently believe this is — shown first in the picker so
+    /// the user can see what they'd be changing away from.
+    private var currentMovie: MovieMetadata? {
+        guard case .movie(let mm)? = job.metadata else { return nil }
+        return mm
     }
 
     private var isActive: Bool {
@@ -825,6 +862,17 @@ struct FileRowView: View {
                 affectedCount: inv.affectedCount,
                 onClose: { showPickerInvocation = nil }
             )
+        }
+        .sheet(isPresented: $showMoviePicker) {
+            if let current = currentMovie {
+                MoviePickerSheet(
+                    theme: theme,
+                    accent: accent,
+                    job: job,
+                    current: current,
+                    onClose: { showMoviePicker = false }
+                )
+            }
         }
     }
 

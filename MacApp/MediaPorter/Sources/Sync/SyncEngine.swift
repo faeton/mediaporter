@@ -267,6 +267,39 @@ final class RegisterSession {
         throw SyncError.deviceNotReady(attempts: attempts)
     }
 
+    /// True once `open()` has completed a handshake + manifest exchange.
+    var isOpen: Bool { session != nil }
+
+    /// Age of the device's asset delivery window, or nil if not open.
+    var secondsSinceManifest: TimeInterval? { session?.secondsSinceManifest }
+    var secondsSinceActivity: TimeInterval? { session?.secondsSinceActivity }
+
+    /// Log the state of the session right before the first byte goes out.
+    ///
+    /// The expired-asset bug (CLAUDE.md #16) was invisible on the wire: every
+    /// message was accepted, nothing errored, and the damage only showed up as
+    /// unplayable rows in TV.app. This is the one-line "is the pipe actually
+    /// usable" record — session open, drainer alive, and how much of the
+    /// delivery window is already gone before the first upload starts.
+    func logUploadPreflight(fileCount: Int, totalBytes: Int64) {
+        guard let session else {
+            DebugLog.error("pipeline.preflight", "no session — upload loop reached with open() incomplete")
+            return
+        }
+        let age = session.secondsSinceManifest ?? -1
+        let idle = session.secondsSinceActivity
+        let msg = String(
+            format: "session=open drainer=%@ files=%d bytes=%lld idle=%.1fs manifestAge=%.1fs ackBudget=%ds bindBudget=%ds",
+            session.isDrainerAlive ? "alive" : "DEAD",
+            fileCount, totalBytes, idle, age,
+            Int(ATCSession.idleAckSeconds), Int(ATCSession.idleBindSeconds))
+        if idle >= ATCSession.idleAckSeconds || !session.isDrainerAlive {
+            DebugLog.error("pipeline.preflight", msg + " *** unhealthy before first upload")
+        } else {
+            DebugLog.notice("pipeline.preflight", msg)
+        }
+    }
+
     func registerFile(_ f: SyncFileInfo) throws {
         guard let session else { throw SyncError.handshakeFailed("registerFile before open") }
         try session.registerFile(f)
@@ -284,6 +317,14 @@ final class RegisterSession {
 
     func abandonAsset(assetID: Int) {
         session?.abandonAsset(assetID: assetID)
+    }
+
+    /// Hold the open session idle for `seconds` while the drainer keeps
+    /// answering Pings. Diagnostic-only — `idleWindowTest` uses it to
+    /// reproduce the gap the pipelined path leaves between AssetManifest
+    /// and the first FileBegin while ffmpeg runs.
+    func idle(seconds: TimeInterval) {
+        session?.pingAwareSleep(seconds: seconds)
     }
 
     func sendProgress(assetID: Int, fraction: Double) {

@@ -228,6 +228,9 @@ private func configureDiagnostics() {
         environment: env
     )
     maybeSendHeartbeat()
+    // Drop expired TMDb responses once per launch. Cheap (a stat per file)
+    // and keeps the cache directory from growing without bound.
+    TMDbCache.prune()
 }
 
 /// Send a weekly anonymized heartbeat if the user has opted in. No-op when

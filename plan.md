@@ -98,7 +98,7 @@ phases — `prepareSync` (handshake + plist + MetadataSyncFinished + wait
 AssetManifest + clear stale, then start a Ping drainer), `registerFile`
 (FileBegin + artwork AFC + FileProgress + FileComplete per file), and
 `finishSync` (wait SyncFinished). `PipelineController.runPipelined`
-opens the session BEFORE the upload loop and calls `registerFile` from
+opens the session before the upload loop and calls `registerFile` from
 inside each upload Task as soon as bytes land; per-file `.synced` flips
 in the UI as each FileComplete is sent. Smoke test
 (`mediaporterctl streaming-test`) on two files: open 19 s upfront,
@@ -110,6 +110,30 @@ medialibraryd doesn't block SyncFinished waiting for it.
 
 Legacy `register(...)` and `registerUploadedFiles(...)` retained for
 orphan recovery + retry-registration paths.
+
+**Amended 2026-08-03.** "Before the upload loop" now means *after every
+transcode finishes*, not before ffmpeg starts. Announced assets expire in
+under a minute of post-manifest idle (idle 0 s binds, 60 s does not — see
+HISTORY.md "2026-08-03" and CLAUDE.md #16), so holding the session open
+across a multi-minute encode killed the whole batch. The interleave gain
+this item shipped is unaffected: it came from per-file FileComplete
+replacing the end-of-run register burst, not from overlapping ffmpeg with
+the session. Open question for large batches: one session per ready file
+would let episode 1 land without waiting on episode 20's encode, at the
+cost of N handshakes/anchors. Grok's review (2026-08-05) preferred chunked
+sessions (3–5 files each, opened once that chunk is encoded) over per-file
+if the wait ever becomes the complaint.
+
+**Detection + self-heal shipped 2026-08-05.** Because the wire accepts
+every message whether or not the asset is still live, the failure was
+invisible until a user found an unplayable row. Now: `atc.FileBegin` logs
+`manifestAge=` (`.error` past 25 s / 45 s) and `pipeline.preflight` records
+session/drainer/age before the first byte; `pipeline.verify` reads every
+shipped row back by `item_store.sync_id` after `finish()` and marks
+unbound ones failed; those rows are `delete_track`-ed immediately;
+`StuckAssetLedger` + `healStuckAssets` clear assets a prior `FileError(0)`
+failed on, gated on seen-twice + not-ours + row-exists + row-unbound.
+CLI: `mediaporterctl heal [--dry-run]`, `mediaporterctl verify <syncID>…`.
 
 **History — gating experiment (2026-05-10).** Ran `mediaporterctl gate-test`
 with two H.264 mp4s on iPhone (akm16pro). After sending `FileComplete #1`,

@@ -116,4 +116,17 @@ public enum DebugLog {
     public static func writeMultiline(_ tag: String, _ lines: [String]) {
         write(tag, lines.joined(separator: " "))
     }
+
+    /// Hard visual separator with the full date, emitted at the start of each
+    /// sync run. The per-line timestamp is HH:mm:ss.SSS only, so during a long
+    /// soak-test session (many runs appended to one file) this is what lets you
+    /// find run boundaries and correlate them with wall-clock time. Grep with
+    /// `grep -n '=== RUN' /tmp/mediaporter-debug.log`.
+    public static func runBanner(_ msg: String) {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let stamp = f.string(from: Date())
+        write("run", String(repeating: "=", count: 72), level: .notice)
+        write("run", "=== RUN \(stamp) — \(msg)", level: .notice)
+    }
 }

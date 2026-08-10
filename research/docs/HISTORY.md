@@ -383,6 +383,96 @@ Throwaway telemetry (438eeb5, since removed) logged the rc of every ATC send acr
 
 The correct liveness signal is the **drainer**: its blocking read returning nil for an unexpected reason (transport error / peer death, distinguished from our own `stopDrainer`) sets `connectionDead`; `checkOrThrow` then throws `SyncError.connectionLost` at the next must-ack send (`FileBegin`/`FileComplete`/`MetadataSyncFinished`). Result: mid-sync connection death aborts at the next send instead of stalling to the 120 s `finishSync` deadline. Shipped in 1810ae0 (0.8.0).
 
+## 2026-08-10 — The expiry clock is SILENCE, not elapsed time (corrects 2026-08-03)
+
+The 2026-08-03 entry below is right about the symptom and the fix, and wrong about the mechanism. It reads the measurement as a *delivery window*: assets announced in the plist die N seconds after the manifest, full stop. Everything written on top of that — "ack window", "bind window", `manifestAge` thresholds, the claim that batch size is bounded — inherits the error.
+
+**The disproof.** A 39-file / 73.6 GB batch (Attack on Titan S2+S3 plus five movies) over USB. Uploads are strictly serialized, so `manifestAge` at `FileBegin(i)` is setup plus the cumulative upload time of everything before it:
+
+| file | manifestAge at FileBegin |
+|---|---|
+| 1 | 0.0 s |
+| 2 | 72.6 s |
+| 10 | 154.6 s |
+| 20 | 241.0 s |
+| 39 | 371.3 s |
+
+Under the absolute-age model, 38 of 39 assets are past the 45 s bind threshold and should land unbound with no ack. Actual result: **39/39 BOUND, 0 UNBOUND, `SyncFinished` via the real terminal ack, `elapsed=0s`.** Not one failure.
+
+**What the original experiment actually measured.** `idle-test` varies *dead air* after the manifest — it holds the session open and sends nothing. So the quantity under test was never asset age; it was how long the device tolerates a silent session. A session that keeps working (`FileBegin`, bytes, `FileProgress`, `FileComplete`, `Ping`/`Pong`) stays alive indefinitely. Six minutes of continuous transfer is fine; twenty-six seconds of nothing is not. The numbers in the table below stand — only their meaning changes, from *age* to *idle*.
+
+**Consequences.**
+
+- Thresholds now compare against `ATCSession.lastActivityAt`, stamped in `sendMsg` and `readMsg` so any message in either direction resets the clock. Renamed `manifestAckSeconds`/`manifestBindSeconds` → `idleAckSeconds`/`idleBindSeconds`. `atc.FileBegin` logs both `idle=` and `manifestAge=`, and only `idle=` drives severity — the age-based check fired `.error` on 38 of 39 healthy files, which is worse than no check at all.
+- **Chunking the batch across several sessions is a UX choice, not a correctness requirement.** Earlier first byte and less work lost to an interruption are real benefits; safety is not one of them. Two outside design reviews recommended `K=1` sessions on the strength of the absolute-age framing supplied to them — that recommendation was downstream of the bad premise.
+- The full `readyGates` barrier before `RegisterSession.open` stays. Its job is to keep an encode from stalling an *open* session, which is exactly the silence the device punishes. It is not load-bearing for batch size.
+
+## 2026-08-10 — `Progress` messages exhausted the AssetManifest read budget
+
+Symptom: syncs of ~39 files failed in ~1 s with "No AssetManifest received from device", while a 1-file smoke test and a 2-movie batch both passed. It looked like a device-side scale limit on announced assets.
+
+It was our reader. The manifest wait was `for _ in 0..<30`, handling `Ping`, `SyncFailed`, `AssetManifest` and `SyncFinished` — but not `Progress`, which fell through the `if` chain and silently consumed an iteration. medialibraryd streams `Progress` while scanning its library to build the manifest, roughly one per announced asset: the failing run logged **40 `Progress` messages for 39 assets**, so the budget was gone before the manifest could arrive. Small batches never reached 30 and so never showed it.
+
+Fixed by budgeting on wall clock (120 s) instead of message count, counting `Progress` without spending budget, and bailing after three consecutive 15 s silences. Waiting longer costs nothing — the expiry clock starts at manifest *receipt*, so time spent before that is free.
+
+Diagnosing this needed a second fix first: `RegisterSession` is constructed with `verbose: false` in the GUI, so the `<< MessageName` wire trace went to a stdout nobody reads, and a dropped connection and a stalled device produced an identical one-line error. The manifest wait now writes its trace, elapsed time and `Progress` count to `DebugLog` regardless of `verbose`.
+
+## 2026-08-03 — Announced assets expire if the session idles before the first FileBegin
+
+> **Corrected 2026-08-10 — see the entry above.** The measurements here are sound; the interpretation is not. The clock counts *silence*, not time since the manifest, so "delivery window" / "ack window" / "bind window" below should be read as idle thresholds throughout.
+
+Symptom: a two-movie batch (Amélie 1.06 GB HEVC re-encode, Seven Years in Tibet 5.94 GB copy+AAC) landed **both** rows in TV.app unbound — `base_location_id=0`, `item_extra.location=''`, `file_size=0`, `in_my_library=1` — so both titles showed under Movies with no artwork, wouldn't play, and never appeared under Downloaded. Both uploads had completed and size-verified; both `FileComplete`s went out; `finishSync` then burned its full 120 s and returned `.timeout`. The uploaded MP4s were GC-swept from `/iTunes_Control/Music/Fxx/` within minutes; the Airlock artwork blobs survived as orphans.
+
+What the trace ruled out: the AssetManifest held exactly our two assets (no stale third to `FileError`), message order was correct (`FileBegin` → upload → `FileProgress` → `FileComplete`), `FileProgress` heartbeats were dense (~every 2 s on the 5.94 GB file), the socket stayed alive (Ping→Pong throughout), the device had 306 GB free, and the same device had bound a 6.07 GB movie on 2026-07-20 and a 15.45 GB one in April.
+
+The one anomaly: the pipelined path opened the register session **before** starting ffmpeg, so **179 s** passed between the AssetManifest and the first `FileBegin` with nothing but Ping/Pong on the wire.
+
+Isolated with `mediaporterctl idle-test` (new; one small pre-encoded fixture, production message order, only the post-manifest idle varies):
+
+| post-manifest idle | row after FileComplete | finishSync |
+|---|---|---|
+| 0 s | **BOUND** to `/iTunes_Control/Music/F38/LYCI.mp4` | real `SyncFinished` |
+| 60 s | **UNBOUND** (`base_location_id=0`, location `''`) | timeout |
+| 120 s | **UNBOUND** | timeout |
+| 180 s | **UNBOUND** | timeout |
+
+So the assets announced in the plist carry a delivery window that opens at `MetadataSyncFinished`; miss it and `FileBegin`/`FileComplete` are accepted on the wire but bind nothing.
+
+**Corrected 2026-08-05 — it's two timers, and the tighter one is half as long.** Filling in 15/20/25/30/45/50/55 s (AkmPad12, USB, `manifest count=1` on every point, so no stale-asset confound):
+
+| post-manifest idle | row binds | `SyncFinished` |
+|---|---|---|
+| 0 / 15 / 20 / **25 s** | BOUND | **yes, instant** |
+| **30** / 45 s | BOUND | **no — timeout** |
+| **50** / 55 / 60 / 120 / 180 s | **UNBOUND** | no — timeout |
+
+- **Ack window, (25 s, 30 s]:** the device stops sending `SyncFinished`. The row still binds and plays, so the run looks successful — but the terminal ack never lands, so *our own asset stays pending* and blocks `SyncFinished` on every later sync. This is the poisoning mechanism, and it fires ~20 s before anything is visibly broken. Direct evidence in the 30 s run: the cleanup's *delete* session then timed out at 120 s, blocked by the asset the sync had just stranded.
+- **Bind window, (45 s, 50 s]:** the row stops binding at all.
+
+The original entry conflated the two and reported "under a minute", which is right for binding and badly wrong for the ack. Code carries both: `ATCSession.manifestAckSeconds` (25) and `manifestBindSeconds` (45).
+
+Watch for a false negative when re-running this: an unbound row still yields a non-nil path from the usual `bl.path || '/' || e.location` query, because `base_location_id=0` is a real row whose `path` is `''` — the result collapses to `"//"`, and `NSString.lastPathComponent` of `"//"` is `"/"`, not `""`. The first sweep reported "all bound" for that reason. Match the basename you actually shipped instead.
+
+**Second-order damage, worse than the first:** an expired asset stays pending on the device forever. Every later sync's AssetManifest still lists it, and medialibraryd waits for all manifest assets before emitting `SyncFinished` (rule #8) — so *every subsequent sync* timed out at `finishSync`, including a 65 KB fixture. `FileError(ErrorCode=0)` did **not** clear them (sent on two separate sessions, both times they came back in the next manifest). What did clear them: `delete_track` on the unbound rows (`mediaporterctl delete <title> --yes`). Immediately after, manifest count dropped to 1 and `finishSync.done via=SyncFinished elapsed=0s` returned instantly.
+
+Note the decoupling that made this confusing: per-`FileComplete` binding still worked the whole time (smoke test bound and verified its row while `finishSync` was timing out). A missing `SyncFinished` does **not** retroactively unbind rows that did bind — it only means the session never closed.
+
+Fixes: `runPipelined` awaits **all** `readyGates` before `RegisterSession.open` (the AFC uploader is opened there too, instead of minutes early) — waiting for only the first encode isn't enough with a sub-minute cliff, since file N+1's encode outlasts file N's upload and every file behind the first would expire in turn. Uploads are the cheap half (5.94 GB in 21 s over USB3), so serializing them after the encodes costs seconds. Also: transcoded outputs are no longer deleted when the finish outcome is unconfirmed, so a re-sync doesn't re-encode; and `finishSync` no longer discards a `SyncFinished` that landed in the inbox before it was called (it still discards the `SyncAllowed`/`InstalledAssets`/`AssetMetrics` noise).
+
+### Detection and self-heal (same day, second pass)
+
+The reordering prevents the bug; it doesn't make it *visible* if it ever comes back by another route. Nothing in the trace said "this asset is dead" — every message was accepted, no error was returned, and the only evidence was an unplayable row discovered days later. So, three layers:
+
+**1. Instrument the window.** `ATCSession.manifestReceivedAt` is stamped when the AssetManifest lands (not at `open()` — the clock starts at the manifest). Every `beginFile` logs `manifestAge=`, at `.notice` normally and at `.error` past `ATCSession.manifestAckSeconds` (25 s) or `manifestBindSeconds` (45 s). `RegisterSession.logUploadPreflight` writes one `pipeline.preflight` line before the first byte: session open, drainer alive/dead, file count, total bytes, manifest age. Grep either from `/tmp/mediaporter-debug.log`.
+
+**2. Verify instead of trusting `FileComplete`.** After `finish()`, `pipeline.verify` reads every shipped row back in a single DB pull keyed on `item_store.sync_id` (the wire pid we generated — exact, unlike titles which shape-shift between the movie/TV/filename paths) and reports BOUND / UNBOUND / NO ROW per file. Unbound jobs are marked `.failed` with a re-send hint, `confirmed` is forced false so their transcodes survive, and the rows are `delete_track`-ed on the spot — they're provably ours and provably broken, so there's nothing to preserve, and leaving them is what poisons the device.
+
+The bind check reads `i.base_location_id` and `e.location` as their own columns (`DeleteCandidate.isBound`). Do not reuse the `"//"` false negative described above: `findDeleteCandidates`/`findDeleteCandidate(bySyncID:)` used to derive path-ness from the join alone and would have called every unbound row bound.
+
+**3. Heal a device poisoned by an earlier build.** `StuckAssetLedger` persists, per device UDID, the stale asset IDs each `prepareSync` tried to clear. An ID absent from the next manifest is retired (the `FileError(0)` worked); an ID that comes back has, by construction, survived a `FileError(0)`. At ≥2 sightings it becomes escalatable, and `healStuckAssets` runs *before* `RegisterSession.open` on the next run — it must, because `delete_track` needs its own delete-only session and two ATC sessions don't coexist. It's kicked off concurrently with transcoding, so it costs no wall clock. Four gates before anything is deleted: seen ≥2×, not an asset the current run is shipping, a row with that `sync_id` exists, and that row is unbound. A bound row is logged and left alone. Manual equivalents: `mediaporterctl heal [--dry-run]` and `mediaporterctl verify <syncID>…`.
+
+Still open: the cliff's low end (15/30/45 s) is unmeasured, and whether the clock starts at `MetadataSyncFinished` or at manifest delivery is untested — they're ~1.5 s apart in practice, so it doesn't change the fix.
+
 ## 2026-06-07 — All transcode outputs coexist until end-of-run (A8 correction)
 
 Preflight assumption "the Mac keeps ~1 transcoded output in flight" is false: `cleanupTempOutputs` only deletes temp `.m4v` files once *every* job is `.synced` — there is no per-file delete in the upload loop and transcode lookahead has no upload backpressure. So Mac-temp requirement is a **sum** over transcode/remux jobs (`Σ(source × 1.1)` + mux-sidecar bytes + one largest-source reserve), with copy-only jobs excluded entirely (they stream from the source, zero temp). Device side is sized on predicted *output* bytes (`Σ × 1.05`), backstopped by the per-file mid-sync poll. Shipped in f7c5c28 (0.8.0).

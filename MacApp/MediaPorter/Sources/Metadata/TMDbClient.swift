@@ -4,6 +4,26 @@ import Foundation
 
 // MARK: - Data Models
 
+/// One alternative TMDb movie the search turned up. Carried alongside the
+/// chosen match so the file row can offer "…or did you mean one of these?"
+/// without a second round-trip — everything here comes from the same
+/// `/search/movie` response, so picking one needs only a poster download.
+public struct MovieCandidate: Identifiable, Sendable, Equatable {
+    public let id: Int              // TMDb movie id
+    public let title: String
+    public let year: Int?
+    public let overview: String?
+    public let posterURL: String?
+    public let originalLanguage: String?
+
+    public init(id: Int, title: String, year: Int?, overview: String?,
+                posterURL: String?, originalLanguage: String?) {
+        self.id = id; self.title = title; self.year = year
+        self.overview = overview; self.posterURL = posterURL
+        self.originalLanguage = originalLanguage
+    }
+}
+
 public struct MovieMetadata {
     public var title: String
     public var year: Int?
@@ -19,9 +39,16 @@ public struct MovieMetadata {
     /// often ships without one and TV.app surfaces it as "Unknown".
     public var originalLanguage: String?
 
+    /// Other plausible matches from the same search, populated only when the
+    /// pick was a judgement call rather than an exact title hit. Empty means
+    /// "we're confident" and the UI shows no picker.
+    public var alternates: [MovieCandidate] = []
+
     public init(title: String, year: Int?, genre: String?, overview: String?,
                 longOverview: String?, director: String?, posterURL: String?,
-                posterData: Data?, tmdbID: Int?, originalLanguage: String? = nil) {
+                posterData: Data?, tmdbID: Int?, originalLanguage: String? = nil,
+                alternates: [MovieCandidate] = []) {
+        self.alternates = alternates
         self.title = title; self.year = year; self.genre = genre
         self.overview = overview; self.longOverview = longOverview
         self.director = director; self.posterURL = posterURL
@@ -129,10 +156,25 @@ public enum TMDbClient {
 
     /// Fetch JSON from a URL with an explicit timeout.
     private static func getJSON(_ url: URL) async throws -> Any {
+        // Serve from the on-disk cache when we have a fresh copy. This is the
+        // single choke point for every TMDb API call, so caching here covers
+        // search, show detail, season/episode lists and credits at once.
+        if let cached = TMDbCache.read(url, ext: "json", ttl: TMDbCache.jsonTTL),
+           let parsed = try? JSONSerialization.jsonObject(with: cached) {
+            return parsed
+        }
+
         var req = URLRequest(url: url, timeoutInterval: requestTimeout)
         req.setValue("MediaPorter/1.0", forHTTPHeaderField: "User-Agent")
-        let (data, _) = try await session.data(for: req)
-        return try JSONSerialization.jsonObject(with: data)
+        let (data, response) = try await session.data(for: req)
+
+        // Parse before caching so a rate-limit body or an error page never
+        // becomes a poisoned entry we keep serving for a week.
+        let parsed = try JSONSerialization.jsonObject(with: data)
+        if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+            TMDbCache.write(data, for: url, ext: "json")
+        }
+        return parsed
     }
 
     /// Search for movies by title and optional year.
@@ -162,6 +204,23 @@ public enum TMDbClient {
                 tmdbID: r["id"] as? Int,
                 originalLanguage: r["original_language"] as? String
             )
+        }
+    }
+
+    /// Public seam for the App target's movie picker — same `/search/movie`
+    /// call as `searchMovie`, projected to the lightweight candidate type the
+    /// UI lists. Mirrors `searchTVShows`. Results with no TMDb id are dropped;
+    /// there'd be nothing to apply.
+    public static func searchMovieCandidates(
+        query: String, apiKey: String
+    ) async throws -> [MovieCandidate] {
+        try await searchMovie(title: query, apiKey: apiKey).compactMap { r in
+            r.tmdbID.map {
+                MovieCandidate(
+                    id: $0, title: r.title, year: r.year, overview: r.overview,
+                    posterURL: r.posterURL, originalLanguage: r.originalLanguage
+                )
+            }
         }
     }
 
@@ -311,9 +370,18 @@ public enum TMDbClient {
     /// Download an image from a URL and return raw data.
     static func downloadPoster(urlString: String) async -> Data? {
         guard let url = URL(string: urlString) else { return nil }
+        if let cached = TMDbCache.read(url, ext: "img", ttl: TMDbCache.posterTTL) {
+            return cached
+        }
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         request.setValue("MediaPorter/1.0", forHTTPHeaderField: "User-Agent")
-        return try? await session.data(for: request).0
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              !data.isEmpty
+        else { return nil }
+        TMDbCache.write(data, for: url, ext: "img")
+        return data
     }
 }

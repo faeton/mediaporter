@@ -221,7 +221,7 @@ struct DeviceColumnView: View {
                 .foregroundStyle(theme.textDim)
             Text(pipelineStatusText)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(theme.text)
+                .foregroundStyle(statusTint)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(EdgeInsets(top: 11, leading: 12, bottom: 11, trailing: 12))
@@ -235,10 +235,24 @@ struct DeviceColumnView: View {
 
     private var pipelineStatusText: String {
         if pipeline.isRunning { return pipeline.overallStatus.isEmpty ? "Working…" : pipeline.overallStatus }
+        // A finished run's verdict outranks the idle line. Without this the
+        // card jumped straight back to "Ready." the instant isRunning went
+        // false, so "timed out waiting for confirmation — rows may not be
+        // committed" was written and never seen.
+        if let outcome = pipeline.lastRunOutcome { return outcome.text }
         let incoming = jobs.filter { ![.synced, .failed].contains($0.status) }
         if incoming.isEmpty { return "Ready." }
         let totalMB = incoming.reduce(0) { $0 + $1.fileSizeMB }
         return "\(incoming.count) incoming · \(fmtSizeMB(totalMB))"
+    }
+
+    private var statusTint: Color {
+        guard !pipeline.isRunning, let outcome = pipeline.lastRunOutcome else { return theme.text }
+        switch outcome.kind {
+        case .ok: return theme.text
+        case .warning: return .orange
+        case .failure: return .red
+        }
     }
 
     private func recommendationCard(info: DeviceInfo) -> some View {

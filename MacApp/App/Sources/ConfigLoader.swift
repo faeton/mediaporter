@@ -85,28 +85,15 @@ enum ConfigLoader {
     }
 
     /// Best-effort TMDb API key discovery. Returns nil if nothing is found.
-    /// Order: UserDefaults → env var → ~/.config/mediaporter/config.toml → .env walk-up → ~/.env.
+    /// Resolution lives in `Credentials` (core) so the CLI and the on-device
+    /// test harnesses resolve the exact same key the GUI does.
     static func tmdbAPIKey() -> String? {
-        if let v = nonEmpty(UserDefaults.standard.string(forKey: tmdbDefaultsKey)) {
-            return v
-        }
-        if let v = nonEmpty(ProcessInfo.processInfo.environment["TMDB_API_KEY"]) {
-            return v
-        }
-        if let v = readFromConfigToml(key: "tmdb_api_key") { return v }
-        if let v = readFromDotenvWalkUp(key: "TMDB_API_KEY") { return v }
-        if let v = readFromHomeDotenv(key: "TMDB_API_KEY") { return v }
-        return nil
+        Credentials.tmdbAPIKey()
     }
 
     /// Returns where the currently effective key came from — useful for the Settings UI.
     static func tmdbSource() -> TMDbKeySource {
-        if nonEmpty(UserDefaults.standard.string(forKey: tmdbDefaultsKey)) != nil { return .userDefaults }
-        if nonEmpty(ProcessInfo.processInfo.environment["TMDB_API_KEY"]) != nil { return .env }
-        if readFromConfigToml(key: "tmdb_api_key") != nil { return .configToml }
-        if readFromDotenvWalkUp(key: "TMDB_API_KEY") != nil { return .dotenv }
-        if readFromHomeDotenv(key: "TMDB_API_KEY") != nil { return .homeDotenv }
-        return .none
+        TMDbKeySource(Credentials.tmdbSource())
     }
 
     /// Persist a user-entered key to UserDefaults, or clear it if empty.
@@ -116,49 +103,16 @@ enum ConfigLoader {
 
     // MARK: - OpenSubtitles
 
-    static func openSubtitlesAPIKey() -> String? {
-        if let v = nonEmpty(UserDefaults.standard.string(forKey: osApiKeyDefaultsKey)) { return v }
-        if let v = nonEmpty(ProcessInfo.processInfo.environment["OPENSUBTITLES_API_KEY"]) { return v }
-        if let v = readFromConfigToml(key: "opensubtitles_api_key") { return v }
-        if let v = readFromDotenvWalkUp(key: "OPENSUBTITLES_API_KEY") { return v }
-        if let v = readFromHomeDotenv(key: "OPENSUBTITLES_API_KEY") { return v }
-        return nil
-    }
-    static func openSubtitlesUsername() -> String? {
-        if let v = nonEmpty(UserDefaults.standard.string(forKey: osUsernameDefaultsKey)) { return v }
-        if let v = nonEmpty(ProcessInfo.processInfo.environment["OPENSUBTITLES_USERNAME"]) { return v }
-        if let v = readFromConfigToml(key: "opensubtitles_username") { return v }
-        if let v = readFromDotenvWalkUp(key: "OPENSUBTITLES_USERNAME") { return v }
-        if let v = readFromHomeDotenv(key: "OPENSUBTITLES_USERNAME") { return v }
-        return nil
-    }
-    static func openSubtitlesPassword() -> String? {
-        if let v = nonEmpty(UserDefaults.standard.string(forKey: osPasswordDefaultsKey)) { return v }
-        if let v = nonEmpty(ProcessInfo.processInfo.environment["OPENSUBTITLES_PASSWORD"]) { return v }
-        if let v = readFromConfigToml(key: "opensubtitles_password") { return v }
-        if let v = readFromDotenvWalkUp(key: "OPENSUBTITLES_PASSWORD") { return v }
-        if let v = readFromHomeDotenv(key: "OPENSUBTITLES_PASSWORD") { return v }
-        return nil
-    }
+    static func openSubtitlesAPIKey() -> String? { Credentials.openSubtitlesAPIKey() }
+    static func openSubtitlesUsername() -> String? { Credentials.openSubtitlesUsername() }
+    static func openSubtitlesPassword() -> String? { Credentials.openSubtitlesPassword() }
     /// Comma-separated ISO 639-1 or 639-2 codes (e.g. "en,ru"). Empty → feature off.
-    static func openSubtitlesLanguages() -> String {
-        if let v = nonEmpty(UserDefaults.standard.string(forKey: osLanguagesDefaultsKey)) { return v }
-        if let v = nonEmpty(ProcessInfo.processInfo.environment["OPENSUBTITLES_LANGUAGES"]) { return v }
-        if let v = readFromConfigToml(key: "opensubtitles_languages") { return v }
-        if let v = readFromDotenvWalkUp(key: "OPENSUBTITLES_LANGUAGES") { return v }
-        if let v = readFromHomeDotenv(key: "OPENSUBTITLES_LANGUAGES") { return v }
-        return ""
-    }
+    static func openSubtitlesLanguages() -> String { Credentials.openSubtitlesLanguages() }
 
     /// Where the API key is currently coming from — used to show a provenance
     /// hint in Settings (e.g. "from project .env" vs "set in app").
     static func openSubtitlesSource() -> TMDbKeySource {
-        if nonEmpty(UserDefaults.standard.string(forKey: osApiKeyDefaultsKey)) != nil { return .userDefaults }
-        if nonEmpty(ProcessInfo.processInfo.environment["OPENSUBTITLES_API_KEY"]) != nil { return .env }
-        if readFromConfigToml(key: "opensubtitles_api_key") != nil { return .configToml }
-        if readFromDotenvWalkUp(key: "OPENSUBTITLES_API_KEY") != nil { return .dotenv }
-        if readFromHomeDotenv(key: "OPENSUBTITLES_API_KEY") != nil { return .homeDotenv }
-        return .none
+        TMDbKeySource(Credentials.openSubtitlesSource())
     }
 
     static func saveOpenSubtitlesCreds(apiKey: String, username: String, password: String, languages: String) {
@@ -168,13 +122,7 @@ enum ConfigLoader {
         save(languages, to: osLanguagesDefaultsKey)
     }
 
-    static func openSubtitlesEnabled() -> Bool {
-        guard let k = openSubtitlesAPIKey(), !k.isEmpty,
-              let u = openSubtitlesUsername(), !u.isEmpty,
-              let p = openSubtitlesPassword(), !p.isEmpty else { return false }
-        _ = p
-        return !openSubtitlesLanguages().isEmpty
-    }
+    static func openSubtitlesEnabled() -> Bool { Credentials.openSubtitlesEnabled() }
 
     private static func save(_ value: String, to key: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -188,6 +136,21 @@ enum ConfigLoader {
 
 enum TMDbKeySource {
     case none, userDefaults, env, configToml, dotenv, homeDotenv
+
+    /// Bridge from the core resolver's enum. `.appDefaults` can't occur in
+    /// the app itself (its own defaults ARE the app domain), so it folds
+    /// into `.userDefaults`.
+    init(_ source: Credentials.Source) {
+        switch source {
+        case .none:         self = .none
+        case .userDefaults: self = .userDefaults
+        case .appDefaults:  self = .userDefaults
+        case .env:          self = .env
+        case .configToml:   self = .configToml
+        case .dotenv:       self = .dotenv
+        case .homeDotenv:   self = .homeDotenv
+        }
+    }
 
     var label: String {
         switch self {

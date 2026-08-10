@@ -109,6 +109,65 @@ class ATCSession {
     private var inbox: [String] = []
     private var ourAssetIDs: Set<String> = []
 
+    /// When the device's AssetManifest arrived — the moment the announced
+    /// assets' delivery window starts ticking (CLAUDE.md #16). Every FileBegin
+    /// logs its age against this so a regression that re-introduces a stall
+    /// between the manifest and the first upload is visible in the log instead
+    /// of only in a broken TV.app library days later.
+    private(set) var manifestReceivedAt: Date?
+
+    /// Seconds since the AssetManifest, or nil outside a prepared session.
+    var secondsSinceManifest: TimeInterval? {
+        manifestReceivedAt.map { Date().timeIntervalSince($0) }
+    }
+
+    /// Whether the Ping drainer is still running and the transport is intact.
+    /// A dead drainer means no Pongs are going out, so the device will drop
+    /// the session (CLAUDE.md #9) — worth knowing before a multi-GB upload.
+    var isDrainerAlive: Bool {
+        inboxLock.lock()
+        defer { inboxLock.unlock() }
+        guard let t = drainerThread else { return false }
+        return t.isExecuting && !connectionDead
+    }
+
+    /// IDLE — not absolute age — after which the device stops sending
+    /// `SyncFinished`. Measured 2026-08-05 (`idle-test`, one fixture, only the
+    /// post-manifest idle varies): 25 s still acks, 30 s does not. Rows still
+    /// BIND past this point, so the run looks successful — but without the
+    /// terminal ack our own asset stays pending on the device and blocks
+    /// `SyncFinished` for every later sync.
+    ///
+    /// The clock measures SILENCE, not elapsed time. See `lastActivityAt`.
+    static let idleAckSeconds: TimeInterval = 25
+
+    /// Idle after which the row no longer binds at all: `base_location_id = 0`,
+    /// `location = ''`, bytes GC-swept. Measured 45 s binds, 50 s does not.
+    static let idleBindSeconds: TimeInterval = 45
+
+    /// Last time this session put anything on the wire or took anything off it.
+    ///
+    /// This — not `manifestReceivedAt` — is what the expiry thresholds measure
+    /// against. Corrected 2026-08-10 after a 39-file / 73.6 GB run: every file
+    /// past the first began well beyond both windows measured from the
+    /// manifest (file 2 at 72.6 s, file 39 at 371.3 s), yet all 39 rows bound
+    /// and `SyncFinished` arrived instantly. An absolute-age reading predicts
+    /// 38 failures; we got none.
+    ///
+    /// The original experiment varied DEAD AIR after the manifest, so what it
+    /// actually measured was how long the device tolerates silence. A session
+    /// that keeps working — FileBegin, bytes, FileProgress, FileComplete,
+    /// Ping/Pong — stays alive indefinitely. Six minutes of continuous
+    /// transfer is fine; twenty-six seconds of nothing is not.
+    private(set) var lastActivityAt: Date = Date()
+
+    /// Seconds since this session last exchanged anything with the device.
+    var secondsSinceActivity: TimeInterval { Date().timeIntervalSince(lastActivityAt) }
+
+    /// Stamp wire activity. Called from the send and read paths, so any
+    /// message in either direction resets the expiry clock.
+    func noteActivity() { lastActivityAt = Date() }
+
     init(device: DeviceInfo, verbose: Bool = false) {
         self.device = device
         self.verbose = verbose
@@ -450,9 +509,67 @@ class ATCSession {
         var staleIDs: [String] = []
         log("  Waiting for AssetManifest...")
 
-        for _ in 0..<30 {
+        // Mirror the wire trace to DebugLog, not just the `verbose` print.
+        // The GUI constructs its RegisterSession with verbose:false, so when
+        // this loop bailed in ~1.1 s the only surviving evidence was
+        // "No AssetManifest received" with no indication of *why* — a
+        // half-second connection drop and a 450 s device stall produced the
+        // identical message. Distinguishing them matters: one is a retry, the
+        // other is a device that needs waking.
+        let manifestWaitStart = Date()
+        // Budget by wall clock, NOT by message count.
+        //
+        // While medialibraryd scans its library to build the manifest it
+        // streams `Progress` messages — roughly one per announced asset. The
+        // old `for _ in 0..<30` loop didn't handle `Progress`, so each one
+        // silently consumed an iteration: a 39-asset sync burned the entire
+        // budget on progress updates in ~1 s and threw `noManifest` before the
+        // manifest could arrive, while a 1-asset sync sailed through. It read
+        // as a device-side scale limit; it was our own reader giving up.
+        //
+        // Waiting longer here costs nothing — the asset-expiry clock starts at
+        // manifest *receipt* (`manifestReceivedAt`), so time spent before that
+        // is free. What we must not do is bail early.
+        // 180 s: a device that just ingested tens of GB indexes for minutes
+        // before it can answer. Time spent here is free — the expiry clock
+        // starts at manifest receipt.
+        let manifestDeadline = manifestWaitStart.addingTimeInterval(180)
+        var manifestTrace: [String] = []
+        var progressCount = 0
+        var quietReads = 0
+        while Date() < manifestDeadline {
             let (msg, name) = readMsg(timeout: 15)
-            guard let name else { break }
+            guard let name else {
+                // readMsg yields a nil name only when ATH.readMessage itself
+                // returned nil — the connection is gone. A timeout comes back
+                // as the literal "TIMEOUT" and keeps looping.
+                DebugLog.error(
+                    "atc.AssetManifest",
+                    "connection closed after \(String(format: "%.1f", Date().timeIntervalSince(manifestWaitStart)))s "
+                    + "waiting for AssetManifest — \(progressCount) Progress, "
+                    + "trace: [\(manifestTrace.joined(separator: ", "))]"
+                )
+                break
+            }
+            // Library-scan heartbeat while the manifest is being built. Common
+            // and uninteresting individually — counted, not traced, so the
+            // diagnostic line stays readable at 39+ assets.
+            if name == "Progress" {
+                progressCount += 1
+                continue
+            }
+            // A read timeout means the device is QUIET, which is exactly what
+            // a busy one looks like: after ingesting a large batch,
+            // medialibraryd can go minutes between messages while it indexes.
+            // Bailing on consecutive timeouts cut a healthy sync off at 47 s
+            // right after a 73.6 GB run. Let the deadline be the only bound —
+            // a genuinely dead connection returns a nil name and breaks above,
+            // which is the real "device gone" signal.
+            if name == "TIMEOUT" {
+                quietReads += 1
+                continue
+            }
+            manifestTrace.append(name)
             log("  << \(name)")
             if name == "Ping" { sendPong(); continue }
             if name == "SyncFailed" { throw SyncError.rejected }
@@ -471,7 +588,21 @@ class ATCSession {
             if name == "SyncFinished" { break }
         }
 
-        guard gotManifest else { throw SyncError.noManifest }
+        let manifestWait = Date().timeIntervalSince(manifestWaitStart)
+        guard gotManifest else {
+            DebugLog.error(
+                "atc.AssetManifest",
+                "giving up after \(String(format: "%.1f", manifestWait))s, "
+                + "\(progressCount) Progress, \(quietReads) quiet read(s), \(manifestTrace.count) other: "
+                + "[\(manifestTrace.joined(separator: ", "))]"
+            )
+            throw SyncError.noManifest
+        }
+        DebugLog.notice(
+            "atc.AssetManifest",
+            "received after \(String(format: "%.1f", manifestWait))s "
+            + "(\(progressCount) Progress message(s) during the library scan)"
+        )
 
         // Step 4: FileBegin + FileComplete for each file (already uploaded)
         afc.makedirs("/Airlock/Media")
@@ -618,14 +749,75 @@ class ATCSession {
         var staleIDs: [String] = []
         progress?("Waiting for device library scan (AssetManifest)…")
         log("  Waiting for AssetManifest...")
-        for _ in 0..<30 {
+        // Mirror the wire trace to DebugLog, not just the `verbose` print.
+        // The GUI constructs its RegisterSession with verbose:false, so when
+        // this loop bailed in ~1.1 s the only surviving evidence was
+        // "No AssetManifest received" with no indication of *why* — a
+        // half-second connection drop and a 450 s device stall produced the
+        // identical message. Distinguishing them matters: one is a retry, the
+        // other is a device that needs waking.
+        let manifestWaitStart = Date()
+        // Budget by wall clock, NOT by message count.
+        //
+        // While medialibraryd scans its library to build the manifest it
+        // streams `Progress` messages — roughly one per announced asset. The
+        // old `for _ in 0..<30` loop didn't handle `Progress`, so each one
+        // silently consumed an iteration: a 39-asset sync burned the entire
+        // budget on progress updates in ~1 s and threw `noManifest` before the
+        // manifest could arrive, while a 1-asset sync sailed through. It read
+        // as a device-side scale limit; it was our own reader giving up.
+        //
+        // Waiting longer here costs nothing — the asset-expiry clock starts at
+        // manifest *receipt* (`manifestReceivedAt`), so time spent before that
+        // is free. What we must not do is bail early.
+        // 180 s: a device that just ingested tens of GB indexes for minutes
+        // before it can answer. Time spent here is free — the expiry clock
+        // starts at manifest receipt.
+        let manifestDeadline = manifestWaitStart.addingTimeInterval(180)
+        var manifestTrace: [String] = []
+        var progressCount = 0
+        var quietReads = 0
+        while Date() < manifestDeadline {
             let (msg, name) = readMsg(timeout: 15)
-            guard let name else { break }
+            guard let name else {
+                // readMsg yields a nil name only when ATH.readMessage itself
+                // returned nil — the connection is gone. A timeout comes back
+                // as the literal "TIMEOUT" and keeps looping.
+                DebugLog.error(
+                    "atc.AssetManifest",
+                    "connection closed after \(String(format: "%.1f", Date().timeIntervalSince(manifestWaitStart)))s "
+                    + "waiting for AssetManifest — \(progressCount) Progress, "
+                    + "trace: [\(manifestTrace.joined(separator: ", "))]"
+                )
+                break
+            }
+            // Library-scan heartbeat while the manifest is being built. Common
+            // and uninteresting individually — counted, not traced, so the
+            // diagnostic line stays readable at 39+ assets.
+            if name == "Progress" {
+                progressCount += 1
+                continue
+            }
+            // A read timeout means the device is QUIET, which is exactly what
+            // a busy one looks like: after ingesting a large batch,
+            // medialibraryd can go minutes between messages while it indexes.
+            // Bailing on consecutive timeouts cut a healthy sync off at 47 s
+            // right after a 73.6 GB run. Let the deadline be the only bound —
+            // a genuinely dead connection returns a nil name and breaks above,
+            // which is the real "device gone" signal.
+            if name == "TIMEOUT" {
+                quietReads += 1
+                continue
+            }
+            manifestTrace.append(name)
             log("  << \(name)")
             if name == "Ping" { sendPong(); continue }
             if name == "SyncFailed" { throw SyncError.rejected }
             if name == "AssetManifest" {
                 gotManifest = true
+                // Start the delivery-window clock here, not at open() — this
+                // is the point after which idling costs us the assets.
+                manifestReceivedAt = Date()
                 if let m = msg {
                     dumpManifest(m)
                     staleIDs = extractStaleAssets(manifestMsg: m, ourIDs: ourIDs)
@@ -634,7 +826,21 @@ class ATCSession {
             }
             if name == "SyncFinished" { break }
         }
-        guard gotManifest else { throw SyncError.noManifest }
+        let manifestWait = Date().timeIntervalSince(manifestWaitStart)
+        guard gotManifest else {
+            DebugLog.error(
+                "atc.AssetManifest",
+                "giving up after \(String(format: "%.1f", manifestWait))s, "
+                + "\(progressCount) Progress, \(quietReads) quiet read(s), \(manifestTrace.count) other: "
+                + "[\(manifestTrace.joined(separator: ", "))]"
+            )
+            throw SyncError.noManifest
+        }
+        DebugLog.notice(
+            "atc.AssetManifest",
+            "received after \(String(format: "%.1f", manifestWait))s "
+            + "(\(progressCount) Progress message(s) during the library scan)"
+        )
 
         // Clear stale pending assets up front. Doing this before any of our
         // own FileBegins is safer than the old end-of-batch sweep (no race
@@ -651,6 +857,12 @@ class ATCSession {
                 ])
             }
         }
+        // Remember what we tried to clear. An ID that shows up again in a
+        // later manifest is one FileError(0) demonstrably failed on — the
+        // expired-asset signature — and `healStuckAssets` will delete_track
+        // it before the NEXT run opens a session. Recording an empty list is
+        // meaningful too: it retires IDs the FileError(0) did clear.
+        StuckAssetLedger.recordManifest(staleIDs: staleIDs, udid: device.udid)
 
         // Make sure Airlock dirs exist before per-file artwork uploads.
         afc.makedirs("/Airlock/Media")
@@ -733,9 +945,26 @@ class ATCSession {
             throw SyncError.handshakeFailed("beginFile called before prepareSync")
         }
         let aid = String(f.assetID)
-        DebugLog.write("atc.FileBegin",
-            "asset=\(aid) path=\(f.devicePath) size=\(f.item.fileSize)")
-        log("  >> FileBegin (asset=\(aid))")
+        // Age of the delivery window at the moment we claim the asset. This is
+        // THE number that decides whether the row binds (CLAUDE.md #16): the
+        // wire accepts FileBegin either way, so without this line an expired
+        // asset is indistinguishable from a healthy one until the user finds
+        // an unplayable title in TV.app. Logged at .error past the danger
+        // threshold so it survives `log show` without --info.
+        let age = secondsSinceManifest ?? 0
+        let idle = secondsSinceActivity
+        let ageMsg = String(format: "asset=%@ path=%@ size=%d idle=%.1fs manifestAge=%.1fs",
+                            aid, f.devicePath, f.item.fileSize, idle, age)
+        if idle >= ATCSession.idleBindSeconds {
+            DebugLog.error("atc.FileBegin",
+                ageMsg + " *** \(Int(ATCSession.idleBindSeconds))s+ of silence — this asset will land UNBOUND")
+        } else if idle >= ATCSession.idleAckSeconds {
+            DebugLog.error("atc.FileBegin",
+                ageMsg + " *** \(Int(ATCSession.idleAckSeconds))s+ of silence — the row should still bind, but expect no SyncFinished and a stranded pending asset")
+        } else {
+            DebugLog.notice("atc.FileBegin", ageMsg)
+        }
+        log("  >> FileBegin (asset=\(aid), manifest age \(String(format: "%.1f", age))s)")
         sendMsg("FileBegin", [
             "AssetID": aid,
             "FileSize": f.item.fileSize,
@@ -860,10 +1089,23 @@ class ATCSession {
         let hardDeadline = start.addingTimeInterval(deadlineSeconds)
 
         // Drop pre-existing inbox entries — they're from the upload phase,
-        // not commit signals for the just-finished file.
+        // not commit signals for the just-finished file. `SyncFinished` is
+        // the one exception: it is only ever sent once, as the terminal
+        // commit, so if it landed while the caller was still between
+        // FileComplete and this call it is ours and discarding it would
+        // burn the full deadline waiting for a message that already came.
+        // (Seen 2026-08-03 in `idle-test`, which reads the device DB after
+        // FileComplete: SyncFinished arrived during the pull and the run
+        // reported a bogus timeout on a row that had bound correctly.)
         let stale = drainInbox()
         if !stale.isEmpty {
             DebugLog.notice("atc.finishSync.discard_stale", "names=\(stale.joined(separator: ","))")
+        }
+        if stale.contains("SyncFinished") {
+            log("  *** SYNC COMPLETE (SyncFinished arrived before finishSync) ***")
+            DebugLog.notice("atc.finishSync.done", "via=SyncFinished_early elapsed=0s")
+            stopDrainer()
+            return .finished
         }
 
         var syncAllowedAt: Date? = nil
@@ -1105,6 +1347,7 @@ class ATCSession {
             DebugLog.error("atc.messageCreate", "\(name): AirTrafficHost returned nil — message not sent")
             return
         }
+        noteActivity()
         check(name, ATH.sendMessage(c, msg))
     }
 
@@ -1173,6 +1416,9 @@ class ATCSession {
         }
 
         guard let msg = result else { return (nil, nil) }
+        // Anything the device says resets the expiry clock, including the
+        // Progress heartbeats it streams during a library scan.
+        noteActivity()
         guard let nameCF = ATH.messageName(msg) else { return (msg, nil) }
         return (msg, nameCF as String)
     }

@@ -168,6 +168,7 @@ struct ContentView: View {
                                 count: pipeline.leftoverTranscodes.count,
                                 bytes: pipeline.leftoverBytesTotal,
                                 deviceConnected: pipeline.isDeviceConnected,
+                                recoverable: pipeline.leftoverRecoverable,
                                 onRecover: {
                                     Task {
                                         let r = await pipeline.recoverOrphans()
@@ -183,6 +184,13 @@ struct ContentView: View {
                                     }
                                 }
                             )
+                            // The banner can appear before a device is picked
+                            // (or the device can arrive later), so re-run the
+                            // read-only match whenever connection state flips.
+                            .onAppear { pipeline.refreshLeftoverRecoverable() }
+                            .onChange(of: pipeline.isDeviceConnected) { _, _ in
+                                pipeline.refreshLeftoverRecoverable()
+                            }
                         }
 
                         if !showEmpty {
@@ -191,11 +199,18 @@ struct ContentView: View {
                                 jobs: pipeline.jobs,
                                 allExpanded: !pipeline.jobs.isEmpty
                                     && expanded.count == pipeline.jobs.count,
+                                canClear: !pipeline.isRunning && !pipeline.jobs.isEmpty,
                                 toggleAll: {
                                     if expanded.count == pipeline.jobs.count {
                                         expanded.removeAll()
                                     } else {
                                         expanded = Set(pipeline.jobs.map(\.id))
+                                    }
+                                },
+                                clearAll: {
+                                    if confirmClearAll(count: pipeline.jobs.count) {
+                                        pipeline.removeAllJobs()
+                                        expanded.removeAll()
                                     }
                                 },
                                 addFiles: { pickFiles(autoSync: false) }
@@ -469,8 +484,32 @@ private struct LeftoverBanner: View {
     let count: Int
     let bytes: Int64
     let deviceConnected: Bool
+    /// nil = device not yet asked. Never promise recoverability before this
+    /// is known — see `PipelineController.leftoverRecoverable`.
+    let recoverable: Int?
     let onRecover: () -> Void
     let onDiscard: () -> Void
+
+    /// Recovery pairs local files to device files by exact byte size, so once
+    /// the device has swept the bytes there is nothing to register and the
+    /// only useful action is Discard.
+    private var subtitle: String {
+        guard deviceConnected else {
+            return "\(formatBytes(bytes)). Connect a device to check what can be recovered."
+        }
+        switch recoverable {
+        case nil:
+            return "\(formatBytes(bytes)) · checking the device…"
+        case 0:
+            return "\(formatBytes(bytes)) — none of it is still on the device. Discard to reclaim the space."
+        case let n?:
+            return "\(n) of \(count) can be registered without re-uploading (\(formatBytes(bytes)) total)."
+        }
+    }
+
+    private var canRecover: Bool {
+        deviceConnected && (recoverable ?? 0) > 0
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -481,9 +520,7 @@ private struct LeftoverBanner: View {
                 Text("\(count) leftover transcode\(count == 1 ? "" : "s") from a previous run")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(theme.text)
-                Text(deviceConnected
-                     ? "\(formatBytes(bytes)) ready to register without re-uploading."
-                     : "\(formatBytes(bytes)). Connect a device to recover.")
+                Text(subtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(theme.textDim)
             }
@@ -494,14 +531,21 @@ private struct LeftoverBanner: View {
                 .foregroundStyle(theme.text)
                 .padding(.horizontal, 10).padding(.vertical, 5)
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(theme.divider, lineWidth: 1))
-            Button("Recover…", action: onRecover)
-                .buttonStyle(.plain)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(RoundedRectangle(cornerRadius: 6).fill(accent.solid))
-                .opacity(deviceConnected ? 1.0 : 0.45)
-                .disabled(!deviceConnected)
+            // Shown only when there is genuinely something to register. A
+            // permanently-dimmed Recover button is worse than no button: it
+            // reads as "this might work", and the usual answer is that it
+            // never will — the bytes were swept, or were never uploaded. When
+            // recoverable is 0 or still unknown, Discard is the only real
+            // action, so it's the only one offered.
+            if canRecover {
+                Button("Recover…", action: onRecover)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(accent.solid))
+                    .help("Register the matching files already on the device")
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -531,6 +575,20 @@ private func confirmDiscardLeftovers(count: Int, bytes: Int64) -> Bool {
     return alert.runModal() == .alertFirstButtonReturn
 }
 
+/// Confirm before emptying the list. Skipped for a small list, where the
+/// action is obvious and trivially redone by re-dropping the files; the prompt
+/// only earns its interruption once re-adding would be real work.
+@MainActor
+private func confirmClearAll(count: Int) -> Bool {
+    guard count > 5 else { return true }
+    let alert = NSAlert()
+    alert.messageText = "Remove all \(count) files from the list?"
+    alert.informativeText = "Nothing is deleted from disk or from the device — this only clears the queue."
+    alert.addButton(withTitle: "Clear All")
+    alert.addButton(withTitle: "Cancel")
+    return alert.runModal() == .alertFirstButtonReturn
+}
+
 // MARK: - Column header
 
 private struct ColumnHeader: View {
@@ -538,7 +596,9 @@ private struct ColumnHeader: View {
     let accent: AccentKey
     let jobs: [FileJob]
     let allExpanded: Bool
+    let canClear: Bool
     let toggleAll: () -> Void
+    let clearAll: () -> Void
     let addFiles: () -> Void
 
     var body: some View {
@@ -557,6 +617,18 @@ private struct ColumnHeader: View {
                 systemImage: allExpanded ? "chevron.up" : "chevron.down",
                 theme: theme, accent: accent, primary: false, action: toggleAll
             )
+            // Escape hatch for an accidental folder drop. Disabled mid-run
+            // rather than hidden, so it doesn't shift the toolbar around as a
+            // sync starts and stops.
+            BulkButton(
+                label: "Clear all", systemImage: "trash",
+                theme: theme, accent: accent, primary: false, action: clearAll
+            )
+            .disabled(!canClear)
+            .opacity(canClear ? 1 : 0.4)
+            .help(canClear
+                  ? "Remove every file from the list"
+                  : "Finish or cancel the current run first")
             Rectangle().fill(theme.divider).frame(width: 1, height: 16)
             BulkButton(label: "Add files…", systemImage: "plus",
                        theme: theme, accent: accent, primary: true, action: addFiles)

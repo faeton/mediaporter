@@ -2,6 +2,37 @@
 
 The Swift MacApp under `MacApp/` is the shipping target. Versions starting with 0.4.0 track the MacApp; the 0.1.x – 0.3.x entries describe the now-frozen Python CLI under `python-reference/`.
 
+## 0.9.0 — 2026-08-10
+
+Large-batch release. Whole seasons now sync in one go: a 39-file / 73.6 GB batch (two Attack on Titan seasons plus five movies) landed 39/39 bound and playable on a real iPad. Getting there fixed a hard failure that made any sizeable batch impossible, taught us that the asset-expiry rule we'd been designing around measured the wrong thing, and closed several ways the app quietly wasted your time.
+
+### Fixed
+
+- **Syncing more than a few dozen files failed outright** — a batch of ~39 files died after about a second with "No AssetManifest received from device", while one or two files worked fine. It looked like a device limit; it was ours. While the device scans its library it streams progress messages — roughly one per file — and the code that waited for the manifest counted those against a 30-message budget it hadn't accounted for. Big batches exhausted the budget before the manifest arrived. The wait is now bounded by time rather than message count, and tolerates a device that goes quiet for minutes while indexing a large import.
+- **Attack-on-Titan-style folders got no recognition at all** — files that lead with the episode number and carry no show name (`E1 «Beast Titan».mkv` inside `Shingeki no Kyojin S2 60 FPS/`) matched none of the filename patterns and fell through to being treated as movies. The show name and season are now read from the folder, with release noise (`60 FPS`, `1080p`, `WEB-DL`, `[Group]`) stripped off. Needs three or more episodes in the folder, so a stray file can't rename itself after its parent directory.
+- **Wrong movie matched with full confidence** — `E5 «Historia».mkv` resolved to *Pirates of the Caribbean: Dead Men Tell No Tales*, poster and all, because the first TMDb search result was taken unconditionally. Matches are now ranked by how closely the title matches what was searched for, so `Rambo.First.Blood…` lands on *First Blood* (1982) instead of *Rambo: First Blood Part II*. Titles that are plainly just an episode marker skip the movie search entirely. Cross-language matching is untouched — a Russian title still resolves through TMDb's alternative titles.
+- **`GoldenEye (1995)BDRip720p.mkv` lost its year** — the year pattern required a separator after the closing parenthesis, which this name doesn't have, so the whole filename became the search query. A year in brackets no longer needs anything after it.
+- **Scene release tags polluted searches** — `Rambo.First.Blood.HDRip.Kubik.v.Kube.mkv` has no year and uses the same separator inside and outside the title, so the release group's name went to TMDb along with the title. Titles are now cut at the first unambiguous release tag. The vocabulary is deliberately narrow, so *A Complete Unknown* and *The Web* survive intact.
+
+### New
+
+- **Finished transcodes are reused instead of re-encoded** — if a run is interrupted after encoding, re-adding the same files now adopts the existing output and goes straight to ready. Previously every output was named with a fresh random name and nothing could match it back to a source, so an interrupted run meant re-encoding everything. Reuse requires the source to be unchanged and every encode setting to match; files are still re-tagged, so metadata edits take effect without a re-encode.
+- **Pick a different film when TMDb isn't sure** — rows whose match was a judgement call show an amber "N matches" badge. Clicking it lists the alternatives with year and synopsis, plus a search box, and applying one costs a poster download rather than a re-lookup.
+- **Clear all** — one button to empty the file list, instead of removing an accidental 40-file folder drop one row at a time.
+- **TMDb responses are cached on disk** — searches, show and episode data, and posters are reused across launches (a week for data, a month for posters), so repeat imports don't re-query the API. The cache key excludes your API key, and only successful responses are stored.
+
+### Reliability
+
+- **The leftover-transcodes banner no longer promises what it can't deliver** — it used to say "ready to register without re-uploading" whenever a device was connected, without checking whether the device still had the matching bytes. Clicking Recover then reported "nothing to recover". It now asks the device first and says what's actually true, and the Recover button is hidden when there's nothing to recover rather than sitting there greyed out.
+- **Interrupted transcodes are visible and reclaimable** — a killed encode leaves a file with no index that the scanner silently discarded, so the space couldn't be freed from the UI (3.8 GB in one case). These are now counted and cleared by Discard, while an encode in progress is left alone.
+- **Corrected the asset-expiry rule** — the device drops announced files after a period of *silence*, not after a fixed time. A 39-file run had files starting more than six minutes after the manifest and every one of them bound. The previous reading would have flagged 38 of 39 healthy files as failures. Warnings now measure time since the last exchange with the device.
+- **Status line no longer flickers between files** — the line fell through to a differently worded sentence for a frame after every upload.
+
+### Diagnostics
+
+- **Protocol failures say why** — the manifest wait now records what the device actually sent and how long it waited, in the app's normal log. A dropped connection and a slow device previously produced an identical one-line error, which is what made the large-batch failure hard to place.
+- **Run separators in the log** — each run writes a dated banner, so a long session stays navigable.
+
 ## 0.8.2 — 2026-07-26
 
 Reliability release. Hardening from a full code audit — graceful behavior when Apple's private frameworks or the device aren't in the expected state, clearer messaging when a sync can't be confirmed, and cold-start handshake tolerance so the first Send after plugging in doesn't fail spuriously. Verified on-device (AkmPad12 over USB) — a real transcode-and-sync of a 240 MB file plus the end-to-end smoke test.

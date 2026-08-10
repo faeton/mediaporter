@@ -22,6 +22,29 @@ public class PipelineController {
     public var isRunning = false
     public var lastRunStats: PipelineStats?
 
+    /// How the last finished run ended. Survives `isRunning` flipping to
+    /// false so the STATUS card can report the outcome instead of snapping
+    /// straight back to "Ready." — the timeout / unconfirmed-commit warnings
+    /// used to be written to `overallStatus` and then never rendered, because
+    /// the card only reads `overallStatus` while a run is in flight. Cleared
+    /// when the next run starts or the queue changes.
+    public var lastRunOutcome: RunOutcome?
+
+    public struct RunOutcome {
+        public enum Kind { case ok, warning, failure }
+        public var kind: Kind
+        public var text: String
+    }
+
+    /// Jobs of the in-flight pipelined run, in send order. Drives
+    /// `updateRunStatus()`; empty outside a run.
+    private var runJobs: [FileJob] = []
+
+    /// When true `updateRunStatus()` is a no-op. Set once a terminal or
+    /// finalize label owns the status line, so a transcode still winding
+    /// down in the background can't overwrite "Upload failed: …".
+    private var runStatusFrozen = false
+
     /// Reentrancy guard for `analyzeAll`. Lets us safely call analyze from
     /// both the view (pickFiles/drag-drop) and `addFiles` without two loops
     /// stomping on the same jobs.
@@ -211,6 +234,9 @@ public class PipelineController {
         // ("Jujutsu Kaisen/") onto the app silently no-ops because the URL has
         // no video extension and gets filtered out below. Depth-bounded so a
         // dropped `~/Movies` tree doesn't take forever.
+        // New work arriving is the "next state" the last run's verdict was
+        // holding the status line for.
+        lastRunOutcome = nil
         let expanded = expandDroppedURLs(urls, maxDepth: 6)
         let filtered = expanded.filter { Self.videoExtensions.contains($0.pathExtension.lowercased()) }
         let existing = Set(jobs.map(\.inputURL))
@@ -413,6 +439,57 @@ public class PipelineController {
                     )
                 }
             }
+
+            detectFolderTitledSeason(parent: parent, siblings: siblings)
+        }
+    }
+
+    /// Second sibling shape: the episode number leads and the show name is
+    /// absent from the filename entirely — "E1 «Beast Titan».mkv" inside
+    /// "Shingeki no Kyojin S2 60 FPS/". The regex parser can't do anything with
+    /// these (no S##E##, no [Group], no year), so they fall through to
+    /// "movie titled `E1 «Beast Titan»`" and TMDb either shrugs or, worse,
+    /// returns a confidently wrong film. The folder is the only place the show
+    /// name exists, so take title + season from it.
+    ///
+    /// Same ≥3-distinct-episodes floor as the plain-numbered path: one stray
+    /// "E5 something.mkv" sitting in a Downloads folder must not rename itself
+    /// after its parent directory.
+    private func detectFolderTitledSeason(parent: URL, siblings: [URL]) {
+        var hits: [(URL, Int)] = []
+        for url in siblings {
+            // Don't touch files the regex parser or the plain-numbered pass
+            // already resolved.
+            if filenameOverrides[url] != nil { continue }
+            let standard = FilenameParser.parse(url.lastPathComponent)
+            if standard.mediaType == .tvShow,
+               standard.season != nil, standard.episode != nil { continue }
+            let stem = (url.lastPathComponent as NSString).deletingPathExtension
+            guard let ep = FilenameParser.matchLeadingEpisode(stem) else { continue }
+            hits.append((url, ep))
+        }
+        guard hits.count >= 3, Set(hits.map(\.1)).count >= 3 else { return }
+
+        let folder = parent.lastPathComponent
+        let show = FilenameParser.showTitleFromFolder(folder)
+        // A folder that cleans down to nothing ("S3", "1080p") tells us
+        // nothing — leave the files alone rather than invent a title.
+        guard !show.isEmpty else { return }
+        let season = FilenameParser.extractSeasonFromFolder(folder) ?? 1
+
+        DebugLog.notice(
+            "parse.folderTitled",
+            "\(folder) → show=\(show) season=\(season) episodes=\(hits.count)"
+        )
+        clusterTitlePrefixes[parent, default: []].insert(FilenameParser.normalizePrefix(show))
+        for (url, ep) in hits {
+            filenameOverrides[url] = ParsedFilename(
+                title: show,
+                year: nil,
+                season: season,
+                episode: ep,
+                mediaType: .tvShow
+            )
         }
     }
 
@@ -439,6 +516,19 @@ public class PipelineController {
         if selectedJobID == job.id {
             selectedJobID = jobs.first?.id
         }
+    }
+
+    /// Drop every job from the list. The per-row X is fine for pruning one
+    /// mistake out of five, but unusable after an accidental 40-file folder
+    /// drop — which is exactly when you most want the list gone.
+    ///
+    /// Deliberately does not touch anything off-list: transcodes already
+    /// written to /tmp stay put (the leftover banner owns those), and nothing
+    /// already on the device is deleted.
+    public func removeAllJobs() {
+        DebugLog.notice("pipeline.removeAll", "clearing \(jobs.count) job(s)")
+        jobs.removeAll()
+        selectedJobID = nil
     }
 
     public func clearCompleted() {
@@ -817,6 +907,56 @@ public class PipelineController {
         await refreshEpisodes(in: clusterID, using: resolved)
     }
 
+    /// Re-tag a movie job with a TMDb candidate the user picked over our
+    /// automatic choice.
+    ///
+    /// Everything needed is already in the candidate (it came from the same
+    /// search response), so the only network call is the poster fetch. The new
+    /// metadata keeps its own `alternates` list — minus the newly chosen
+    /// entry, plus the one we're replacing — so the user can change their mind
+    /// again without re-running the lookup.
+    public func applyMovieCandidate(to job: FileJob, candidate: MovieCandidate) async {
+        guard case .movie(let current)? = job.metadata else { return }
+
+        var replaced = current.alternates.filter { $0.id != candidate.id }
+        if let oldID = current.tmdbID {
+            replaced.append(MovieCandidate(
+                id: oldID, title: current.title, year: current.year,
+                overview: current.overview, posterURL: current.posterURL,
+                originalLanguage: current.originalLanguage
+            ))
+        }
+
+        var meta = MovieMetadata(
+            title: candidate.title,
+            year: candidate.year,
+            genre: nil,
+            overview: candidate.overview,
+            longOverview: candidate.overview,
+            director: nil,
+            posterURL: candidate.posterURL,
+            posterData: nil,
+            tmdbID: candidate.id,
+            originalLanguage: candidate.originalLanguage,
+            alternates: replaced
+        )
+        if let url = meta.posterURL {
+            meta.posterData = await TMDbClient.downloadPoster(urlString: url)
+        }
+        if meta.posterData == nil {
+            meta.posterData = PosterGenerator.generate(title: meta.title, year: meta.year)
+        }
+
+        DebugLog.notice(
+            "tmdb.userPicked",
+            "\(job.fileName): \(current.title) (\(current.year.map(String.init) ?? "?")) " +
+            "→ \(meta.title) (\(meta.year.map(String.init) ?? "?"))"
+        )
+        job.metadata = .movie(meta)
+        MetricsCollector.bump("tmdb_movie_user_picked")
+        sortJobs()
+    }
+
     /// User asked to keep the filename-derived identity. Drops the pending
     /// pick — the cluster's existing fallback ResolvedShow stays in place.
     public func dismissClusterPick(_ clusterID: String) {
@@ -1063,9 +1203,36 @@ public class PipelineController {
     /// the current queue. Cheap (AVAsset metadata read, no subprocess).
     public func refreshLeftovers() {
         let known = Set(jobs.compactMap { $0.outputURL?.standardizedFileURL })
+        let running = isRunning
+        TranscodeCache.prune()
         Task { @MainActor in
-            let candidates = await OrphanRecovery.scanLocalCandidates()
-            self.leftoverTranscodes = candidates
+            let scan = await OrphanRecovery.scanLocal()
+
+            // Truncated debris from a killed transcode. Never surfaced while a
+            // run is in progress: an mp4 being written right now is
+            // indistinguishable from one that died mid-write (no `moov` atom
+            // either way), and a job doesn't get its `outputURL` until ffmpeg
+            // finishes, so an in-flight file isn't in `known` to protect it.
+            // The age floor is a second guard for the same hazard.
+            let debrisCutoff = Date().addingTimeInterval(-120)
+            let debris: [LeftoverTranscode] = running ? [] : scan.incomplete
+                .filter { !known.contains($0.url.standardizedFileURL) }
+                .filter { $0.modified < debrisCutoff }
+                .map {
+                    LeftoverTranscode(
+                        url: $0.url, size: $0.size,
+                        title: "Incomplete transcode (unplayable)", showLabel: nil
+                    )
+                }
+            if !debris.isEmpty {
+                DebugLog.notice(
+                    "leftovers.debris",
+                    "\(debris.count) truncated transcode(s), " +
+                    "\(debris.reduce(0) { $0 + $1.size } / 1_048_576) MB — discard-only"
+                )
+            }
+
+            self.leftoverTranscodes = scan.candidates
                 .filter { !known.contains($0.localURL.standardizedFileURL) }
                 .map { c in
                     let label: String?
@@ -1077,7 +1244,60 @@ public class PipelineController {
                     return LeftoverTranscode(
                         url: c.localURL, size: c.size, title: c.title, showLabel: label
                     )
-                }
+                } + debris
+            // The set changed, so any previous verdict is stale. Re-check
+            // against the device rather than leave a number that no longer
+            // describes what the banner is showing.
+            self.leftoverRecoverable = nil
+            self.refreshLeftoverRecoverable()
+        }
+    }
+
+    /// How many leftover /tmp transcodes still have matching bytes on the
+    /// device, i.e. how many "Recover…" could actually register.
+    ///
+    /// `nil` means "not checked yet" — the banner must not claim anything
+    /// either way until this is filled in. It used to phrase itself purely on
+    /// `deviceConnected` and promise "ready to register without re-uploading"
+    /// for 36 GB that the device had already garbage-collected, so Recover
+    /// then reported "nothing to recover". Recovery matches on exact byte
+    /// size, and an expired asset's bytes are swept, so the honest answer is
+    /// usually zero.
+    public var leftoverRecoverable: Int?
+
+    /// Read-only dry run of the recovery match: scan the device's staging
+    /// area, pair by byte size, report the count. Registers nothing and
+    /// deletes nothing, so it's safe to run automatically whenever the banner
+    /// appears. Deliberately does not set `isRunning` — it must not block or
+    /// be blocked by a sync.
+    public func refreshLeftoverRecoverable() {
+        guard !leftoverTranscodes.isEmpty, let dev = deviceInfo else {
+            leftoverRecoverable = nil
+            return
+        }
+        Task { @MainActor in
+            let candidates = await OrphanRecovery.scanLocalCandidates()
+            guard !candidates.isEmpty else {
+                self.leftoverRecoverable = 0
+                return
+            }
+            let devCopy = dev
+            guard let deviceFiles = try? await Task.detached(operation: {
+                try DeviceMaintenance.scanStagingMedia(device: devCopy)
+            }).value else {
+                // Couldn't ask the device — stay at "unknown" rather than
+                // asserting either answer.
+                self.leftoverRecoverable = nil
+                return
+            }
+            let (pairs, _, _) = OrphanRecovery.match(
+                candidates: candidates, deviceFiles: deviceFiles
+            )
+            DebugLog.notice(
+                "leftovers.precheck",
+                "local=\(candidates.count) device=\(deviceFiles.count) recoverable=\(pairs.count)"
+            )
+            self.leftoverRecoverable = pairs.count
         }
     }
 
@@ -1087,6 +1307,11 @@ public class PipelineController {
             try? FileManager.default.removeItem(at: item.url)
         }
         leftoverTranscodes = []
+        leftoverRecoverable = nil
+        // Those files are gone, so any cache entry pointing at one is now a
+        // guaranteed miss. Prune rather than forgetAll — entries for outputs
+        // still bound to live jobs must survive.
+        TranscodeCache.prune()
     }
 
     /// Result bundle for `recoverOrphans` so the UI can pop a clear summary
@@ -1787,6 +2012,7 @@ public class PipelineController {
             ($0.status == .analyzed || $0.status == .ready)
                 && !($0.duplicateOnDevice == true && !$0.syncDespiteDuplicate)
         }
+        DebugLog.runBanner("\(eligible.count) eligible of \(jobs.count) job(s)")
         DebugLog.notice(
             "pipeline.runPipelined",
             "enter — total=\(jobs.count) eligible=\(eligible.count) " +
@@ -1880,17 +2106,10 @@ public class PipelineController {
         }
 
         isRunning = true
+        runStatusFrozen = false
+        runJobs = []
+        lastRunOutcome = nil
         overallStatus = "Preparing..."
-
-        let uploader: AFCUploader
-        do {
-            uploader = try AFCUploader(device: device)
-        } catch {
-            overallStatus = "AFC connection failed: \(error.localizedDescription)\(wifiDropHint(for: device))"
-            isRunning = false
-            DebugLog.error("pipeline.runPipelined", "AFC connection failed: \(error.localizedDescription)")
-            return
-        }
 
         // ------------------------------------------------------------------
         // Pre-allocate sync identity for every analyzed job (assetID,
@@ -1908,47 +2127,11 @@ public class PipelineController {
             preparedPairs.append((job, prepared))
         }
 
-        // Open the streaming register session BEFORE the upload loop. This
-        // pays the handshake + AssetManifest wait once, up front, instead of
-        // after every byte has shipped. Per-file FileBegin/FileComplete now
-        // fires immediately after each AFC upload finishes — medialibraryd
-        // commits the row within ~1 s (plan #8 gate-test).
-        overallStatus = "Opening sync session…"
-        let registerSession = RegisterSession(device: device, verbose: false)
-        do {
-            let infos = preparedPairs.map { $0.prepared.asSyncFileInfo }
-            // RegisterSession.open emits stage labels — "Waiting for device
-            // to settle…", "Connecting (ATC handshake)…", "Writing sync
-            // manifest…", "Waiting for device library scan…", "Clearing
-            // stale pending asset(s)…". Without this hook, overallStatus
-            // sat at "Opening sync session…" for the whole 5-15 s and the
-            // app looked frozen.
-            try await Task.detached {
-                try registerSession.open(files: infos) { stage in
-                    DispatchQueue.main.async {
-                        self.overallStatus = stage
-                    }
-                }
-            }.value
-        } catch {
-            uploader.close()
-            // deviceNotReady already carries a complete, user-facing
-            // explanation (unlock/wait/retry) — show it verbatim rather than
-            // burying it under a generic "Sync session failed:" prefix. Jobs
-            // fall back to .analyzed either way, so the user can just Send
-            // again once the device has settled.
-            if case SyncError.deviceNotReady = error {
-                overallStatus = error.localizedDescription
-            } else {
-                overallStatus = "Sync session failed: \(error.localizedDescription)"
-            }
-            for (job, _) in preparedPairs { job.status = .analyzed }
-            isRunning = false
-            lastRunStats = stats
-            cancelFlag.set(false)
-            DebugLog.error("pipeline.runPipelined", "register session open failed: \(error.localizedDescription)")
-            return
-        }
+        // From here the STATUS line is derived from job state (see
+        // updateRunStatus) rather than written imperatively by whichever of
+        // the overlapping phases happened to tick last.
+        runJobs = preparedPairs.map { $0.job }
+        updateRunStatus()
 
         var prevWork: Task<Void, Error>? = nil
         // Track the asset_id detached into prevWork so that if the task
@@ -2040,6 +2223,111 @@ public class PipelineController {
             }
         }
 
+        // Heal a poisoned device while ffmpeg runs — free wall clock, and it
+        // MUST happen before RegisterSession.open because delete_track needs
+        // its own delete-only session (two ATC sessions don't coexist).
+        //
+        // No-op unless a previous run recorded a pending asset that survived
+        // its FileError(0). Deletion is gated four ways inside
+        // `healStuckAssets`: seen twice, not ours, row exists, row unbound.
+        let inFlightIDs = Set(preparedPairs.map { Int64($0.prepared.assetID) })
+        let healTask = Task.detached {
+            healStuckAssets(device: device, excluding: inFlightIDs)
+        }
+
+        // ------------------------------------------------------------------
+        // Transcode EVERYTHING before opening the ATC session.
+        //
+        // The assets announced in the sync plist have a delivery window on
+        // the device. Measured 2026-08-03 with `mediaporterctl idle-test`
+        // (same single file, only the post-AssetManifest idle varies):
+        //
+        //     idle   0 s -> BOUND, real SyncFinished
+        //     idle  60 s -> UNBOUND (base_location_id=0, location='')
+        //     idle 120 s -> UNBOUND
+        //     idle 180 s -> UNBOUND
+        //
+        // An expired asset is worse than a failed one: FileBegin/FileComplete
+        // are still accepted on the wire, the row lands unbound (title in
+        // TV.app, no artwork, won't play), the uploaded bytes are GC-swept,
+        // and SyncFinished never comes — which leaves the asset pending on
+        // the device, blocking SyncFinished for every LATER sync until its
+        // row is deleted (FileError(0) does not clear it, only delete_track).
+        //
+        // With a cliff under a minute, waiting for just the first transcode
+        // isn't enough: file N+1's encode routinely takes minutes after
+        // file N's upload finishes, so every file behind the first would
+        // expire in turn. Uploads are the cheap half anyway (5.94 GB in 21 s
+        // over USB3), so serializing them after the encodes costs seconds,
+        // not minutes. The parallel lookahead above still keeps ffmpeg busy.
+        // ------------------------------------------------------------------
+        for gate in readyGates { await gate.wait() }
+
+        let heal = await healTask.value
+        if let healSummary = heal.summary {
+            overallStatus = healSummary
+        }
+        for problem in heal.problems {
+            DebugLog.notice("heal.problem", problem)
+        }
+
+        let uploader: AFCUploader
+        do {
+            uploader = try AFCUploader(device: device)
+        } catch {
+            endRun(.failure, "AFC connection failed: \(error.localizedDescription)\(wifiDropHint(for: device))")
+            DebugLog.error("pipeline.runPipelined", "AFC connection failed: \(error.localizedDescription)")
+            diskPoller.cancel()
+            return
+        }
+
+        overallStatus = "Opening sync session…"
+        let registerSession = RegisterSession(device: device, verbose: false)
+        do {
+            let infos = preparedPairs.map { $0.prepared.asSyncFileInfo }
+            // RegisterSession.open emits stage labels — "Waiting for device
+            // to settle…", "Connecting (ATC handshake)…", "Writing sync
+            // manifest…", "Waiting for device library scan…", "Clearing
+            // stale pending asset(s)…". Without this hook, overallStatus
+            // sat at "Opening sync session…" for the whole 5-15 s and the
+            // app looked frozen.
+            try await Task.detached {
+                try registerSession.open(files: infos) { stage in
+                    DispatchQueue.main.async {
+                        self.overallStatus = stage
+                    }
+                }
+            }.value
+        } catch {
+            uploader.close()
+            diskPoller.cancel()
+            // deviceNotReady already carries a complete, user-facing
+            // explanation (unlock/wait/retry) — show it verbatim rather than
+            // burying it under a generic "Sync session failed:" prefix. Jobs
+            // fall back to .analyzed either way, so the user can just Send
+            // again once the device has settled. Transcoded outputs stay on
+            // disk, so a retry doesn't re-encode.
+            if case SyncError.deviceNotReady = error {
+                endRun(.failure, error.localizedDescription)
+            } else {
+                endRun(.failure, "Sync session failed: \(error.localizedDescription)")
+            }
+            for (job, _) in preparedPairs where job.status != .ready {
+                job.status = .analyzed
+            }
+            lastRunStats = stats
+            cancelFlag.set(false)
+            DebugLog.error("pipeline.runPipelined", "register session open failed: \(error.localizedDescription)")
+            return
+        }
+        // Every file is already encoded at this point, so the manifest→first-
+        // FileBegin gap is just the AFC/plist round trip. The preflight line
+        // records that in the log rather than leaving it to be inferred.
+        registerSession.logUploadPreflight(
+            fileCount: preparedPairs.count,
+            totalBytes: preparedPairs.reduce(Int64(0)) { $0 + Int64($1.prepared.item.fileSize) }
+        )
+
         for (idx, pair) in preparedPairs.enumerated() {
             let job = pair.job
             if cancelFlag.get() { break }
@@ -2123,7 +2411,7 @@ public class PipelineController {
 
             job.status = .syncing
             job.progress = 0
-            overallStatus = "Uploading \(realItem.title) (\(idx + 1)/\(preparedPairs.count))"
+            updateRunStatus()
 
             let capJob = job
             let capPrepared = realPrepared
@@ -2146,7 +2434,10 @@ public class PipelineController {
                     let pct = total > 0 ? Double(sent) / Double(total) : 0
                     if now.timeIntervalSince(lastReport) >= 0.25 {
                         lastReport = now
-                        Task { @MainActor in capJob.progress = pct }
+                        Task { @MainActor [weak self] in
+                            capJob.progress = pct
+                            self?.updateRunStatus()
+                        }
                     }
                     // Heartbeat FileProgress: every 5 s OR every 10% (whichever
                     // first). Without these, medialibraryd marks the asset
@@ -2240,8 +2531,10 @@ public class PipelineController {
             // the socket dies. (#15: prior `close()` here could orphan the
             // device's pending-asset wait.)
             registerSession.finishGraceful(deadlineSeconds: 15)
-            overallStatus = wasCancel ? "Cancelled" : "Upload failed: \(err)\(hint)"
-            isRunning = false
+            endRun(
+                wasCancel ? .warning : .failure,
+                wasCancel ? "Cancelled" : "Upload failed: \(err)\(hint)"
+            )
             lastRunStats = stats
             cancelFlag.set(false)
             return
@@ -2256,8 +2549,7 @@ public class PipelineController {
                 job.error = "Cancelled"
             }
             registerSession.finishGraceful(deadlineSeconds: 15)
-            overallStatus = "Cancelled"
-            isRunning = false
+            endRun(.warning, "Cancelled")
             lastRunStats = stats
             cancelFlag.set(false)
             return
@@ -2284,25 +2576,147 @@ public class PipelineController {
         }
         let finishOutcome = await Task.detached { registerSession.finish() }.value
         elapsedTask.cancel()
+
+        // ------------------------------------------------------------------
+        // Verify what actually landed, instead of trusting FileComplete.
+        //
+        // FileComplete succeeding proves only that the device accepted the
+        // message. An expired asset accepts every message and still lands with
+        // base_location_id=0 — a title in TV.app that has no artwork and won't
+        // play (CLAUDE.md #16). The only ground truth is the row itself, so
+        // read it back: one DB pull for the whole batch, matched on the wire
+        // pid we generated (`item_store.sync_id`), which is exact where titles
+        // are not.
+        // ------------------------------------------------------------------
+        overallStatus = "Verifying \(synced) row(s) on device…"
+        let syncedJobs = preparedPairs.map(\.job).filter { $0.status == .synced && $0.syncedAssetID != nil }
+        var unboundJobs: [FileJob] = []
+        if !syncedJobs.isEmpty {
+            let ids = syncedJobs.compactMap { $0.syncedAssetID.map(Int64.init) }
+            do {
+                let rows = try await Task.detached {
+                    try findDeleteCandidates(bySyncIDs: ids, device: device)
+                }.value
+                for job in syncedJobs {
+                    guard let aid = job.syncedAssetID.map(Int64.init) else { continue }
+                    guard let row = rows[aid] else {
+                        // No row at all — the insert never committed.
+                        unboundJobs.append(job)
+                        DebugLog.error("pipeline.verify",
+                            "asset=\(aid) file=\(job.fileName) NO ROW — insert did not commit")
+                        continue
+                    }
+                    if row.isBound {
+                        DebugLog.notice("pipeline.verify",
+                            "asset=\(aid) file=\(job.fileName) bound -> \(row.mediaPath ?? "?")")
+                    } else {
+                        unboundJobs.append(job)
+                        DebugLog.error("pipeline.verify",
+                            "asset=\(aid) file=\(job.fileName) UNBOUND (base_location_id=0) — row won't play; asset likely expired")
+                    }
+                }
+            } catch {
+                // Verification is diagnostic; a failed DB pull must not turn a
+                // good sync into a reported failure.
+                DebugLog.notice("pipeline.verify", "skipped: \(error.localizedDescription)")
+            }
+        }
+
+        // Second heal pass, now that the session is closed. The pre-run pass
+        // used the ledger as it stood BEFORE this run's manifest, so an asset
+        // that hit its second sighting a few minutes ago is only escalatable
+        // now. Without this it would sit poisoning the device until the run
+        // after next. `escalatable` is a UserDefaults read — no device I/O —
+        // so the common case costs nothing.
+        if !StuckAssetLedger.escalatable(udid: device.udid).isEmpty {
+            let late = await Task.detached {
+                healStuckAssets(device: device, excluding: inFlightIDs)
+            }.value
+            if late.didSomething {
+                DebugLog.notice("heal.postrun", "cleared \(late.deleted.count) stuck asset(s) after finish")
+            }
+            for problem in late.problems { DebugLog.notice("heal.problem", problem) }
+        }
+
+        var confirmed: Bool
         switch finishOutcome {
         case .finished:
-            overallStatus = "\(synced)/\(preparedPairs.count) synced"
+            confirmed = true
+            endRun(.ok, "\(synced)/\(preparedPairs.count) synced")
         case .allowedFallback:
-            overallStatus = "\(synced)/\(preparedPairs.count) synced — device didn't confirm the final commit; spot-check TV.app"
+            confirmed = false
+            endRun(.warning, "\(synced)/\(preparedPairs.count) synced — device didn't confirm the final commit; spot-check TV.app")
             DebugLog.notice("pipeline.finish", "allowedFallback outcome surfaced to user")
         case .connectionLost, .timeout:
+            confirmed = false
             let why = finishOutcome == .timeout ? "timed out waiting for confirmation" : "connection lost before confirmation"
-            overallStatus = "\(synced)/\(preparedPairs.count) uploaded — \(why). Rows may not be committed; check TV.app and re-sync missing files"
+            endRun(.warning, "\(synced)/\(preparedPairs.count) uploaded — \(why). Rows may not be committed; check TV.app and re-sync missing files")
             DebugLog.error("pipeline.finish", "unconfirmed sync: \(why)")
+        }
+
+        // An unbound row outranks a clean SyncFinished: the device said yes and
+        // still produced something unplayable. Mark those jobs failed so the
+        // list shows what to re-send, and force `confirmed = false` so their
+        // transcodes survive for the retry.
+        if !unboundJobs.isEmpty {
+            for job in unboundJobs {
+                job.status = .failed
+                job.error = "Landed on device but didn't bind to a file — re-send this one"
+            }
+            confirmed = false
+
+            // Remove the phantoms we just made. These are the strongest
+            // possible delete candidates — we generated the asset IDs seconds
+            // ago and just read the rows back as unbound — so there's no need
+            // to wait for the ledger's two-sighting rule. Doing it now also
+            // stops the assets from staying pending and blocking SyncFinished
+            // on every future sync, which is how one bad run used to poison
+            // the device indefinitely.
+            let phantomIDs = unboundJobs.compactMap { $0.syncedAssetID }
+            overallStatus = "Removing \(phantomIDs.count) unplayable entr\(phantomIDs.count == 1 ? "y" : "ies")…"
+            var removed = 0
+            do {
+                let r = try await Task.detached {
+                    try deleteFromDevice(
+                        syncIDs: phantomIDs,
+                        mediaPaths: [],
+                        artworkSyncIDs: phantomIDs
+                    )
+                }.value
+                removed = r.syncIDsSubmitted
+                DebugLog.notice("pipeline.verify.cleanup",
+                    "delete_track'd \(removed) unbound row(s): \(phantomIDs.map(String.init).joined(separator: ","))")
+            } catch {
+                DebugLog.error("pipeline.verify.cleanup",
+                    "couldn't remove unbound row(s): \(error.localizedDescription)")
+            }
+
+            let ok = synced - unboundJobs.count
+            let n = unboundJobs.count
+            let cleaned = removed > 0
+                ? " Removed the broken entr\(n == 1 ? "y" : "ies") from the device — just press Send again."
+                : " Delete them in TV.app before re-sending."
+            endRun(.failure,
+                "\(ok)/\(preparedPairs.count) synced — \(n) landed unplayable.\(cleaned)")
         }
 
         // Invalidate the device-library snapshot — the rows we just added
         // would otherwise falsely flag the next analyze as duplicates.
         deviceLibrarySnapshot = []
 
-        // Reclaim temp space for every successfully synced job.
-        for (job, _) in preparedPairs where job.status == .synced {
-            deleteTempOutput(for: job)
+        // Reclaim temp space for every successfully synced job — but only on
+        // a confirmed commit. When the device never confirms, the likely next
+        // step is a re-sync, and deleting the transcode here forces a full
+        // re-encode of a file we already produced (tens of minutes for HEVC).
+        if confirmed {
+            for (job, _) in preparedPairs where job.status == .synced {
+                deleteTempOutput(for: job)
+            }
+        } else {
+            DebugLog.notice(
+                "pipeline.finish",
+                "keeping \(preparedPairs.filter { $0.job.status == .synced }.count) transcode(s) on disk — commit unconfirmed, re-sync would otherwise re-encode"
+            )
         }
 
         // Finalize stats
@@ -2312,6 +2726,107 @@ public class PipelineController {
             stats.deviceFreeAfter = result.free
         }
         lastRunStats = stats
+    }
+
+    // MARK: - Live run status
+
+    /// Recompute the STATUS line from the live job states of the current
+    /// pipelined run.
+    ///
+    /// Priority (upload > transcode > mux/tag) instead of last-writer-wins.
+    /// Transcode and upload deliberately overlap — up to `parallelCap` files
+    /// transcode ahead of the upload pointer — so imperative writes from both
+    /// phases used to fight over the label and made the card flicker. The
+    /// fix at the time was for `runTranscodeStep` to stop writing at all,
+    /// which left the line frozen on the sync handshake's last stage
+    /// ("Waiting for device library scan…") for the entire first transcode:
+    /// minutes of an HEVC re-encode that read as a hang.
+    private func updateRunStatus() {
+        guard isRunning, !runStatusFrozen, !runJobs.isEmpty else { return }
+        let total = runJobs.count
+
+        // Bytes moving to the device wins the line — that's what the device
+        // is blocked on. A transcode running alongside gets a short clause.
+        if let i = runJobs.firstIndex(where: { $0.status == .syncing || $0.status == .uploaded }) {
+            let job = runJobs[i]
+            var line = "Uploading \(statusTitle(job)) (\(i + 1)/\(total)) · \(statusPct(job.progress))"
+            if let bg = runJobs.first(where: { $0.status == .transcoding }) {
+                line += " · transcoding \(statusTitle(bg)) in background"
+            }
+            overallStatus = line
+            return
+        }
+        if let i = runJobs.firstIndex(where: { $0.status == .transcoding }) {
+            let job = runJobs[i]
+            var line = "Transcoding \(statusTitle(job)) (\(i + 1)/\(total)) · \(statusPct(job.progress))"
+            // Video re-encodes run at a fraction of realtime; remuxes and
+            // audio-only passes finish at disk speed. Saying which one this
+            // is turns "why is it stuck" into "this one takes a while".
+            if isVideoReencode(job) { line += " — full video re-encode, this is the slow step" }
+            let others = runJobs.filter { $0.status == .transcoding }.count - 1
+            if others > 0 { line += " · +\(others) in parallel" }
+            overallStatus = line
+            return
+        }
+        if let i = runJobs.firstIndex(where: { $0.status == .muxing }) {
+            overallStatus = "Muxing extras into \(statusTitle(runJobs[i])) (\(i + 1)/\(total))"
+            return
+        }
+        if let i = runJobs.firstIndex(where: { $0.status == .tagging }) {
+            overallStatus = "Tagging \(statusTitle(runJobs[i])) (\(i + 1)/\(total))"
+            return
+        }
+        let done = runJobs.filter { $0.status == .synced }.count
+
+        // Hand-off gap inside the upload loop: file N has flipped to .synced
+        // and file N+1 hasn't flipped to .syncing yet, so for one frame no job
+        // is in an active state. Falling through to the "preparing" line below
+        // swapped a differently-worded, differently-sized sentence in after
+        // EVERY file — read as a flicker at the bottom of the window. Keep the
+        // sentence shape identical and just advance to the next file at 0%.
+        //
+        // Gated on something already being synced so this can't claim
+        // "Uploading" during the window where every job is .ready but the ATC
+        // session hasn't opened yet.
+        if done > 0, let i = runJobs.firstIndex(where: { $0.status == .ready }) {
+            overallStatus = "Uploading \(statusTitle(runJobs[i])) (\(i + 1)/\(total)) · 0%"
+            return
+        }
+        // Every file is up; the session is committing. Distinct from the
+        // queued-transcode case below, which is genuinely "nothing running".
+        if done == total {
+            overallStatus = "\(done)/\(total) uploaded — finalizing…"
+            return
+        }
+        // Nothing active — a transcode is queued behind the concurrency cap.
+        overallStatus = "\(done)/\(total) synced — preparing the next file…"
+    }
+
+    private func statusTitle(_ job: FileJob) -> String {
+        job.metadata?.title ?? job.fileName
+    }
+
+    private func statusPct(_ p: Double) -> String {
+        "\(Int((p * 100).rounded()))%"
+    }
+
+    /// True when ffmpeg has to decode+encode the video stream — the only
+    /// genuinely slow transcode path. `TranscodeDecision.needsTranscode` is
+    /// also set for audio-only work, so it can't answer this on its own.
+    private func isVideoReencode(_ job: FileJob) -> Bool {
+        guard let decision = job.decision else { return false }
+        if decision.needsDownscale || job.burnInSubtitle != nil { return true }
+        guard let video = job.mediaInfo?.videoStreams.first else { return false }
+        return decision.streamActions[video.index] == "transcode"
+    }
+
+    /// Park a terminal message where the STATUS card can still show it after
+    /// `isRunning` goes false, and stop derived updates from overwriting it.
+    private func endRun(_ kind: RunOutcome.Kind, _ text: String) {
+        runStatusFrozen = true
+        overallStatus = text
+        lastRunOutcome = RunOutcome(kind: kind, text: text)
+        runJobs = []
         isRunning = false
     }
 
@@ -2335,6 +2850,33 @@ public class PipelineController {
             return
         }
 
+        // Adopt a finished encode from an earlier run rather than redoing it.
+        // Checked before the external-mux block on purpose: the fingerprint
+        // covers the sidecar tracks, so a hit skips the mux pass too.
+        let cacheKey = transcodeFingerprint(for: job)
+        if let cached = TranscodeCache.lookup(source: job.inputURL, fingerprint: cacheKey) {
+            DebugLog.notice(
+                "pipeline.transcode",
+                "reuse — \(job.fileName) adopted an existing encode, no re-transcode"
+            )
+            job.outputURL = cached
+            job.progress = 1.0
+            job.status = .ready
+            // Re-tag even on a hit: the bytes are identical but the metadata
+            // may not be (a different TMDb pick, an edited title). Tagging is
+            // seconds; encoding is minutes.
+            if let meta = job.metadata, let info = job.mediaInfo {
+                job.status = .tagging
+                updateRunStatus()
+                try? await Tagger.tag(file: cached, metadata: meta, mediaInfo: info)
+                job.status = .ready
+                updateRunStatus()
+                // Tagging rewrote the file, so the recorded size is stale.
+                TranscodeCache.record(source: job.inputURL, fingerprint: cacheKey, output: cached)
+            }
+            return
+        }
+
         // Pre-mux external dubs/subs into an intermediate MKV — same step as
         // runAll (line ~1078). Without this the pipelined path silently drops
         // every extra cluster track because ffmpeg is fed the source file
@@ -2342,6 +2884,7 @@ public class PipelineController {
         var muxIntermediate: URL? = nil
         if !job.externalTracksToMux.isEmpty {
             job.status = .muxing
+            updateRunStatus()
             let intermediate = FileManager.default.temporaryDirectory
                 .appendingPathComponent("mp-mux-\(UUID().uuidString).mkv")
             do {
@@ -2401,11 +2944,11 @@ public class PipelineController {
         if job.needsWork {
             job.status = .transcoding
             job.progress = 0
-            // Don't write to overallStatus here — transcode/tag run in
-            // parallel with upload. The Transcode pill in the bottom
-            // timeline already conveys progress; clobbering overallStatus
-            // makes the device card flicker between "Uploading" and
-            // "Tagging" mid-batch.
+            // No direct overallStatus write — transcode/tag overlap the
+            // upload phase, and last-writer-wins made the device card
+            // flicker between "Uploading" and "Tagging" mid-batch.
+            // updateRunStatus() resolves the two by priority instead.
+            updateRunStatus()
 
             let outputURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)
@@ -2435,7 +2978,10 @@ public class PipelineController {
                     // otherwise strand the bar at whatever the last tick was.
                     if pct < 1.0, now.timeIntervalSince(lastUpdate) < 0.25 { return }
                     lastUpdate = now
-                    DispatchQueue.main.async { job.progress = pct }
+                    DispatchQueue.main.async { [weak self] in
+                        job.progress = pct
+                        self?.updateRunStatus()
+                    }
                 }
                 job.progress = 1.0
                 job.outputURL = outputURL
@@ -2454,11 +3000,42 @@ public class PipelineController {
 
         if let meta = job.metadata, let output = job.outputURL, output != job.inputURL {
             job.status = .tagging
-            // See comment above — bottom timeline carries this; don't fight
-            // the upload phase for overallStatus.
+            updateRunStatus()
             try? await Tagger.tag(file: output, metadata: meta, mediaInfo: info)
             job.status = .ready
+            updateRunStatus()
         }
+
+        // Record only a real transcode. The no-work branch sets outputURL to
+        // the source itself — there is nothing to reuse there, and indexing it
+        // would make the cache claim the source is its own output.
+        if job.status == .ready, let output = job.outputURL, output != job.inputURL {
+            TranscodeCache.record(source: job.inputURL, fingerprint: cacheKey, output: output)
+        }
+    }
+
+    /// Digest of everything that changes what ffmpeg writes.
+    ///
+    /// Anything omitted here is a silent-wrong-output bug: the cache would
+    /// hand back an encode made under different settings. When in doubt,
+    /// include it — a spurious miss only costs a re-encode, which is exactly
+    /// what happens today anyway.
+    private func transcodeFingerprint(for job: FileJob) -> String {
+        TranscodeCache.fingerprint([
+            "v1",
+            "quality=\(qualityPreset)",
+            "hwAccel=\(hwAccel)",
+            "loudnorm=\(normalizeLoudness)",
+            "maxRes=\(String(describing: job.maxResolution))",
+            "audio=\(job.selectedAudio.map(String.init).joined(separator: ","))",
+            "subs=\(job.selectedSubtitles.map(String.init).joined(separator: ","))",
+            "extSubs=\(job.selectedExternalSubs.map(String.init).joined(separator: ","))",
+            "burnIn=\(String(describing: job.burnInSubtitle))",
+            "burnInExtra=\(job.pendingBurnInExtraLang ?? "-")",
+            "audioLangs=\(job.audioLanguageOverrides.map { "\($0.key):\($0.value)" }.sorted().joined(separator: ","))",
+            "mux=\(job.externalTracksToMux.map { String(describing: $0) }.sorted().joined(separator: "|"))",
+            "origLang=\(job.metadata?.originalLanguage ?? "-")",
+        ])
     }
 
     /// Build a SyncItem for a ready job.

@@ -49,10 +49,19 @@ enum FilenameParser {
         pattern: #"^(?:\[[^\]]+\]\s*)?(.+?)\s+-\s+(\d{1,3})(?:v\d+)?(?:[\s\[]|$)"#
     )
 
-    // Movie: "Movie.Name.2024", "Movie Name (2024)", or "Movie Name 1972" at end-of-string.
-    // Trailing separator is optional so the year can be the last token in the stem.
+    // Movie: "Movie.Name.2024", "Movie Name (2024)", "Movie Name 1972" at
+    // end-of-string, or "Movie Name (1995)BDRip720p" with the release tag
+    // jammed straight onto the closing paren.
+    //
+    // Two alternatives, because the two forms need different boundaries:
+    //   group 2 — bracketed year. The bracket IS the boundary, so nothing is
+    //     required after it. The old single-branch pattern demanded a trailing
+    //     `[.\s_-]|$` even for `(1995)`, which is why "GoldenEye (1995)BDRip720p"
+    //     failed the regex entirely and fell through to the whole-stem fallback.
+    //   group 3 — bare year. Still needs a separator or end-of-string after it,
+    //     otherwise "Blade2019" and part numbers would parse as years.
     private static let movieYearPattern = try! NSRegularExpression(
-        pattern: #"^(.+?)[.\s_-]+[\(]?(\d{4})[\)]?(?:[.\s_-]|$)"#
+        pattern: #"^(.+?)(?:[.\s_-]*[\(\[](\d{4})[\)\]]|[.\s_-]+(\d{4})(?:[.\s_-]|$))"#
     )
 
     /// Parse a video filename, then consult `parentDir` for a season marker
@@ -186,7 +195,11 @@ enum FilenameParser {
         // Try movie with year
         if let match = movieYearPattern.firstMatch(in: name, range: range) {
             let title = extractGroup(name, match: match, group: 1)
-            let year = Int(extractGroup(name, match: match, group: 2))
+            // Exactly one of the two year branches participated in the match.
+            let bracketed = extractGroup(name, match: match, group: 2)
+            let year = Int(bracketed.isEmpty
+                           ? extractGroup(name, match: match, group: 3)
+                           : bracketed)
             let p = ParsedFilename(
                 title: cleanTitle(title),
                 year: year,
@@ -215,7 +228,7 @@ enum FilenameParser {
     private static let folderSeasonPattern = try! NSRegularExpression(
         pattern: #"(?:^|[\s._-])(?:[Ss]eason[\s._-]*(\d{1,2})|[Ss](\d{1,2}))(?:[\s._-]|$)"#
     )
-    private static func extractSeasonFromFolder(_ folder: String) -> Int? {
+    static func extractSeasonFromFolder(_ folder: String) -> Int? {
         let range = NSRange(folder.startIndex..., in: folder)
         guard let m = folderSeasonPattern.firstMatch(in: folder, range: range) else {
             return nil
@@ -226,6 +239,92 @@ enum FilenameParser {
             }
         }
         return nil
+    }
+
+    // MARK: - Folder-titled episodes
+
+    /// Episode marker at the head of a filename that carries no show name of
+    /// its own: "E1 «Beast Titan».mkv", "EP07 - Whatever.mkv", "Episode 12.mkv".
+    /// Releases shaped like this only make sense inside a season folder, so the
+    /// show name has to come from the folder — see `showTitleFromFolder`.
+    ///
+    /// Anchored at the start on purpose. A *trailing* number is already
+    /// `parsePlainNumbered`'s job, and an unanchored `E\d+` would fire on
+    /// ordinary titles ("Terminator 2", "Se7en"). The `(?![0-9])` tail stops
+    /// "E1" from swallowing the first digit of "E12".
+    private static let leadingEpisodePattern = try! NSRegularExpression(
+        pattern: #"^(?:[Ee][Pp]?|[Ee]pisode)[\s._-]*(\d{1,3})(?![0-9])"#
+    )
+
+    /// Episode number for a bare "E##"-style stem, or nil if it isn't one.
+    static func matchLeadingEpisode(_ stem: String) -> Int? {
+        let range = NSRange(stem.startIndex..., in: stem)
+        guard let m = leadingEpisodePattern.firstMatch(in: stem, range: range),
+              let r = Range(m.range(at: 1), in: stem) else { return nil }
+        return Int(stem[r])
+    }
+
+    /// True when a parsed "movie title" is really just an episode marker with
+    /// no show name — the residue of an "E5 «Historia».mkv" style filename.
+    /// `lookupMovie` uses this to skip the TMDb query entirely.
+    static func looksLikeBareEpisodeMarker(_ title: String) -> Bool {
+        matchLeadingEpisode(title) != nil
+    }
+
+    /// Release / quality noise that shows up in season-folder names and must
+    /// not end up in the TMDb query. Matched as whole tokens, case-insensitively.
+    private static let folderNoiseTokens: Set<String> = [
+        "1080p", "720p", "480p", "2160p", "4k", "uhd", "hd", "sd", "fullhd",
+        "bdrip", "bluray", "blu-ray", "brrip", "webrip", "web-dl", "webdl", "web",
+        "hdrip", "dvdrip", "dvd", "hdtv", "remux", "rip",
+        "x264", "x265", "h264", "h265", "hevc", "avc", "xvid", "divx", "av1",
+        "aac", "ac3", "eac3", "dts", "flac", "mp3", "opus", "ddp", "dd",
+        "10bit", "8bit", "hdr", "hdr10", "dv", "sdr",
+        "fps", "dub", "dubbed", "sub", "subbed", "subs", "multi", "dual",
+        "complete", "season", "seasons", "series",
+    ]
+
+    /// Turn a season-folder name into a show title:
+    /// "Shingeki no Kyojin S3 60 FPS" → "Shingeki no Kyojin".
+    ///
+    /// Strips bracketed groups, the season marker, and any trailing run of
+    /// release-noise tokens. Only a *trailing* run is dropped — noise words
+    /// are stripped from the tail inward and we stop at the first real word, so
+    /// a show whose name legitimately contains one ("Band of Brothers Complete"
+    /// vs. "The Web S1") keeps its own words.
+    static func showTitleFromFolder(_ folder: String) -> String {
+        // Drop bracketed release groups first: "[Erai-raws] Show S2 [1080p]".
+        var s = folder.replacingOccurrences(
+            of: #"\[[^\]]*\]"#, with: " ", options: .regularExpression
+        )
+        // Remove the season marker wherever it sits.
+        s = s.replacingOccurrences(
+            of: #"(?:^|[\s._-])(?:[Ss]eason[\s._-]*\d{1,2}|[Ss]\d{1,2})(?=[\s._-]|$)"#,
+            with: " ", options: .regularExpression
+        )
+        s = s.replacingOccurrences(of: ".", with: " ")
+             .replacingOccurrences(of: "_", with: " ")
+
+        var tokens = s.split(separator: " ").map(String.init)
+            .filter { !$0.isEmpty }
+        // Peel release noise off the tail. A bare number is only noise once a
+        // named noise token has already been peeled — that's what separates
+        // the "60" of "Show 60 FPS" (dropped, it qualifies FPS) from the "7"
+        // of "Blake's 7" (kept, it's the title). Same for "Show 1080p" vs
+        // "Apollo 13": the former peels "1080p" but then stops at "Show".
+        var peeledNoise = false
+        while let last = tokens.last {
+            let key = last.lowercased().trimmingCharacters(in: .punctuationCharacters)
+            if folderNoiseTokens.contains(key) {
+                tokens.removeLast()
+                peeledNoise = true
+            } else if peeledNoise, !key.isEmpty, key.allSatisfy(\.isNumber) {
+                tokens.removeLast()
+            } else {
+                break
+            }
+        }
+        return tokens.joined(separator: " ").trimmingCharacters(in: .whitespaces)
     }
 
     private static func extractGroup(_ string: String, match: NSTextCheckingResult, group: Int) -> String {
@@ -259,6 +358,60 @@ enum FilenameParser {
         return (stripped.trimmingCharacters(in: .whitespaces), season)
     }
 
+    // MARK: - Release-tail stripping
+
+    /// Tokens that essentially never appear in a real film or show title, so
+    /// hitting one means the title has ended and release metadata has begun.
+    ///
+    /// Deliberately narrower than `folderNoiseTokens`. Words like "complete",
+    /// "extended", "web", "dual" and "series" are excluded on purpose — they
+    /// are plausible release tags but they also maul real titles ("A Complete
+    /// Unknown", "The Web", "Extended Family"). A folder name can afford the
+    /// looser list because it is only ever a container; a filename cannot.
+    private static let releaseNoiseTokens: Set<String> = [
+        "bdrip", "bluray", "blu-ray", "brrip", "bdremux", "webrip", "web-dl",
+        "webdl", "hdrip", "dvdrip", "dvdscr", "hdtv", "tvrip", "camrip", "remux",
+        "x264", "x265", "h264", "h265", "hevc", "avc", "xvid", "divx", "av1",
+        "aac", "ac3", "eac3", "dts", "truehd", "flac",
+        "10bit", "8bit", "hdr10", "repack", "proper",
+    ]
+
+    /// True when a token is unambiguously release metadata rather than title.
+    private static func isReleaseNoise(_ token: String) -> Bool {
+        let t = token.lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "()[]{}.,-"))
+        guard !t.isEmpty else { return false }
+        if releaseNoiseTokens.contains(t) { return true }
+        // Resolutions: 720p, 1080p, 2160p.
+        if t.range(of: #"^\d{3,4}p$"#, options: .regularExpression) != nil { return true }
+        // Hyphenated stacks: "WEB-DLRip-AVC", "DTS-HD". One known part is
+        // enough — the whole compound is metadata.
+        let parts = t.split(separator: "-").map(String.init)
+        if parts.count > 1, parts.contains(where: { releaseNoiseTokens.contains($0) }) {
+            return true
+        }
+        return false
+    }
+
+    /// Cut a title at the first release-metadata token.
+    ///
+    /// Scene releases separate the title from their tags with the *same*
+    /// character they use inside the title — "Rambo.First.Blood.HDRip.Kubik.v.Kube"
+    /// — so there is no syntactic boundary to find, only a vocabulary one.
+    /// Truncating at "HDRip" yields "Rambo First Blood" and, as a bonus, sheds
+    /// the release-group name trailing behind it ("Kubik v Kube"), which would
+    /// otherwise poison the TMDb query just as badly as the tags do.
+    ///
+    /// `idx > 0` keeps a title that *opens* with a listed word intact rather
+    /// than reducing it to the empty string.
+    static func stripReleaseTail(_ title: String) -> String {
+        let tokens = title.split(separator: " ").map(String.init)
+        guard let idx = tokens.firstIndex(where: isReleaseNoise), idx > 0 else {
+            return title
+        }
+        return tokens[..<idx].joined(separator: " ")
+    }
+
     private static func cleanTitle(_ raw: String) -> String {
         // Replace dots/underscores with spaces, then drop parenthesized tails
         // ("Крестный отец (The Godfather)" → "Крестный отец") so TMDb queries
@@ -271,6 +424,11 @@ enum FilenameParser {
         let bracketStripped = parenStripped.replacingOccurrences(
             of: #"\s*\[[^\]]*\]\s*"#, with: " ", options: .regularExpression
         )
-        return bracketStripped.trimmingCharacters(in: .whitespaces)
+        // Collapse the separator runs the substitutions above leave behind, so
+        // stripReleaseTail sees clean single-space tokens.
+        let collapsed = bracketStripped.replacingOccurrences(
+            of: #"\s+"#, with: " ", options: .regularExpression
+        )
+        return stripReleaseTail(collapsed.trimmingCharacters(in: .whitespaces))
     }
 }

@@ -137,13 +137,95 @@ public struct DeleteCandidate: Sendable {
     public let mediaPath: String?   // /iTunes_Control/Music/Fxx/yyyy.mp4 (nil if unbound)
     public let mediaKind: Int       // 2 movie, 32 TV show
     public let totalTimeMs: Int
+    /// False when the row exists but points at no file — the expired-asset
+    /// signature (`base_location_id = 0`, `item_extra.location = ''`). Such a
+    /// row shows up in TV.app's Movies tab with no artwork and won't play.
+    ///
+    /// Do NOT infer this from `mediaPath == nil`. `base_location_id = 0` is a
+    /// REAL row in `base_location` whose `path` is the empty string, so the
+    /// `bl.path || '/' || e.location` join yields "/" rather than NULL, and
+    /// an unbound row would read as bound. We hit that false negative twice
+    /// while measuring the asset-expiry window (HISTORY 2026-08-03) — hence
+    /// the explicit column check below.
+    public let isBound: Bool
 
     public init(itemPid: Int64, syncID: Int64, title: String,
-                mediaPath: String?, mediaKind: Int, totalTimeMs: Int) {
+                mediaPath: String?, mediaKind: Int, totalTimeMs: Int,
+                isBound: Bool = true) {
         self.itemPid = itemPid; self.syncID = syncID; self.title = title
         self.mediaPath = mediaPath; self.mediaKind = mediaKind
         self.totalTimeMs = totalTimeMs
+        self.isBound = isBound
     }
+}
+
+/// Columns every `DeleteCandidate` query selects, in parse order. Kept in
+/// one place so the title-LIKE and sync_id lookups can't drift apart.
+///
+/// `base_location_id` and `location` come back as their own columns rather
+/// than being inferred from the joined path — see `DeleteCandidate.isBound`
+/// for why the joined path lies about unbound rows.
+private let candidateColumns = """
+      i.item_pid,
+      COALESCE(s.sync_id, 0),
+      e.title,
+      COALESCE(bl.path || '/' || e.location, ''),
+      COALESCE(e.media_kind, 0),
+      COALESCE(CAST(e.total_time_ms AS INTEGER), 0),
+      COALESCE(i.base_location_id, 0),
+      COALESCE(e.location, '')
+"""
+
+/// Pull MediaLibrary.sqlitedb + its WAL/SHM sidecars into `dir`, returning
+/// the local path of the main DB. The sidecars are mandatory: medialibraryd
+/// runs in WAL mode, so a main-file-only copy reads a stale snapshot that
+/// misses everything committed in the last few seconds.
+private func pullLibraryDB(device: DeviceInfo, into dir: URL) throws -> String? {
+    let afc: AFCClient
+    do { afc = try AFCClient(device: device) }
+    catch { throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription) }
+    defer { afc.close() }
+
+    var mainPulled = false
+    for f in dbFiles {
+        do {
+            let data = try afc.readFile("\(dbDir)/\(f)")
+            try data.write(to: dir.appendingPathComponent(f))
+            if f == dbFiles[0] { mainPulled = true }
+        } catch {
+            if f == dbFiles[0] {
+                throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription)
+            }
+        }
+    }
+    guard mainPulled else { return nil }
+    return dir.appendingPathComponent(dbFiles[0]).path
+}
+
+/// Parse tab-separated rows shaped by `candidateColumns`.
+private func parseCandidates(_ text: String) -> [DeleteCandidate] {
+    var out: [DeleteCandidate] = []
+    for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+        let parts = line.split(separator: "\t", maxSplits: 7,
+            omittingEmptySubsequences: false)
+        guard parts.count == 8,
+              let itemPid = Int64(parts[0]),
+              let syncID = Int64(parts[1]),
+              let kind = Int(parts[4]),
+              let dur = Int(parts[5]),
+              let baseLocationID = Int64(parts[6]) else { continue }
+        let title = String(parts[2])
+        let location = String(parts[7])
+        let bound = baseLocationID != 0 && !location.isEmpty
+        let pathFrag = String(parts[3])
+        let mediaPath: String? = (bound && !pathFrag.isEmpty) ? "/\(pathFrag)" : nil
+        out.append(DeleteCandidate(
+            itemPid: itemPid, syncID: syncID, title: title,
+            mediaPath: mediaPath, mediaKind: kind, totalTimeMs: dur,
+            isBound: bound
+        ))
+    }
+    return out
 }
 
 /// Find delete candidates by title substring (case-insensitive). Pulls
@@ -157,26 +239,8 @@ public func findDeleteCandidates(
     try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tmp) }
 
-    let afc: AFCClient
-    do { afc = try AFCClient(device: device) }
-    catch { throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription) }
-    defer { afc.close() }
+    guard let dbPath = try pullLibraryDB(device: device, into: tmp) else { return [] }
 
-    var mainPulled = false
-    for f in dbFiles {
-        do {
-            let data = try afc.readFile("\(dbDir)/\(f)")
-            try data.write(to: tmp.appendingPathComponent(f))
-            if f == dbFiles[0] { mainPulled = true }
-        } catch {
-            if f == dbFiles[0] {
-                throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription)
-            }
-        }
-    }
-    guard mainPulled else { return [] }
-
-    let dbPath = tmp.appendingPathComponent(dbFiles[0]).path
     // We pass the pattern as a literal parameter via SQLite's `-cmd .param`
     // dance — but sqlite3 CLI's parameter binding is awkward, so we use the
     // simpler approach: escape single quotes in the pattern and embed it.
@@ -184,12 +248,7 @@ public func findDeleteCandidates(
     let escaped = titleLike.replacingOccurrences(of: "'", with: "''")
     let sql = """
     SELECT
-      i.item_pid,
-      COALESCE(s.sync_id, 0),
-      e.title,
-      COALESCE(bl.path || '/' || e.location, ''),
-      COALESCE(e.media_kind, 0),
-      COALESCE(CAST(e.total_time_ms AS INTEGER), 0)
+    \(candidateColumns)
     FROM item i
     JOIN item_extra e ON e.item_pid = i.item_pid
     LEFT JOIN item_store s ON s.item_pid = i.item_pid
@@ -198,25 +257,42 @@ public func findDeleteCandidates(
     """
     let text = try runSQLite3(["-readonly", "-separator", "\t", dbPath, sql],
                               captureStderr: true)
+    return parseCandidates(text)
+}
 
-    var candidates: [DeleteCandidate] = []
-    for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-        let parts = line.split(separator: "\t", maxSplits: 5,
-            omittingEmptySubsequences: false)
-        guard parts.count == 6,
-              let itemPid = Int64(parts[0]),
-              let syncID = Int64(parts[1]),
-              let kind = Int(parts[4]),
-              let dur = Int(parts[5]) else { continue }
-        let title = String(parts[2])
-        let pathFrag = String(parts[3])
-        let mediaPath: String? = pathFrag.isEmpty ? nil : "/\(pathFrag)"
-        candidates.append(DeleteCandidate(
-            itemPid: itemPid, syncID: syncID, title: title,
-            mediaPath: mediaPath, mediaKind: kind, totalTimeMs: dur
-        ))
-    }
-    return candidates
+/// Batch variant of `findDeleteCandidate(bySyncID:)` — one DB pull for the
+/// whole set instead of one per ID. Used by the post-sync bind verification,
+/// which checks every asset the run just shipped; pulling a multi-hundred-MB
+/// library once per file would dominate the run's tail latency.
+///
+/// Returns a map keyed by sync_id; IDs with no row are simply absent.
+public func findDeleteCandidates(
+    bySyncIDs syncIDs: [Int64], device: DeviceInfo
+) throws -> [Int64: DeleteCandidate] {
+    guard !syncIDs.isEmpty else { return [:] }
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("mp-syncids-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    guard let dbPath = try pullLibraryDB(device: device, into: tmp) else { return [:] }
+
+    // Int64s we generated ourselves — no injection surface.
+    let list = syncIDs.map(String.init).joined(separator: ",")
+    let sql = """
+    SELECT
+    \(candidateColumns)
+    FROM item_store s
+    JOIN item i ON i.item_pid = s.item_pid
+    JOIN item_extra e ON e.item_pid = i.item_pid
+    LEFT JOIN base_location bl ON bl.base_location_id = i.base_location_id
+    WHERE s.sync_id IN (\(list));
+    """
+    let text = try runSQLite3(["-readonly", "-separator", "\t", dbPath, sql],
+                              captureStderr: true)
+    var out: [Int64: DeleteCandidate] = [:]
+    for c in parseCandidates(text) { out[c.syncID] = c }
+    return out
 }
 
 /// Look up the row whose `item_store.sync_id` matches a wire pid we
@@ -230,66 +306,7 @@ public func findDeleteCandidates(
 /// `ATCSession.generateAssetID()` and iOS stores verbatim. Same DB-pull
 /// mechanic as the title-LIKE variant (main + WAL + SHM).
 public func findDeleteCandidate(bySyncID syncID: Int64, device: DeviceInfo) throws -> DeleteCandidate? {
-    let tmp = FileManager.default.temporaryDirectory
-        .appendingPathComponent("mp-syncid-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: tmp) }
-
-    let afc: AFCClient
-    do { afc = try AFCClient(device: device) }
-    catch { throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription) }
-    defer { afc.close() }
-
-    var mainPulled = false
-    for f in dbFiles {
-        do {
-            let data = try afc.readFile("\(dbDir)/\(f)")
-            try data.write(to: tmp.appendingPathComponent(f))
-            if f == dbFiles[0] { mainPulled = true }
-        } catch {
-            if f == dbFiles[0] {
-                throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription)
-            }
-        }
-    }
-    guard mainPulled else { return nil }
-
-    let dbPath = tmp.appendingPathComponent(dbFiles[0]).path
-    let sql = """
-    SELECT
-      i.item_pid,
-      COALESCE(s.sync_id, 0),
-      e.title,
-      COALESCE(bl.path || '/' || e.location, ''),
-      COALESCE(e.media_kind, 0),
-      COALESCE(CAST(e.total_time_ms AS INTEGER), 0)
-    FROM item_store s
-    JOIN item i ON i.item_pid = s.item_pid
-    JOIN item_extra e ON e.item_pid = i.item_pid
-    LEFT JOIN base_location bl ON bl.base_location_id = i.base_location_id
-    WHERE s.sync_id = \(syncID)
-    LIMIT 1;
-    """
-    let text = try runSQLite3(["-readonly", "-separator", "\t", dbPath, sql],
-                              captureStderr: true)
-    guard !text.isEmpty else { return nil }
-
-    for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-        let parts = line.split(separator: "\t", maxSplits: 5, omittingEmptySubsequences: false)
-        guard parts.count == 6,
-              let itemPid = Int64(parts[0]),
-              let sid = Int64(parts[1]),
-              let kind = Int(parts[4]),
-              let dur = Int(parts[5]) else { continue }
-        let title = String(parts[2])
-        let pathFrag = String(parts[3])
-        let mediaPath: String? = pathFrag.isEmpty ? nil : "/\(pathFrag)"
-        return DeleteCandidate(
-            itemPid: itemPid, syncID: sid, title: title,
-            mediaPath: mediaPath, mediaKind: kind, totalTimeMs: dur
-        )
-    }
-    return nil
+    try findDeleteCandidates(bySyncIDs: [syncID], device: device)[syncID]
 }
 
 public extension Array where Element == DeviceLibraryEntry {

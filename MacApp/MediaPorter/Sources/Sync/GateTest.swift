@@ -77,8 +77,11 @@ public func streamingRegisterSmokeTest(
     log("  #2 \(p2.devicePath) (asset=\(p2.assetID))")
 
     // Open the streaming register session UP FRONT — before any byte ships.
-    // This is the #8 production order: plist + AssetManifest first, then
-    // upload+register per file.
+    // Safe here only because both files are already encoded: production
+    // waits for every transcode before this call, since announced assets
+    // expire in under a minute of post-manifest idle (see idleWindowTest
+    // below and CLAUDE.md #16). Don't copy this shape into a path that
+    // transcodes after opening.
     log("Opening RegisterSession (streaming)...")
     let openStart = Date()
     let session = RegisterSession(device: device, verbose: true)
@@ -229,6 +232,105 @@ public func gateTestInterleave(
         rowsAfterRegister: after,
         registerSeconds: registerSeconds,
         sleepSeconds: sleepSeconds
+    )
+}
+
+// MARK: - Idle-window experiment (2026-08-03)
+
+public struct IdleWindowResult {
+    public var idleSeconds: Double
+    public var assetID: Int
+    public var devicePath: String
+    public var bound: Bool
+    public var boundPath: String?
+    public var finishOutcome: String
+}
+
+/// Does an ATC session that sits idle between the AssetManifest and the
+/// first FileBegin lose its pending assets?
+///
+/// Motivation: the pipelined sync opens the register session up front and
+/// only then starts ffmpeg, so a slow first transcode leaves the session
+/// idle (Ping/Pong only) for minutes before any byte ships. On 2026-08-03 a
+/// two-movie batch with a 179 s gap landed both rows unbound
+/// (`base_location_id=0`) and never got SyncFinished, while a 65 KB fixture
+/// with a ~1 s gap bound fine — this isolates the gap as the variable.
+///
+/// One small pre-encoded file, everything else in production order:
+/// open → idle(N) → FileBegin → upload → FileComplete → verify bind → finish.
+/// Cleans up after itself so the next manifest stays clean.
+public func idleWindowTest(
+    file: URL, idleSeconds: TimeInterval,
+    log: @escaping (String) -> Void = { print($0) }
+) async throws -> IdleWindowResult {
+    let device = try discoverDevice()
+    log("Device: \(device.displayName)")
+
+    let info: MediaInfo
+    do { info = try await probeFile(url: file) }
+    catch { throw GateTestError.probeFailed(error.localizedDescription) }
+
+    let prepared = prepareSyncFiles([makeSyncItem(url: file, duration: info.duration)])[0]
+    log("Asset: \(prepared.devicePath) (asset=\(prepared.assetID))")
+
+    let session = RegisterSession(device: device, verbose: false)
+    log("Opening session (plist + MetadataSyncFinished + AssetManifest)…")
+    try session.open(files: [prepared.asSyncFileInfo])
+
+    if idleSeconds > 0 {
+        log("Idling \(Int(idleSeconds)) s with only Ping/Pong on the wire…")
+        session.idle(seconds: idleSeconds)
+    }
+
+    log("FileBegin → upload → FileComplete…")
+    try session.beginFile(prepared.asSyncFileInfo)
+    let uploader = try AFCUploader(device: device)
+    try uploader.upload(prepared)
+    uploader.close()
+    try session.completeFile(prepared.asSyncFileInfo)
+
+    // medialibraryd binds within ~1 s of FileComplete (plan #8 gate-test);
+    // give it a little slack before reading the row.
+    try? await Task.sleep(nanoseconds: 3_000_000_000)
+    let row = try? findDeleteCandidate(bySyncID: Int64(prepared.assetID), device: device)
+    // An unbound row still yields a non-nil path. The query concatenates
+    // base_location.path + '/' + item_extra.location; base_location_id=0 is
+    // a real row whose path is '', so an unbound row collapses to "//" —
+    // and NSString.lastPathComponent of "//" is "/", not "". Match the
+    // basename we actually shipped instead of testing for emptiness.
+    let expected = (prepared.devicePath as NSString).lastPathComponent
+    let boundPath = row?.mediaPath.flatMap { $0.hasSuffix(expected) ? $0 : nil }
+    let bound = boundPath != nil
+    log("  row after FileComplete: \(bound ? "BOUND to \(boundPath!)" : "UNBOUND (row: \(row == nil ? "missing" : "base_location_id=0, location=''"))")")
+
+    // Short deadline — the experiment's verdict is the bind state, and a
+    // full 120 s wait per point makes a sweep take longer than it's worth.
+    let outcome = session.finishGraceful(deadlineSeconds: 20)
+    let outcomeName: String
+    switch outcome {
+    case .finished: outcomeName = "SyncFinished"
+    case .allowedFallback: outcomeName = "SyncAllowed_fallback"
+    case .connectionLost: outcomeName = "connectionLost"
+    case .timeout: outcomeName = "timeout"
+    }
+    log("  finish outcome: \(outcomeName)")
+
+    // Leave the device as we found it — an uncleaned asset would sit in the
+    // next run's manifest and block its SyncFinished.
+    log("Cleaning up…")
+    _ = try? deleteFromDevice(
+        syncIDs: [prepared.assetID],
+        mediaPaths: [prepared.devicePath],
+        artworkSyncIDs: [prepared.assetID]
+    )
+
+    return IdleWindowResult(
+        idleSeconds: idleSeconds,
+        assetID: prepared.assetID,
+        devicePath: prepared.devicePath,
+        bound: bound,
+        boundPath: boundPath,
+        finishOutcome: outcomeName
     )
 }
 
