@@ -83,9 +83,33 @@ echo "    mounted at $MOUNT_POINT"
 # the left and Applications on the right. No background — install window
 # is intentionally plain.
 echo "    apply Finder layout"
-osascript <<APPLESCRIPT
+
+# Address the disk by its ACTUAL mount-point basename, not $VOL_NAME. If a
+# volume of the same name is already mounted, the new one attaches as
+# "MediaPorter 0.9.0 1" and `disk "$VOL_NAME"` refers to the wrong (or a
+# nonexistent) disk.
+DISK_NAME="$(basename "$MOUNT_POINT")"
+
+# And wait for Finder to notice it. `hdiutil attach` returns before Finder
+# has registered the volume, so firing the layout script immediately fails
+# intermittently with -1728 "Can't get disk" — which aborted two 0.9.0
+# release runs at the very last step, after notarization had succeeded.
+for _ in $(seq 1 30); do
+    if [[ "$(osascript -e "tell application \"Finder\" to exists disk \"$DISK_NAME\"" 2>/dev/null)" == "true" ]]; then
+        break
+    fi
+    sleep 0.5
+done
+
+# Cosmetic step: icon positions and window size. Worth retrying, not worth
+# failing a notarized release over — a DMG with Finder's default layout is
+# still valid and installable, so on persistent failure warn loudly and
+# carry on rather than discarding a good build.
+layout_ok=0
+for attempt in 1 2 3; do
+    if osascript <<APPLESCRIPT
 tell application "Finder"
-    tell disk "$VOL_NAME"
+    tell disk "$DISK_NAME"
         open
         set current view of container window to icon view
         set toolbar visible of container window to false
@@ -106,6 +130,16 @@ tell application "Finder"
     end tell
 end tell
 APPLESCRIPT
+    then
+        layout_ok=1
+        break
+    fi
+    echo "    Finder layout attempt $attempt failed — retrying"
+    sleep 2
+done
+if [[ "$layout_ok" -ne 1 ]]; then
+    echo "    WARNING: Finder layout failed after 3 attempts; shipping default layout" >&2
+fi
 
 # Flush Finder's window writes to .DS_Store before we detach. Without this
 # the layout sometimes evaporates because the .DS_Store is still buffered.

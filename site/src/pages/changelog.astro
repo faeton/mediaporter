@@ -4,6 +4,20 @@ import Base from "../layouts/Base.astro";
 // Keeping it static now to avoid coupling the site build to source layout changes in MacApp/.
 const releases = [
   {
+    version: "0.9.0",
+    date: "2026-08-10",
+    notes: [
+      "Whole seasons in one go — syncing a few dozen files at once used to fail after about a second with \"No AssetManifest received from device\", while one or two files worked fine. That's fixed: a 39-file, 73.6 GB batch (two full anime seasons plus five movies) now lands complete and playable.",
+      "Season folders are recognised — episodes named only by number, with the show name in the folder (\"E1 «Beast Titan».mkv\" inside \"Shingeki no Kyojin S2 60 FPS\"), now get the right show, season and episode instead of being treated as movies. Quality tags in the folder name (60 FPS, 1080p, WEB-DL, release groups) are ignored.",
+      "Better film matching — results are ranked by how closely they match the filename rather than taking the first hit, so \"Rambo.First.Blood…\" finds First Blood (1982) and not the sequel. Years jammed against release tags (\"GoldenEye (1995)BDRip720p\") are read correctly, and scene tags no longer end up in the search.",
+      "Pick a different film — when the match is a judgement call the row shows an \"N matches\" badge; click it to see the alternatives with year and synopsis, or search for something else.",
+      "Interrupted runs don't re-encode — finished transcodes are reused when you add the same files again, as long as nothing about the source or your settings changed.",
+      "Honest leftover cleanup — the leftover-transcodes banner now checks the device before offering to recover, instead of promising files it can't restore, and half-written files from an interrupted encode can finally be cleared.",
+      "Faster repeat imports — film and show data is cached between launches, so re-adding the same library doesn't re-query the metadata service.",
+      "Also: a Clear all button for the file list, and no more flicker in the status line between files.",
+    ],
+  },
+  {
     version: "0.8.2",
     date: "2026-07-26",
     notes: [
