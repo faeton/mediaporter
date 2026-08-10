@@ -20,8 +20,27 @@ during a run (652a0f6, 2026-07-23) — in CHANGELOG under Unreleased.
 fresh **B-series audit** (2026-07-26, below): B2 dlopen `fatalError` and B1
 device-data force-unwraps are the two worth pulling first (consultant
 consensus: B2 ≥ B1; suggested 0.8.2 scope at the end of the B-series). A-series "(orig)"
-sections are historical records, not open work. Next release: cut **0.8.2**
-when enough QoL accumulates, or **0.9.0** if a feature headline emerges.
+sections are historical records, not open work.
+
+**0.8.2 shipped 2026-07-26. 0.9.0 shipped 2026-08-10** (large-batch sync,
+folder-titled episodes, transcode reuse, TMDb match ranking). Next release:
+cut a patch when enough QoL accumulates, or 0.10.0 on a feature headline.
+
+**Carried into the next cycle, from the 0.9.0 work:**
+- **Chunked sync sessions** — now known to be a UX improvement only, not a
+  correctness requirement (the expiry clock counts silence, not elapsed
+  time — CLAUDE.md #16, HISTORY 2026-08-10). Value: bytes start moving
+  before the whole batch has encoded, and an interruption costs one chunk
+  instead of the run. Needs verify+heal between chunks, since more sessions
+  means more poison surface.
+- **Heal can't touch the worst case** — `StuckAssetLedger` deliberately
+  refuses to delete *bound* rows, but the ack-window failure produces
+  exactly that: a bound, playable row that stays pending and blocks
+  `SyncFinished` on every later sync. Rows the current run just created
+  have stronger provenance than arbitrary bound rows, so rolling those back
+  is defensible where a blanket rule isn't.
+- **Re-measure the expiry thresholds over Wi-Fi.** Every number we have is
+  USB, one device, one fixture per point.
 
 ---
 
