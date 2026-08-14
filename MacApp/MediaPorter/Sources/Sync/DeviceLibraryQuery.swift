@@ -135,7 +135,10 @@ public struct DeleteCandidate: Sendable {
     public let syncID: Int64        // wire pid → what we send in delete_track
     public let title: String
     public let mediaPath: String?   // /iTunes_Control/Music/Fxx/yyyy.mp4 (nil if unbound)
-    public let mediaKind: Int       // 2 movie, 32 TV show
+    /// `item_extra.media_kind`: 2 = movie, 64 = TV episode. (Earlier notes
+    /// here said 32 for TV; measured 2026-08-14 on AkmPad12 — 46 episodes
+    /// all carry 64, paired with `item.media_type` 512.)
+    public let mediaKind: Int
     public let totalTimeMs: Int
     /// False when the row exists but points at no file — the expired-asset
     /// signature (`base_location_id = 0`, `item_extra.location = ''`). Such a
@@ -180,13 +183,29 @@ private let candidateColumns = """
 /// the local path of the main DB. The sidecars are mandatory: medialibraryd
 /// runs in WAL mode, so a main-file-only copy reads a stale snapshot that
 /// misses everything committed in the last few seconds.
-private func pullLibraryDB(device: DeviceInfo, into dir: URL) throws -> String? {
+private struct LibraryDBPull {
+    let path: String
+    /// Sidecars the device HAS but we failed to copy. Empty is the healthy
+    /// case, and includes the legitimately-checkpointed device that has no
+    /// `-wal` at all. Non-empty means the snapshot may be missing rows that
+    /// are already committed — read-only callers can live with that, but any
+    /// caller about to DELETE something must fail closed on it.
+    let staleSidecars: [String]
+}
+
+private func pullLibraryDB(device: DeviceInfo, into dir: URL) throws -> LibraryDBPull? {
     let afc: AFCClient
     do { afc = try AFCClient(device: device) }
     catch { throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription) }
     defer { afc.close() }
 
+    // Which sidecars actually exist right now. Without this we cannot tell a
+    // read failure apart from a file that was never there, and "silently
+    // ignore both" is what makes a partial snapshot look authoritative.
+    let present = Set(afc.listDirectory(dbDir))
+
     var mainPulled = false
+    var stale: [String] = []
     for f in dbFiles {
         do {
             let data = try afc.readFile("\(dbDir)/\(f)")
@@ -196,10 +215,13 @@ private func pullLibraryDB(device: DeviceInfo, into dir: URL) throws -> String? 
             if f == dbFiles[0] {
                 throw DeviceLibraryQueryError.dbPullFailed(error.localizedDescription)
             }
+            if present.contains(f) { stale.append(f) }
         }
     }
     guard mainPulled else { return nil }
-    return dir.appendingPathComponent(dbFiles[0]).path
+    return LibraryDBPull(
+        path: dir.appendingPathComponent(dbFiles[0]).path,
+        staleSidecars: stale)
 }
 
 /// Parse tab-separated rows shaped by `candidateColumns`.
@@ -239,7 +261,8 @@ public func findDeleteCandidates(
     try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tmp) }
 
-    guard let dbPath = try pullLibraryDB(device: device, into: tmp) else { return [] }
+    guard let pull = try pullLibraryDB(device: device, into: tmp) else { return [] }
+    let dbPath = pull.path
 
     // We pass the pattern as a literal parameter via SQLite's `-cmd .param`
     // dance — but sqlite3 CLI's parameter binding is awkward, so we use the
@@ -275,7 +298,8 @@ public func findDeleteCandidates(
     try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tmp) }
 
-    guard let dbPath = try pullLibraryDB(device: device, into: tmp) else { return [:] }
+    guard let pull = try pullLibraryDB(device: device, into: tmp) else { return [:] }
+    let dbPath = pull.path
 
     // Int64s we generated ourselves — no injection surface.
     let list = syncIDs.map(String.init).joined(separator: ",")
@@ -307,6 +331,235 @@ public func findDeleteCandidates(
 /// mechanic as the title-LIKE variant (main + WAL + SHM).
 public func findDeleteCandidate(bySyncID syncID: Int64, device: DeviceInfo) throws -> DeleteCandidate? {
     try findDeleteCandidates(bySyncIDs: [syncID], device: device)[syncID]
+}
+
+/// Which of `syncIDs` still have a row on the device, as raw integers.
+///
+/// Deliberately touches NO text columns. `findDeleteCandidates` would answer
+/// the same question, but it selects `item_extra.title` into a tab-separated
+/// stream, and `parseCandidates` drops any line whose field count is off — so
+/// a title containing a tab or newline makes a LIVE row read as absent. That
+/// is harmless when the caller is listing delete candidates for a human, and
+/// destructive when the caller deletes whatever this says is gone (codex
+/// review 2026-08-14). Integers cannot shift the field count.
+///
+/// Fails closed rather than returning a partial answer:
+///   * a `sqlite3` error throws (inherited from `runSQLite3`);
+///   * a line that is not an integer throws, instead of being skipped;
+///   * an `item_store` with zero rows throws — a real device always has
+///     rows, so an empty table means the snapshot is bad, and treating it as
+///     truth would report every single asset as orphaned.
+///
+/// `requireFreshSidecars` additionally throws when the device has a `-wal` or
+/// `-shm` we could not copy: that snapshot can be missing recently committed
+/// rows, which again reads as false absence. Callers that only display should
+/// leave it off; callers that delete must leave it on.
+public func liveSyncIDs(
+    among syncIDs: [Int64], device: DeviceInfo,
+    requireFreshSidecars: Bool = true
+) throws -> Set<Int64> {
+    guard !syncIDs.isEmpty else { return [] }
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("mp-live-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+
+    guard let pull = try pullLibraryDB(device: device, into: tmp) else {
+        throw DeviceLibraryQueryError.dbPullFailed("no MediaLibrary.sqlitedb on device")
+    }
+    if requireFreshSidecars, !pull.staleSidecars.isEmpty {
+        throw DeviceLibraryQueryError.dbPullFailed(
+            "could not read \(pull.staleSidecars.joined(separator: ", "))"
+            + " — snapshot may be missing recent commits")
+    }
+
+    let sanity = try runSQLite3(
+        ["-readonly", pull.path, "SELECT COUNT(*) FROM item_store;"],
+        captureStderr: true)
+    guard let total = Int(sanity.trimmingCharacters(in: .whitespacesAndNewlines)),
+          total > 0 else {
+        throw DeviceLibraryQueryError.queryFailed(
+            "item_store is empty — refusing to treat this snapshot as authoritative")
+    }
+
+    // Int64s we generated ourselves — no injection surface.
+    let list = syncIDs.map(String.init).joined(separator: ",")
+    let text = try runSQLite3([
+        "-readonly", pull.path,
+        "SELECT sync_id FROM item_store WHERE sync_id IN (\(list));"
+    ], captureStderr: true)
+
+    var live: Set<Int64> = []
+    for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+        guard let id = Int64(line.trimmingCharacters(in: .whitespaces)) else {
+            throw DeviceLibraryQueryError.queryFailed(
+                "non-integer sync_id in result: \(line)")
+        }
+        live.insert(id)
+    }
+    return live
+}
+
+/// One TV season whose episodes carry more than one `item.album_order`.
+/// `minority` holds the rows on the losing side — the ones a delete-and-resync
+/// repairs, because re-inserting into an album that already exists resolved to
+/// the season-number key in every case we measured (2026-08-14, one device).
+///
+/// Keyed by `albumPID`, never by the album name: `PipelineController` sets
+/// `item.album = showName` for every season, so two seasons of one show share
+/// the string. Grouping on it merged them and could name a perfectly correct
+/// season's rows for re-upload (grok review 2026-08-14).
+public struct SeasonOrderSplit: Sendable {
+    public struct Episode: Sendable {
+        public let syncID: Int64
+        public let title: String
+        public let episodeSortID: Int
+    }
+    public let albumPID: Int64
+    public let album: String
+    public let seasonNumber: Int
+    /// `album_order` value → the `sort_map` string it resolves to, so the
+    /// report can say "these sort under 'the office', those under '3'".
+    public let keys: [(order: Int64, name: String, count: Int)]
+    /// Rows to delete and re-sync. Only ever rows we shipped (`sync_id != 0`);
+    /// can be empty when the losing side is entirely rows we cannot name.
+    public let minority: [Episode]
+}
+
+/// Decode sqlite's `hex(...)` output. We hex every text column we select so
+/// that album names, sort-map names and episode titles — arbitrary user text
+/// that can contain tabs and newlines — cannot shift the field positions of
+/// the numeric columns we make decisions on.
+private func decodeHex(_ s: String) -> String {
+    var bytes: [UInt8] = []
+    bytes.reserveCapacity(s.count / 2)
+    var iter = s.makeIterator()
+    while let hi = iter.next(), let lo = iter.next() {
+        guard let h = hi.hexDigitValue, let l = lo.hexDigitValue else { return "" }
+        bytes.append(UInt8(h << 4 | l))
+    }
+    return String(decoding: bytes, as: UTF8.self)
+}
+
+/// Find TV seasons split across two or more `album_order` values.
+///
+/// medialibraryd stamps `album_order` from the album's sort string on the
+/// batch that creates the album and from `album.season_number` on every
+/// later batch, and did not backfill in any case we measured. `album_order`
+/// is the second column of TV.app's `ItemSeries` index; a split season
+/// rendered as two "Season N" headers on the device we tested. Fixed going
+/// forward by shipping `sort_album = String(season)` (PipelineController),
+/// but rows already on the device keep whatever they were stamped with.
+///
+/// Only reports albums holding at least one row we shipped (`item_store.
+/// sync_id != 0`) — a split in Apple's own content is not ours to touch.
+public func findSeasonOrderSplits(device: DeviceInfo) throws -> [SeasonOrderSplit] {
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("mp-splits-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+    guard let pull = try pullLibraryDB(device: device, into: tmp) else { return [] }
+    let dbPath = pull.path
+
+    // Numeric columns first, every text column `hex()`-encoded — see
+    // `decodeHex`. `media_type = 512` is the TV episode value measured on
+    // current iOS; `media_kind = 64` is accepted alongside it so a device
+    // whose schema differs still reports rather than silently finding
+    // nothing. `in_my_library` matters because `ItemSeries` is a PARTIAL
+    // index (`WHERE in_my_library`) — rows outside it are not in the index
+    // at all and so cannot produce a section.
+    // The season is the ITEM's `item_video.season_number`, never the album
+    // row's. `item.album = showName` (no season suffix), so medialibraryd
+    // keys one album row per SHOW and every season lands in it — measured
+    // 2026-08-14: seasons 1, 2 and 10 of one show all sat in album_pid
+    // 73837194 whose own `season_number` was just whichever arrived first.
+    // Grouping by album_pid alone therefore reads a correct multi-season
+    // show (album_order "1"/"2"/"10") as a three-way split and tells the
+    // user to re-upload two good seasons.
+    let tvWhere = "(i.media_type = 512 OR ie.media_kind = 64) AND i.in_my_library = 1"
+    let sql = """
+    SELECT i.album_pid, COALESCE(iv.season_number, 0), i.album_order,
+           COALESCE(s.sync_id, 0), COALESCE(i.episode_sort_id, 0),
+           hex(a.album),
+           hex(COALESCE((SELECT name FROM sort_map WHERE name_order = i.album_order LIMIT 1), '')),
+           hex(COALESCE(ie.title, ''))
+    FROM item i
+    JOIN album a ON a.album_pid = i.album_pid
+    JOIN item_extra ie ON ie.item_pid = i.item_pid
+    LEFT JOIN item_video iv ON iv.item_pid = i.item_pid
+    LEFT JOIN item_store s ON s.item_pid = i.item_pid
+    WHERE \(tvWhere)
+      AND (i.album_pid, COALESCE(iv.season_number, 0)) IN (
+        SELECT i2.album_pid, COALESCE(iv2.season_number, 0) FROM item i2
+        JOIN item_extra ie2 ON ie2.item_pid = i2.item_pid
+        LEFT JOIN item_video iv2 ON iv2.item_pid = i2.item_pid
+        WHERE (i2.media_type = 512 OR ie2.media_kind = 64) AND i2.in_my_library = 1
+        GROUP BY i2.album_pid, COALESCE(iv2.season_number, 0)
+        HAVING COUNT(DISTINCT i2.album_order) > 1
+      );
+    """
+    let text = try runSQLite3(["-readonly", "-separator", "\t", dbPath, sql],
+                              captureStderr: true)
+    return parseSeasonOrderSplits(text)
+}
+
+/// Pure half of `findSeasonOrderSplits` — everything after the query. Split
+/// out so the grouping, tie-breaking and hex decoding are unit-testable
+/// without a device (both reviewers flagged the absence of tests here).
+func parseSeasonOrderSplits(_ text: String) -> [SeasonOrderSplit] {
+    struct Row {
+        let order: Int64; let keyName: String
+        let syncID: Int64; let title: String; let episode: Int
+    }
+    // Keyed by (album_pid, the ITEM's season) — not by album name (every
+    // season shares one `album` string) and not by album_pid alone (every
+    // season shares one album ROW). Either coarser key merges distinct
+    // seasons and reports a correct show as split.
+    struct GroupKey: Hashable { let albumPID: Int64; let season: Int }
+    var groups: [GroupKey: (album: String, rows: [Row])] = [:]
+    for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+        let f = line.components(separatedBy: "\t")
+        guard f.count == 8,
+              let albumPID = Int64(f[0]), let season = Int(f[1]),
+              let order = Int64(f[2]), let syncID = Int64(f[3]),
+              let episode = Int(f[4]) else { continue }
+        let key = GroupKey(albumPID: albumPID, season: season)
+        var entry = groups[key] ?? (decodeHex(f[5]), [])
+        entry.rows.append(Row(order: order, keyName: decodeHex(f[6]),
+                              syncID: syncID, title: decodeHex(f[7]),
+                              episode: episode))
+        groups[key] = entry
+    }
+
+    return groups.compactMap { key, entry -> SeasonOrderSplit? in
+        // Ours only: an album with no shipped row is Apple's to worry about.
+        guard entry.rows.contains(where: { $0.syncID != 0 }) else { return nil }
+        var counts: [Int64: (name: String, count: Int)] = [:]
+        for r in entry.rows {
+            counts[r.order, default: (r.keyName, 0)].count += 1
+        }
+        guard counts.count > 1 else { return nil }
+        // Secondary sort on `order` so the reported ordering is stable when
+        // counts tie (Dictionary iteration order is not).
+        let keys = counts
+            .map { (order: $0.key, name: $0.value.name, count: $0.value.count) }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.order < $1.order }
+        // The key to KEEP is the season-number one whenever it is present,
+        // regardless of how many rows sit on it — that is what medialibraryd
+        // stamps on every future batch, so migrating toward it converges.
+        // Falling back to raw majority would, on an even split, tell the user
+        // to re-sync the half that is already correct.
+        let survivor = keys.first { $0.name == String(key.season) }?.order
+            ?? keys[0].order
+        let minority = entry.rows
+            .filter { $0.order != survivor && $0.syncID != 0 }
+            .map { SeasonOrderSplit.Episode(syncID: $0.syncID, title: $0.title,
+                                            episodeSortID: $0.episode) }
+            .sorted { $0.episodeSortID < $1.episodeSortID }
+        return SeasonOrderSplit(albumPID: key.albumPID, album: entry.album,
+                                seasonNumber: key.season,
+                                keys: keys, minority: minority)
+    }.sorted { ($0.album, $0.seasonNumber) < ($1.album, $1.seasonNumber) }
 }
 
 public extension Array where Element == DeviceLibraryEntry {

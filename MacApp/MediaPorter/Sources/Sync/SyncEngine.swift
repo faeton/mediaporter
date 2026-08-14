@@ -417,11 +417,28 @@ public func deleteFromDevice(
     try session.prepareDelete(
         afc: afc, plistData: plistData, cigData: cigData, anchor: newAnchor
     )
-    session.finishSync()
+    let outcome = session.finishSync()
 
-    // Now physical cleanup. Pure AFC; we tolerate ENOENT because the
-    // device may have already GC'd the file between our DB query and
-    // our delete.
+    // Physical cleanup only after the device CONFIRMS the delete committed.
+    // `finishSync` can come back `.timeout`, `.connectionLost` or
+    // `.allowedFallback`, and per CLAUDE.md #14 `SyncAllowed` is not terminal
+    // — it means "you may proceed", not "the row is gone". Removing the files
+    // anyway on an uncommitted delete strands a LIVE row with no playable
+    // file: the title keeps showing in TV.app and won't play, which is the
+    // worse failure of the two. Leaving the bytes behind instead is
+    // recoverable — `heal` sweeps orphan artwork and the orphan-file scan
+    // finds unreferenced media (codex review 2026-08-14).
+    guard outcome == .finished else {
+        DebugLog.notice("atc.delete.finish",
+            "outcome=\(outcome) — skipping AFC cleanup, rows may still be live")
+        return DeleteResult(
+            syncIDsSubmitted: syncIDs.count,
+            mediaFilesRemoved: 0,
+            artworkBlobsRemoved: 0)
+    }
+
+    // Pure AFC; we tolerate ENOENT because the device may have already GC'd
+    // the file between our DB query and our delete.
     var mediaRemoved = 0
     for p in mediaPaths {
         let rc = afc.removePath(p)
@@ -434,13 +451,22 @@ public func deleteFromDevice(
     }
     var artworkRemoved = 0
     for sid in artworkSyncIDs {
-        let path = "/Airlock/Media/Artwork/\(sid)"
-        let rc = afc.removePath(path)
-        if rc == 0 {
-            artworkRemoved += 1
-            DebugLog.write("atc.delete.artwork", "removed \(path)")
-        } else {
-            DebugLog.notice("atc.delete.artwork", "remove \(path) rc=\(rc) (ignored — likely already gone)")
+        // BOTH blobs. `prepareSync` uploads the episode still to
+        // `<assetID>` and the show portrait to `<assetID>_show`
+        // (ATCSession.swift), but this cleanup only ever removed the first
+        // — so every TV episode we deleted left its `_show` JPEG stranded
+        // in Airlock forever. Measured 2026-08-14 on AkmPad12: the plain
+        // blobs were all gone, `_show` blobs for long-deleted rows were
+        // still there.
+        for path in ["/Airlock/Media/Artwork/\(sid)",
+                     "/Airlock/Media/Artwork/\(sid)_show"] {
+            let rc = afc.removePath(path)
+            if rc == 0 {
+                artworkRemoved += 1
+                DebugLog.write("atc.delete.artwork", "removed \(path)")
+            } else {
+                DebugLog.notice("atc.delete.artwork", "remove \(path) rc=\(rc) (ignored — likely already gone)")
+            }
         }
     }
 
@@ -451,6 +477,87 @@ public func deleteFromDevice(
         mediaFilesRemoved: mediaRemoved,
         artworkBlobsRemoved: artworkRemoved
     )
+}
+
+/// Blobs stranded in `/Airlock/Media/Artwork` whose row no longer exists.
+public struct OrphanArtworkSweep: Sendable {
+    public let scanned: Int
+    public let orphaned: [String]
+    public let removed: Int
+}
+
+/// Remove Airlock artwork blobs whose backing row is gone.
+///
+/// Two ways they strand, both unavoidable at the time they happen:
+///   1. The user deletes a title in TV.app. We aren't running, never learn
+///      the row went away, and the blob outlives it. (The DB-side
+///      `artwork_token` orphans that accompany it DO get collected by
+///      medialibraryd on its own — observed clearing within one session on
+///      2026-08-14 — so those need no help from us. These files do not.)
+///   2. A `deleteFromDevice` before the `_show` fix above removed only the
+///      plain blob and left the `_show` companion.
+///
+/// Blob names are `<syncID>` or `<syncID>_show`, so the wire pid is
+/// recoverable from the filename and checkable against `item_store.sync_id`.
+/// Anything whose pid still has a row is left alone.
+///
+/// Liveness goes through `liveSyncIDs`, which is integer-only and fails
+/// closed — see its doc comment. Using the text-parsing `findDeleteCandidates`
+/// here was a real hazard: one tab in a title makes a live row read as absent
+/// and this function then deletes that title's poster (codex review
+/// 2026-08-14).
+///
+/// Residual risk we do NOT guard against: a sync running concurrently in
+/// another process. `prepareSync` uploads artwork BEFORE `FileComplete`
+/// creates the row, so a sweep that snapshots the DB in that window sees a
+/// blob with no row and removes it. The window is seconds and the loss is
+/// cosmetic (re-syncing restores the poster), but it is not zero. Don't run
+/// `heal` against a device mid-sync.
+///
+/// `dryRun` reports without deleting.
+@discardableResult
+public func sweepOrphanAirlockArtwork(
+    device: DeviceInfo, dryRun: Bool = false,
+    log: (String) -> Void = { _ in }
+) throws -> OrphanArtworkSweep {
+    let dir = "/Airlock/Media/Artwork"
+    let afc = try AFCClient(device: device)
+    defer { afc.close() }
+
+    let entries = afc.listDirectory(dir)
+    guard !entries.isEmpty else {
+        return OrphanArtworkSweep(scanned: 0, orphaned: [], removed: 0)
+    }
+
+    // filename → wire pid. Anything unparseable is left alone: an unknown
+    // naming scheme means we don't know whose it is, and guessing wrong
+    // deletes a live title's poster.
+    var pidFor: [String: Int64] = [:]
+    for name in entries {
+        let stem = name.hasSuffix("_show") ? String(name.dropLast(5)) : name
+        if let pid = Int64(stem) { pidFor[name] = pid }
+    }
+    guard !pidFor.isEmpty else {
+        return OrphanArtworkSweep(scanned: entries.count, orphaned: [], removed: 0)
+    }
+
+    let live = try liveSyncIDs(among: Array(Set(pidFor.values)), device: device)
+    let orphans = pidFor.filter { !live.contains($0.value) }.keys.sorted()
+
+    var removed = 0
+    if !dryRun {
+        for name in orphans {
+            let rc = afc.removePath("\(dir)/\(name)")
+            if rc == 0 {
+                removed += 1
+                DebugLog.write("atc.artwork.sweep", "removed \(dir)/\(name)")
+            } else {
+                DebugLog.notice("atc.artwork.sweep", "remove \(name) rc=\(rc) (ignored)")
+            }
+        }
+    }
+    log("artwork sweep: \(entries.count) blob(s), \(orphans.count) orphaned, \(removed) removed")
+    return OrphanArtworkSweep(scanned: entries.count, orphaned: orphans, removed: removed)
 }
 
 /// One-shot sync: upload all files, then register. Kept for non-pipelined callers.

@@ -326,12 +326,21 @@ enum OrphanRecovery {
             posterData: nil
         )
         if c.isTVShow, let show = c.showName, let s = c.season, let e = c.episode {
+            // Must match `PipelineController.makeSyncItem` field for field.
+            // It did not: this path built `album = "<Show>, Season <N>"` while
+            // the pipeline builds `album = "<Show>"`, so a recovered episode
+            // landed in a DIFFERENT album row than a normally-synced one from
+            // the same show, and `artist` disagreed too. `sort_album` also
+            // still carried the show name, which is the key that splits a
+            // season into two "Season N" headers — so recovery could
+            // reintroduce the bug the pipeline was just fixed for
+            // (codex + grok review 2026-08-14). See CLAUDE.md rule 6.
             item.sortTVShowName = show.lowercased()
             item.episodeSortID = e
-            item.artist = show
-            item.sortArtist = show.lowercased()
-            item.album = "\(show), Season \(s)"
-            item.sortAlbum = "\(show.lowercased()), season \(s)"
+            item.artist = "\(show) season \(s)"
+            item.sortArtist = "\(show.lowercased()) season \(s)"
+            item.album = show
+            item.sortAlbum = String(s)
             item.albumArtist = show
             item.sortAlbumArtist = show.lowercased()
         }

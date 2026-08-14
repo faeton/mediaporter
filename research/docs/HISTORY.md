@@ -383,6 +383,55 @@ Throwaway telemetry (438eeb5, since removed) logged the rc of every ATC send acr
 
 The correct liveness signal is the **drainer**: its blocking read returning nil for an unexpected reason (transport error / peer death, distinguished from our own `stopDrainer`) sets `connectionDead`; `checkOrThrow` then throws `SyncError.connectionLost` at the next must-ack send (`FileBegin`/`FileComplete`/`MetadataSyncFinished`). Result: mid-sync connection death aborts at the next send instead of stalling to the 120 s `finishSync` deadline. Shipped in 1810ae0 (0.8.0).
 
+## 2026-08-14 — A season synced in two sittings draws two "Season N" headers (`album_order`)
+
+Started as an investigation into a different complaint — deleting an episode in TV.app clears its progress bar but leaves the row on screen until the app is force-quit. That one is **unsolved**; see the dead ends at the bottom of this entry. What the experiments turned up instead is a real, deterministic, now-fixed bug.
+
+**Symptom.** A show synced across two batches renders in TV.app as two identical "Season 1" sections, *each listing every episode of the season*. Cold-launch reproducible; not a cache artifact.
+
+**Mechanism.** `item.album_order` is a per-row sort key resolved through `sort_map`. medialibraryd stamps it two different ways:
+
+- the batch that **creates** the album stamps it from the album's `sort_album` string, verbatim;
+- every **later** batch into that now-existing album stamps it from the **item's own** `video_info.season_number`.
+
+It did not backfill the earlier rows in any case measured. `album_order` is the second column of TV.app's `ItemSeries` index (`series_name_order, album_order, episode_sort_id, …`), and the screenshot shows both headers listing E01–E04 — eight cells for four rows — so TV.app is taking its **section count** from the distinct values while populating each section by series+season, not by `album_order` membership.
+
+> **Corrected later the same day.** The first write-up said the later batches read `album.season_number`. They read the *item's*. The two are indistinguishable in a single-season test and were separated by the multi-season run below — where one album row carried `season_number = 2` while its rows stamped "1", "2" and "10" according to each item. This is not a nitpick: the wrong version led directly to the detector bug described further down.
+
+**Measurements** (AkmPad12, four shows, each cold-launched):
+
+| show | `sort_album` sent | batch 1 key | batch 2 key | sections |
+|---|---|---|---|---|
+| Order Test | `order test` (show name, old default) | `423559686531` → `"order test"` | `848256040960` → `"1"` | **2** |
+| Order Test C | `zzzmarker` | `840410080601` → `"zzzmarker"` | — | 1 |
+| Order Test D | `1` | `848256040960` | `848256040960` | **1** |
+
+Order Test C is the control that pins the source: the key follows `sort_album` verbatim, not the show name, not the album name.
+
+**Fix** (`PipelineController.makeSyncItem`, and `OrphanRecovery.makeSyncItem` which had drifted): send `sort_album = String(season)` for TV episodes. The album-creating batch then resolves to the same key medialibraryd picks for every later batch. Season numbers collide across shows — every `"1"` maps to one `sort_map` row — which is expected to be harmless because `series_name_order` is the index's first column, so `album_order` is only ever compared within one series; Apple's own rows do the same (Attack on Titan carries `"2"` here). Do **not** zero-pad: `"01"` would disagree with the later-batch key and recreate the split.
+
+Two claims here are *not* measured, and are flagged rather than fixed: that `sort_album` is never rendered by any Apple UI (we only know our own code never displays it, and the `zzzmarker` control was deleted before anyone checked TV.app's chrome for it); and that section *ordering* for a 10-season show is numeric rather than lexical on `"10"` vs `"2"`. The second is not a regression risk — every later batch already used the bare decimal before this change — but it is unverified.
+
+**One album row holds every season.** Because `item.album` is the show name with no season suffix, medialibraryd keys one album row per SHOW. Seasons 1, 2 and 10 of a test show all landed in `album_pid` 73837194, whose own `season_number` was simply whichever season arrived first (2). This is also why Attack on Titan's S2 and S3 share one album row with duplicate `episode_sort_id`s. Season separation in TV.app therefore rests **entirely** on `album_order`. A useful corollary: under the old `sort_album = showName` behaviour, two seasons each synced in a single sitting would both stamp the *same* key (the show name) and collapse into one section — so the fix repairs that case too.
+
+**Repair for rows already shipped.** `mediaporterctl heal` now reports split seasons (`findSeasonOrderSplits`) and names the episodes to re-sync. It does not repair automatically — that needs the rows re-inserted, i.e. re-uploaded, which is the user's call. The recipe was validated, not assumed: deleting the two minority rows of "Order Test" and re-syncing them merged the season, and notably the re-sync sent the **old** `sort_album` and still landed on the season key, because the album already existed. Report-only chooses the season-number key as the survivor regardless of row counts — raw majority would, on an even split, name the half that is already correct.
+
+**The detector's grain is `(album_pid, item season)`, and getting that wrong was actively harmful.** The first version grouped by `album.album` text — every season of a show shares that string, so seasons merged. The second grouped by `album_pid` — but as above, every season shares one album ROW, so a correct three-season show (`album_order` "1"/"2"/"10") was reported as a three-way split and `heal` advised deleting and re-uploading two good seasons. Both were caught before shipping: the first by review, the second by running the multi-season fixture. Pinned by `SeasonOrderSplitTests`.
+
+**Also fixed in the same pass.** `SyncEngine.deleteFromDevice` removed `/Airlock/Media/Artwork/<syncID>` but never the `<syncID>_show` companion that `prepareSync` uploads alongside it, so every deleted TV episode stranded its show portrait forever. Both are removed now, and `sweepOrphanAirlockArtwork` (wired into `heal`) clears blobs whose row is already gone — 5 found and removed on AkmPad12. The DB-side `artwork_token` orphans need no help: medialibraryd GC'd all four within one session.
+
+**Dead ends on the original ghost-row complaint**, all falsified by measurement (DB pulled with `-wal`/`-shm` before and after each of 5 real TV.app deletes and 2 host `delete_track`s):
+
+- *The delete is not a data bug.* Every `item_*` row goes, the file is reclaimed, a class-0 `entity_revision` tombstone is written, and a force-quit always clears the ghost. The database is never wrong — it is purely TV.app's live view.
+- *Empty-album husk* — falsified: an album left with 33 healthy items ghosted identically to one emptied to zero.
+- *Artwork / Airlock orphans* — falsified: an episode shipped with **no artwork at all** ghosted identically.
+- *Container (class-4) revisions* — falsified: insert into an existing album does publish class 4 (55436→55450) and delete does not (3 reproductions), but a host `delete_track` cleared the cell **with class 4 still frozen**.
+- *"Any ATC session refreshes TV.app"* — falsified by replication: host `delete_track` cleared the row live once (E05) and ghosted once (E06) under identical conditions. Non-deterministic; no reliable lever.
+- `entity_revision.deleted ∈ {0,1,2}` marks the *kind* of removal (1 = individual, 2 = mass purge), not a progression.
+- The premise "other upload tools remove instantly" does not hold: Apple TV+ downloads are FairPlay `.movpkg` inside TV.app's own container, absent from `MediaLibrary.sqlitedb` and unreachable over AFC. There is no non-MediaPorter sideloaded video on the device to compare against.
+
+Remaining lever would be reverse-engineering `VideosUI.framework` out of an IPSW's dyld shared cache to find what the episode-list fetch controller actually observes. Not attempted — best case is knowing which notification TV.app watches, which we still could not post, since we are not running when the user taps delete. A filtered `idevicesyslog` capture during a cold launch (`-p "TV|medialibraryd|…"`) was tried and yielded only RunningBoard churn and `<private>` redaction; un-redacting needs a logging profile on the device.
+
 ## 2026-08-10 — The expiry clock is SILENCE, not elapsed time (corrects 2026-08-03)
 
 The 2026-08-03 entry below is right about the symptom and the fix, and wrong about the mechanism. It reads the measurement as a *delivery window*: assets announced in the plist die N seconds after the manifest, full stop. Everything written on top of that — "ack window", "bind window", `manifestAge` thresholds, the claim that batch size is bounded — inherits the error.

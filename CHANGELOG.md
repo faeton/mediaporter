@@ -2,7 +2,17 @@
 
 The Swift MacApp under `MacApp/` is the shipping target. Versions starting with 0.4.0 track the MacApp; the 0.1.x – 0.3.x entries describe the now-frozen Python CLI under `python-reference/`.
 
-## 0.9.0 — 2026-08-10
+## Unreleased
+
+### Fixed
+
+- **A show synced in two sittings showed the same season twice** — adding a few episodes now and the rest later drew two identical "Season 1" headers in TV.app, each listing every episode. iOS derives each episode's season sort key from the album's sort string when the album is first created, but from the episode's own season number every time after, and never revisits the earlier rows — so the two batches disagreed forever. Episodes now carry the season number as their sort key from the start, which is what iOS itself uses. The same fault could split a show two other ways: two seasons each synced in one sitting used to collapse into a *single* section, and orphan recovery re-registered episodes into a different album than the pipeline did. Both are fixed alongside.
+- **Deleting a TV episode left its show poster on the device forever** — each episode uploads two artwork files and the delete removed only one. Both go now, and `mediaporterctl heal` sweeps any left behind by earlier versions.
+- **A failed delete could remove the file of a title that still existed** — cleanup ran even when the device never confirmed the deletion, which strands a title in TV.app that can't play. Files are now removed only after the device confirms; otherwise the bytes stay put and can be reclaimed later.
+
+### Diagnostics
+
+- **`mediaporterctl heal` reports split seasons** — names the exact episodes to delete and re-sync to merge a duplicated season header, and leaves genuine multi-season shows alone.
 
 Large-batch release. Whole seasons now sync in one go: a 39-file / 73.6 GB batch (two Attack on Titan seasons plus five movies) landed 39/39 bound and playable on a real iPad. Getting there fixed a hard failure that made any sizeable batch impossible, taught us that the asset-expiry rule we'd been designing around measured the wrong thing, and closed several ways the app quietly wasted your time.
 

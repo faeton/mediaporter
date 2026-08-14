@@ -3103,7 +3103,34 @@ public class PipelineController {
             item.artist = "\(e.showName) season \(e.season)"
             item.sortArtist = "\(e.showName.lowercased()) season \(e.season)"
             item.album = e.showName
-            item.sortAlbum = e.showName.lowercased()
+            // sort_album is the SEASON NUMBER, not the show name — this is a
+            // sort key, never displayed, and getting it wrong splits the
+            // season in TV.app.
+            //
+            // medialibraryd resolves `item.album_order` two different ways
+            // depending on whether the album row already exists. The batch
+            // that CREATES the album stamps album_order from the album's
+            // sort string; every later batch into that same album stamps it
+            // from `album.season_number`. It never backfills the earlier
+            // rows. `album_order` is the second column of TV.app's
+            // `ItemSeries` index, and TV.app derives its section COUNT from
+            // the distinct values — so a show synced in two sittings draws
+            // two identical "Season 1" headers, each listing every episode.
+            //
+            // Measured 2026-08-14 on AkmPad12, four shows, cold-launched:
+            //   "Order Test"   sort_album "order test"  → 423559686531 then
+            //                  848256040960 ("1")   → TWO sections
+            //   "Order Test C" sort_album "zzzmarker"   → 840410080601
+            //                  (proves the source is sort_album verbatim)
+            //   "Order Test D" sort_album "1"           → 848256040960 for
+            //                  BOTH batches         → ONE section
+            //
+            // Season numbers collide across shows (every "1" maps to the
+            // same sort_map row), which is harmless: `series_name_order` is
+            // the index's first column, so album_order is only ever compared
+            // within one series. Apple's own rows do the same — Attack on
+            // Titan carries "2" on this device.
+            item.sortAlbum = String(e.season)
             item.albumArtist = e.showName
             item.sortAlbumArtist = e.showName.lowercased()
             // Ship the show portrait as the track artwork (with the

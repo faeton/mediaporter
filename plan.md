@@ -26,6 +26,33 @@ sections are historical records, not open work.
 folder-titled episodes, transcode reuse, TMDb match ranking). Next release:
 cut a patch when enough QoL accumulates, or 0.10.0 on a feature headline.
 
+**Shipped since 0.9.0 (unreleased):** ✅ TV season sort key — `sort_album` is
+now the season number, fixing duplicate "Season N" headers when a show is
+synced across two sittings (CLAUDE.md #6, HISTORY 2026-08-14); ✅ `_show`
+artwork blob leak on delete + orphan sweep in `heal`; ✅ delete gated on
+`SyncFinished` before removing files.
+
+**Open from the 2026-08-14 work:**
+- **`update_track` probe.** Never sent this op. If it can re-stamp
+  `album_order` on existing rows, `heal` could repair a split season without
+  re-uploading; today the only repair is delete + re-sync. One-row experiment
+  settles it.
+- **Two unmeasured claims behind the season-key fix.** (a) Whether any Apple
+  UI ever *renders* `sort_album` — we only know our own code doesn't; a
+  control row with a distinctive sort string, then a look through TV.app,
+  Music and Spotlight, settles it. (b) Whether section ordering for a 10+
+  season show is numeric or lexical on `"10"` vs `"2"`. Neither is a
+  regression risk (every later batch already used the bare decimal), but both
+  are written up as assumptions.
+- **Ghost row on TV.app delete — unsolved, parked.** Deleting an episode
+  clears its progress bar but leaves the cell until the app is force-quit.
+  The delete itself is correct and immediate; this is purely TV.app's live
+  view. Four theories falsified by measurement (see HISTORY 2026-08-14). The
+  only remaining lever is reverse-engineering `VideosUI` out of an IPSW's
+  dyld shared cache, whose best case is knowing which notification TV.app
+  observes — which we still could not post, since we aren't running when the
+  user taps delete.
+
 **Carried into the next cycle, from the 0.9.0 work:**
 - **Chunked sync sessions** — now known to be a UX improvement only, not a
   correctness requirement (the expiry clock counts silence, not elapsed

@@ -633,6 +633,66 @@ func runHeal(dryRun: Bool) -> Never {
         exit(1)
     }
 
+    // Artwork sweep first, and unconditionally: stranded Airlock blobs are
+    // independent of the stuck-asset ledger (they accumulate from TV.app
+    // deletions we never see), so they must not sit behind the early exit
+    // below.
+    // Any step that fails must survive into the exit code — automation that
+    // reads `heal` exiting 0 would otherwise conclude everything was checked.
+    var healFailed = false
+    do {
+        let sweep = try sweepOrphanAirlockArtwork(device: device, dryRun: dryRun)
+        if sweep.orphaned.isEmpty {
+            print("Airlock artwork: \(sweep.scanned) blob(s), none orphaned.")
+        } else {
+            print("Airlock artwork: \(sweep.scanned) blob(s), \(sweep.orphaned.count) orphaned"
+                + (dryRun ? " (dry run — not removed):" : ", \(sweep.removed) removed:"))
+            for name in sweep.orphaned { print("  • \(name)") }
+        }
+    } catch {
+        healFailed = true
+        writeUserStderr("artwork sweep failed: \(error.localizedDescription)\n")
+    }
+    print("")
+
+    // Report-only: repairing a split needs the rows re-inserted, which means
+    // re-uploading the files. That is the user's call, not something heal
+    // should do behind their back — so we name the episodes and stop.
+    do {
+        let splits = try findSeasonOrderSplits(device: device)
+        if splits.isEmpty {
+            print("Season sort keys: no split seasons.")
+        } else {
+            print("Season sort keys: \(splits.count) split season(s) — each of these")
+            print("draws a duplicate \"Season N\" header in TV.app:")
+            for s in splits {
+                let keys = s.keys
+                    .map { "\"\($0.name)\" ×\($0.count)" }
+                    .joined(separator: " vs ")
+                print("  • \(s.album) — season \(s.seasonNumber): \(keys)")
+                if s.minority.isEmpty {
+                    print("    (nothing we shipped on the losing side — nothing to re-sync)")
+                } else {
+                    print("    re-sync these \(s.minority.count) episode(s):")
+                    for e in s.minority {
+                        print("      E\(String(format: "%02d", e.episodeSortID))"
+                            + "  \(e.title)  [\(e.syncID)]")
+                    }
+                }
+            }
+            print("  Fix: delete those episodes and sync them again. As long as the rest")
+            print("  of the season stays put, the album survives and the re-insert picks")
+            print("  up the season-number key.")
+        }
+    } catch {
+        healFailed = true
+        writeUserStderr("season-order check failed: \(error.localizedDescription)\n")
+    }
+    print("")
+    if healFailed {
+        writeUserStderr("heal: one or more checks did not run (see errors above)\n")
+    }
+
     let tracked = StuckAssetLedger.all(udid: device.udid)
     guard !tracked.isEmpty else {
         print("No stuck assets tracked for this device.")
@@ -641,7 +701,7 @@ func runHeal(dryRun: Bool) -> Never {
         print("two AssetManifests with a FileError(0) sent in between. If syncs are")
         print("hanging at \"finalizing…\" and nothing is listed here, run a sync so a")
         print("manifest gets read, then run this again.")
-        exit(0)
+        exit(healFailed ? 1 : 0)
     }
 
     print("Stuck assets tracked for \(device.udid.prefix(16))…:")
@@ -666,11 +726,11 @@ func runHeal(dryRun: Bool) -> Never {
     let deletable = escalatable.filter { rows[$0]?.isBound == false }
     if deletable.isEmpty {
         print("Nothing to delete: an asset must be seen \(StuckAssetLedger.escalationThreshold)x AND have an unbound row.")
-        exit(0)
+        exit(healFailed ? 1 : 0)
     }
     if dryRun {
         print("--dry-run: would delete_track \(deletable.count) unbound row(s): \(deletable.map(String.init).joined(separator: ", "))")
-        exit(0)
+        exit(healFailed ? 1 : 0)
     }
 
     let result = healStuckAssets(device: device, verbose: true)
