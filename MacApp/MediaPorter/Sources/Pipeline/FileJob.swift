@@ -100,6 +100,14 @@ public class FileJob: Identifiable {
     /// Propagates cluster-wide through `ClusterSelection`.
     public var audioLanguageOverrides: [Int: String] = [:]
 
+    /// Subtitle files the user attached by hand — dropped onto the row, or
+    /// picked with "Add subtitle…" — as opposed to the ones the sidecar scan
+    /// found sitting beside the video. Kept separately because analysis rebuilds
+    /// `mediaInfo` from a fresh probe: without this the manual ones would be
+    /// wiped by the next re-analysis. Merged into `mediaInfo.externalSubtitles`
+    /// after every scan, and deduped against it by path.
+    public var manualSubtitles: [ExternalSubtitle] = []
+
     // User selections (populated after analysis)
     public var selectedAudio: [Int] = []          // indices into audioStreams
     public var selectedSubtitles: [Int] = []      // indices into subtitleStreams

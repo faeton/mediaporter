@@ -1,6 +1,8 @@
 // File row — poster thumb + title + meta + inline expansion for audio/subs/resolution.
 
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 import MediaPorterCore
 
 struct FileRowView: View {
@@ -21,6 +23,9 @@ struct FileRowView: View {
     @State private var editedSeason: Int = 1
     @State private var editedEpisode: Int = 1
     @State private var retryTMDb = true
+    /// Alternative titles derived from the filename + parent folder, offered as
+    /// one-tap chips in the re-ask sheet.
+    @State private var titleGuesses: [String] = []
     @State private var isRetryingLookup = false
 
     /// Anchor for the "Apply selection to all N episodes of <show>?" popover
@@ -48,6 +53,13 @@ struct FileRowView: View {
     /// Movie-candidate picker, opened from the "N matches" badge.
     @State private var showMoviePicker = false
 
+    /// Subtitle drop target state + the transient note that reports what
+    /// happened ("Added Russian subtitle", "Already attached"). A drop that
+    /// says nothing is indistinguishable from the silent no-op this replaces.
+    @State private var isDroppingSubtitle = false
+    @State private var subtitleNote: String?
+    @State private var subtitleNoteTask: Task<Void, Never>?
+
     /// Args bundle for the on-demand picker (vs the auto-prompt path in
     /// ContentView which reads from pipeline.pendingShowPicks).
     private struct ShowPickerInvocation: Identifiable {
@@ -70,8 +82,99 @@ struct FileRowView: View {
         // badge keeps full opacity so the toggle is still discoverable.
         .opacity(job.duplicateOnDevice == true && !job.syncDespiteDuplicate ? 0.5 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isExpanded)
+        // Drop a subtitle anywhere on the row to attach it to this file. The
+        // row is the unambiguous target — no guessing which video a loose .srt
+        // belongs to — and it gives the gesture somewhere to land: the
+        // window-level drop filters by video extension, so a dropped .srt used
+        // to be discarded without a word.
+        .onDrop(of: [.fileURL], isTargeted: $isDroppingSubtitle) { providers in
+            handleSubtitleDrop(providers)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(accent.ring, lineWidth: isDroppingSubtitle ? 2 : 0)
+                .allowsHitTesting(false)
+        )
         .popover(item: $clusterApplyPending, attachmentAnchor: .point(.bottom)) { prompt in
             clusterApplyPopover(prompt: prompt)
+        }
+    }
+
+    // MARK: - Subtitle attach
+
+    /// Job states where attaching a subtitle still changes the outcome. From
+    /// muxing on, the track list is committed — accepting a drop there would
+    /// look like it worked and do nothing.
+    private var acceptsSubtitles: Bool {
+        switch job.status {
+        case .pending, .analyzing, .analyzed, .failed: return true
+        default: return false
+        }
+    }
+
+    private func handleSubtitleDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard acceptsSubtitles else { return false }
+        let group = DispatchGroup()
+        var urls: [URL] = []
+        let lock = NSLock()
+        for p in providers {
+            group.enter()
+            _ = p.loadObject(ofClass: URL.self) { url, _ in
+                if let url { lock.lock(); urls.append(url); lock.unlock() }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { attachSubtitles(urls) }
+        return !providers.isEmpty
+    }
+
+    private func pickSubtitle() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.message = "Choose a subtitle file for \(job.fileName)"
+        panel.allowedContentTypes = PipelineController.subtitleExtensions
+            .sorted()
+            .compactMap { UTType(filenameExtension: $0) }
+        if panel.runModal() == .OK { attachSubtitles(panel.urls) }
+    }
+
+    private func attachSubtitles(_ urls: [URL]) {
+        var added: [String] = []
+        var duplicates = 0
+        var rejected: [String] = []
+        for url in urls {
+            switch pipeline.attachSubtitle(to: job, url: url) {
+            case .added(let lang):
+                added.append(AudioLanguageOptions.label(for: lang) ?? lang.uppercased())
+            case .alreadyAttached:
+                duplicates += 1
+            case .unsupported:
+                rejected.append(url.lastPathComponent)
+            }
+        }
+
+        if !added.isEmpty {
+            note("Added \(added.joined(separator: ", ")) subtitle\(added.count == 1 ? "" : "s")")
+        } else if !rejected.isEmpty {
+            // Naming the file beats naming the extension: the user sees the
+            // thing they dragged.
+            note("Not a subtitle file: \(rejected.joined(separator: ", "))")
+        } else if duplicates > 0 {
+            note(duplicates == 1 ? "Already attached" : "Already attached")
+        }
+    }
+
+    /// Show `message` under the Subtitles section, then clear it. Replaces any
+    /// note still on screen so two quick drops don't fight over the slot.
+    private func note(_ message: String) {
+        subtitleNoteTask?.cancel()
+        subtitleNote = message
+        subtitleNoteTask = Task {
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            subtitleNote = nil
         }
     }
 
@@ -342,7 +445,7 @@ struct FileRowView: View {
             if let audios = job.mediaInfo?.audioStreams, !audios.isEmpty {
                 audioSection(audios: audios)
             }
-            if subtitlesPresent {
+            if job.mediaInfo != nil {
                 subtitlesSection
             }
             metadataSection
@@ -712,6 +815,12 @@ struct FileRowView: View {
     private var subtitlesSection: some View {
         OptionsRow(label: "Subtitles", systemImage: "captions.bubble", theme: theme) {
             VStack(alignment: .leading, spacing: 2) {
+                if !subtitlesPresent {
+                    Text("No subtitles found. Drop a .srt on this row, or add one.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.textFaint)
+                        .padding(.bottom, 2)
+                }
                 subtitleExplainer
                 sameLangSubWarning
                 if let subs = job.mediaInfo?.subtitleStreams {
@@ -726,10 +835,7 @@ struct FileRowView: View {
                         SelectableLine(checked: on, theme: theme, accent: accent,
                                        onTap: { toggleExternal(i) }) {
                             HStack(spacing: 8) {
-                                Text(e.language.isEmpty ? "Unknown" : e.language)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(theme.text)
-                                    .frame(minWidth: 80, alignment: .leading)
+                                externalSubLanguagePicker(index: i, sub: e)
                                 Text(e.format.uppercased())
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundStyle(theme.textDim)
@@ -752,7 +858,29 @@ struct FileRowView: View {
                         }
                     }
                 }
+                if acceptsSubtitles {
+                    HStack(spacing: 8) {
+                        Button(action: pickSubtitle) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "plus.circle")
+                                    .font(.system(size: 10))
+                                Text("Add subtitle…")
+                                    .font(.system(size: 11))
+                            }
+                            .foregroundStyle(theme.textDim)
+                        }
+                        .buttonStyle(.plain)
+                        if let subtitleNote {
+                            Text(subtitleNote)
+                                .font(.system(size: 11))
+                                .foregroundStyle(accent.ring)
+                                .transition(.opacity)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
             }
+            .animation(.easeInOut(duration: 0.15), value: subtitleNote)
         }
     }
 
@@ -833,6 +961,7 @@ struct FileRowView: View {
                 theme: theme,
                 accent: accent,
                 initialTitle: editedTitle,
+                titleGuesses: titleGuesses,
                 initialYear: editedYear,
                 initialKind: editedKind,
                 initialSeason: editedSeason,
@@ -860,7 +989,19 @@ struct FileRowView: View {
                 initialQuery: inv.query,
                 initialCandidates: inv.candidates,
                 affectedCount: inv.affectedCount,
-                onClose: { showPickerInvocation = nil }
+                onClose: { showPickerInvocation = nil },
+                onNotAShow: {
+                    showPickerInvocation = nil
+                    let guess = filenameGuess(for: job.inputURL)
+                    titleGuesses = guess.titles
+                    editedTitle = guess.bestTitle
+                    editedYear = ""
+                    editedKind = .movie
+                    editedSeason = guess.season ?? 1
+                    editedEpisode = guess.episode ?? 1
+                    retryTMDb = !pipeline.tmdbAPIKey.isEmpty
+                    isEditingTitle = true
+                }
             )
         }
         .sheet(isPresented: $showMoviePicker) {
@@ -906,16 +1047,18 @@ struct FileRowView: View {
             return
         }
 
-        // Seed S/E from the filename so a movie-misdetected episode comes
-        // pre-filled with what the user almost certainly wants.
-        let parsed = parseSeasonEpisode(from: job.fileName)
+        // Seed from the filename guesses, which read the parent folder too —
+        // a movie-misdetected episode comes pre-filled with what the user
+        // almost certainly wants, and the alternatives are offered as chips.
+        let guess = filenameGuess(for: job.inputURL)
+        titleGuesses = guess.titles
         switch job.metadata {
         case .movie(let m):
             editedTitle = m.title
             editedYear = m.year.map(String.init) ?? ""
             editedKind = .movie
-            editedSeason = parsed.season ?? 1
-            editedEpisode = parsed.episode ?? 1
+            editedSeason = guess.season ?? 1
+            editedEpisode = guess.episode ?? 1
         case .tvEpisode(let e):
             editedTitle = e.showName
             editedYear = e.year.map(String.init) ?? ""
@@ -923,12 +1066,13 @@ struct FileRowView: View {
             editedSeason = e.season
             editedEpisode = e.episode
         case .none:
-            editedTitle = job.fileName
-                .replacingOccurrences(of: "." + (job.inputURL.pathExtension), with: "")
+            // Never the raw stem: that is the exact string the lookup already
+            // failed on, so re-querying with it reproduces the miss.
+            editedTitle = guess.bestTitle
             editedYear = ""
-            editedKind = (parsed.season != nil || parsed.episode != nil) ? .tv : .movie
-            editedSeason = parsed.season ?? 1
-            editedEpisode = parsed.episode ?? 1
+            editedKind = guess.isTVShow ? .tv : .movie
+            editedSeason = guess.season ?? 1
+            editedEpisode = guess.episode ?? 1
         }
         retryTMDb = !pipeline.tmdbAPIKey.isEmpty
         isEditingTitle = true
@@ -1078,6 +1222,66 @@ struct FileRowView: View {
         .help(isOverride
             ? "Language set manually — applies to the M4V tag and the iOS audio switcher. Click to change."
             : "ffprobe couldn't find a language tag. Click to set one manually.")
+    }
+
+    /// Click-to-pick language for a sidecar subtitle, mirroring the audio one.
+    ///
+    /// Detection can legitimately come up empty — an untagged filename plus a
+    /// track too short to identify leaves "und", which reaches the iOS picker as
+    /// "Unknown" and is the one thing the user can always answer themselves.
+    ///
+    /// `AudioLanguageOptions` is just the common-language list; it isn't
+    /// audio-specific despite the name.
+    @ViewBuilder
+    private func externalSubLanguagePicker(index: Int, sub: ExternalSubtitle) -> some View {
+        let known = !sub.language.isEmpty && sub.language.lowercased() != "und"
+        let label = known
+            ? (AudioLanguageOptions.label(for: sub.language) ?? sub.language.uppercased())
+            : "Unknown"
+        Menu {
+            ForEach(AudioLanguageOptions.common, id: \.code) { opt in
+                Button(opt.label) { setExternalSubLanguage(index, code: opt.code) }
+            }
+            if known {
+                Divider()
+                Button("Unknown", role: .destructive) {
+                    setExternalSubLanguage(index, code: "und")
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(known ? theme.text : theme.textDim)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(theme.textFaint)
+            }
+            .frame(minWidth: 80, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(known
+            ? "Language read from the file name or the subtitle text. Click to change."
+            : "Couldn't tell the language from the name or the text. Click to set one.")
+    }
+
+    /// Correct a sidecar's language in place. `ExternalSubtitle.language` is what
+    /// the transcoder writes as the track's language tag, so overwriting the
+    /// value is the whole fix — there is no separate override to thread through.
+    private func setExternalSubLanguage(_ index: Int, code: String) {
+        guard var info = job.mediaInfo, index < info.externalSubtitles.count else { return }
+        let old = info.externalSubtitles[index]
+        let updated = ExternalSubtitle(path: old.path, language: code, format: old.format)
+        info.externalSubtitles[index] = updated
+        job.mediaInfo = info
+        // Hand-attached subs are re-applied from `manualSubtitles` after any
+        // re-analysis, so the correction has to land there too or it reverts.
+        if let m = job.manualSubtitles.firstIndex(where: { $0.path == old.path }) {
+            job.manualSubtitles[m] = updated
+        }
     }
 
     private func setAudioLanguage(streamIdx: Int, code: String?) {
@@ -1735,6 +1939,8 @@ private struct EditTitleSheet: View {
     let theme: Theme
     let accent: AccentKey
     let initialTitle: String
+    /// Alternatives pulled from the filename + parent folder, best first.
+    let titleGuesses: [String]
     let initialYear: String
     let initialKind: EditMediaKind
     let initialSeason: Int
@@ -1778,6 +1984,36 @@ private struct EditTitleSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .focused($titleFocused)
                     .onSubmit(performSave)
+
+                // One-tap alternatives. A lookup usually misses because the
+                // query carried episode numbers or release tags, so the useful
+                // move is offering the other readings of the same filename
+                // rather than making the user retype it.
+                let alternatives = titleGuesses.filter {
+                    $0.caseInsensitiveCompare(title.trimmingCharacters(in: .whitespaces))
+                        != .orderedSame
+                }
+                if !alternatives.isEmpty {
+                    HStack(spacing: 6) {
+                        Text("Try:")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        ForEach(alternatives, id: \.self) { guess in
+                            Button { title = guess } label: {
+                                Text(guess)
+                                    .font(.system(size: 11))
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(theme.pill, in: RoundedRectangle(cornerRadius: 4))
+                                    .foregroundStyle(theme.text)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Search TMDb for “\(guess)” instead")
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
             }
 
             if kind == .tv {
@@ -1799,8 +2035,11 @@ private struct EditTitleSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Year (optional)").font(.system(size: 11)).foregroundStyle(.secondary)
-                TextField("Year", text: $year, prompt: Text("2024"))
+                Text("Year").font(.system(size: 11)).foregroundStyle(.secondary)
+                // Placeholder, not a value — an empty field submits no year at
+                // all. A greyed-out "2024" read as a pre-filled answer, so the
+                // hint says what it is instead of naming a year.
+                TextField("Year", text: $year, prompt: Text("optional"))
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 120)
             }

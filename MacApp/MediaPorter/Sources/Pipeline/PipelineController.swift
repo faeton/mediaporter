@@ -229,6 +229,77 @@ public class PipelineController {
 
     // MARK: - File Management
 
+    /// Subtitle containers `attachSubtitle` will take. Matches what the sidecar
+    /// scan recognizes — the mux stage handles all four the same way.
+    public static let subtitleExtensions: Set<String> = ["srt", "ass", "ssa", "vtt"]
+
+    /// Outcome of a hand-attached subtitle, so the caller can say what happened
+    /// instead of silently doing nothing.
+    public enum AttachSubtitleResult: Sendable, Equatable {
+        case added(language: String)
+        case alreadyAttached
+        case unsupported(ext: String)
+    }
+
+    /// Attach a subtitle file the user pointed at — dropped on the row, or picked
+    /// from the panel — rather than one the sidecar scan found next to the video.
+    /// The result is identical either way: an entry in `externalSubtitles`, ticked
+    /// on, that the transcode stage embeds.
+    ///
+    /// The language is read from the filename when it's tagged and sniffed from
+    /// the text when it isn't, exactly as for a scanned sidecar — a file the user
+    /// picked out of some other folder is *more* likely to be untagged, not less.
+    @discardableResult
+    public func attachSubtitle(to job: FileJob, url: URL) -> AttachSubtitleResult {
+        let ext = url.pathExtension.lowercased()
+        guard Self.subtitleExtensions.contains(ext) else { return .unsupported(ext: ext) }
+
+        let standardized = url.standardizedFileURL
+        let alreadyKnown = (job.mediaInfo?.externalSubtitles ?? []).contains {
+            $0.path.standardizedFileURL == standardized
+        } || job.manualSubtitles.contains { $0.path.standardizedFileURL == standardized }
+        if alreadyKnown { return .alreadyAttached }
+
+        // A tag in the name is the user's own statement of intent and wins, as
+        // in the scan — but only the final token is eligible here. The scan gets
+        // to read every token after the video's stem, which is unambiguously a
+        // tag; this file may come from anywhere, and scanning its whole name
+        // would label "The.Italian.Job.srt" as Italian.
+        let stem = (url.lastPathComponent as NSString).deletingPathExtension
+        let lastToken = stem
+            .split(whereSeparator: { $0 == "." || $0 == "_" || $0 == "-" || $0 == " " })
+            .last
+        var language = normalizeLanguage(lastToken.map(String.init))
+        if language == "und" {
+            language = sniffSubtitleLanguage(at: standardized, format: ext) ?? "und"
+        }
+
+        let sub = ExternalSubtitle(path: standardized, language: language, format: ext)
+        job.manualSubtitles.append(sub)
+        // Before analysis there's no `mediaInfo` to merge into yet; `analyzeOne`
+        // picks it up from `manualSubtitles` when the probe lands.
+        if job.mediaInfo != nil {
+            job.mediaInfo!.externalSubtitles.append(sub)
+            job.selectedExternalSubs.append(job.mediaInfo!.externalSubtitles.count - 1)
+        }
+        DebugLog.notice(
+            "subtitle.attach",
+            "\(job.fileName) ← \(url.lastPathComponent) lang=\(language)"
+        )
+        return .added(language: language)
+    }
+
+    /// Re-apply hand-attached subtitles to a freshly probed `MediaInfo`, skipping
+    /// any the sidecar scan already found at the same path.
+    private func mergeManualSubtitles(into info: inout MediaInfo, job: FileJob) {
+        for sub in job.manualSubtitles {
+            let known = info.externalSubtitles.contains {
+                $0.path.standardizedFileURL == sub.path.standardizedFileURL
+            }
+            if !known { info.externalSubtitles.append(sub) }
+        }
+    }
+
     public func addFiles(urls: [URL]) {
         // Expand dropped directories. Without this, dragging a season folder
         // ("Jujutsu Kaisen/") onto the app silently no-ops because the URL has
@@ -423,6 +494,15 @@ public class PipelineController {
                 guard !key.isEmpty else { continue }
                 prefixHits[key, default: []].append((url, ep, title))
             }
+            // The folder is the only place a season number can come from for
+            // these — the filenames carry just "<title> NN". Hardcoding 1 put
+            // "Фонари (Сезон 2)/Фонари 1.mkv" into season 1, and because this
+            // pass runs first and `detectFolderTitledSeason` skips anything
+            // already overridden, the folder's own answer never got a look in.
+            // A wrong season is not cosmetic: see CLAUDE.md #6 — it drives
+            // `sort_album`, and two seasons disagreeing draw duplicate headers
+            // in TV.app.
+            let folderSeason = FilenameParser.extractSeasonFromFolder(parent.lastPathComponent) ?? 1
             for (prefix, hits) in prefixHits where hits.count >= 3 {
                 // Distinct trailing numbers — protect against a folder of
                 // alternate-language dubs all named "Show 01.mkv".
@@ -433,7 +513,7 @@ public class PipelineController {
                     filenameOverrides[url] = ParsedFilename(
                         title: title,
                         year: nil,
-                        season: 1,
+                        season: folderSeason,
                         episode: ep,
                         mediaType: .tvShow
                     )
@@ -452,11 +532,28 @@ public class PipelineController {
     /// returns a confidently wrong film. The folder is the only place the show
     /// name exists, so take title + season from it.
     ///
-    /// Same ≥3-distinct-episodes floor as the plain-numbered path: one stray
-    /// "E5 something.mkv" sitting in a Downloads folder must not rename itself
-    /// after its parent directory.
+    /// A second shape rides along here: the filename repeats the show name and
+    /// then the episode number, with release tags trailing — "Фонари 1.WEB-DLRip.avi"
+    /// (see `FilenameParser.matchEpisodeAfterTitle`). It needs the folder title
+    /// for the same reason, so both are collected in one pass.
+    ///
+    /// Floor is ≥3 distinct episodes when the folder name is the only evidence:
+    /// one stray "E5 something.mkv" sitting in a Downloads folder must not
+    /// rename itself after its parent directory. A folder that spells out a
+    /// season — "Фонари (Сезон 1)", "Show S02" — has already declared what it
+    /// is, so one episode is enough there; single-episode drops are common.
     private func detectFolderTitledSeason(parent: URL, siblings: [URL]) {
+        let folder = parent.lastPathComponent
+        let folderSeason = FilenameParser.extractSeasonFromFolder(folder)
+        let show = FilenameParser.showTitleFromFolder(folder)
+        // A folder that cleans down to nothing ("S3", "1080p") tells us
+        // nothing — leave the files alone rather than invent a title.
+        guard !show.isEmpty else { return }
+
         var hits: [(URL, Int)] = []
+        // Files whose own name repeats the folder's show title. That's evidence
+        // from a second source, and it's what licenses the lowered floor below.
+        var corroborated = 0
         for url in siblings {
             // Don't touch files the regex parser or the plain-numbered pass
             // already resolved.
@@ -464,18 +561,31 @@ public class PipelineController {
             let standard = FilenameParser.parse(url.lastPathComponent)
             if standard.mediaType == .tvShow,
                standard.season != nil, standard.episode != nil { continue }
+            // A filename carrying its own year is a movie making a positive
+            // claim, and the folder doesn't get to overrule it. Without this,
+            // "Dune (Season 1)/Dune 2.2024.1080p.mkv" — a season-marked folder,
+            // so the floor is 1 — hands "2" to matchEpisodeAfterTitle and the
+            // film becomes S01E02.
+            if standard.mediaType == .movie, standard.year != nil { continue }
             let stem = (url.lastPathComponent as NSString).deletingPathExtension
-            guard let ep = FilenameParser.matchLeadingEpisode(stem) else { continue }
-            hits.append((url, ep))
+            if let ep = FilenameParser.matchEpisodeAfterTitle(stem: stem, title: show) {
+                hits.append((url, ep))
+                corroborated += 1
+            } else if let ep = FilenameParser.matchLeadingEpisode(stem) {
+                hits.append((url, ep))
+            }
         }
-        guard hits.count >= 3, Set(hits.map(\.1)).count >= 3 else { return }
+        // A season-marked folder lets a single file through, but only when the
+        // file backs the folder up by repeating its show name. "E5 Historia.mkv"
+        // says nothing about *which* show it belongs to, so on that shape the
+        // ≥3 floor stands no matter what the folder claims — otherwise a folder
+        // that merely happens to contain the words "Season 1" ("My Season 1
+        // Rips/") could rename a stray file after itself, which is exactly the
+        // accident the floor was put there to prevent.
+        let floor = (folderSeason != nil && corroborated > 0) ? 1 : 3
+        guard hits.count >= floor, Set(hits.map(\.1)).count >= floor else { return }
 
-        let folder = parent.lastPathComponent
-        let show = FilenameParser.showTitleFromFolder(folder)
-        // A folder that cleans down to nothing ("S3", "1080p") tells us
-        // nothing — leave the files alone rather than invent a title.
-        guard !show.isEmpty else { return }
-        let season = FilenameParser.extractSeasonFromFolder(folder) ?? 1
+        let season = folderSeason ?? 1
 
         DebugLog.notice(
             "parse.folderTitled",
@@ -1550,6 +1660,9 @@ public class PipelineController {
         do {
             var info = try await probeFile(url: job.inputURL)
             scanExternalSubtitles(mediaInfo: &info)
+            // Anything the user attached by hand before analysis reached this
+            // job survives the fresh probe.
+            mergeManualSubtitles(into: &info, job: job)
             let decision = evaluateCompatibility(mediaInfo: info)
 
             job.mediaInfo = info
@@ -1700,7 +1813,12 @@ public class PipelineController {
                         outputPath: intermediate
                     )
                     var newInfo = try await probeFile(url: intermediate)
-                    scanExternalSubtitles(mediaInfo: &newInfo)
+                    // The intermediate lives in the temp dir, so scanning it for
+                    // sidecars finds nothing — carry the source's across, or
+                    // replacing `mediaInfo` drops every sidecar sub the user
+                    // selected. Indices stay valid because the list is intact,
+                    // which is what `selectedExternalSubs` refers to.
+                    newInfo.externalSubtitles = job.mediaInfo?.externalSubtitles ?? []
                     let newDecision = evaluateCompatibility(mediaInfo: newInfo)
                     job.mediaInfo = newInfo
                     job.decision = newDecision
@@ -2894,7 +3012,8 @@ public class PipelineController {
                     outputPath: intermediate
                 )
                 var newInfo = try await probeFile(url: intermediate)
-                scanExternalSubtitles(mediaInfo: &newInfo)
+                // Same sidecar carry-over as runAll — see the note there.
+                newInfo.externalSubtitles = job.mediaInfo?.externalSubtitles ?? []
                 let newDecision = evaluateCompatibility(mediaInfo: newInfo)
                 job.mediaInfo = newInfo
                 job.decision = newDecision

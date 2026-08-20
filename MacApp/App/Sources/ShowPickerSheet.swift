@@ -25,6 +25,14 @@ struct ShowPickerSheet: View {
     @FocusState private var queryFocused: Bool
 
     let onClose: () -> Void
+    /// "This isn't a show" — hands the file back to the movie/TV editor. Without
+    /// it a file misclassified as a TV episode is trapped: this sheet only
+    /// searches `/search/tv`, so no query typed here can ever reach the film.
+    ///
+    /// Nil on the auto-prompt path, where the sheet stands for a whole cluster
+    /// and there is no single file to reclassify; the button hides itself then
+    /// rather than duplicating Skip.
+    var onNotAShow: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -51,6 +59,13 @@ struct ShowPickerSheet: View {
                     Text("Searching TMDb…").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Spacer()
+                if let onNotAShow {
+                    Button("Not a show…") {
+                        pipeline.dismissClusterPick(clusterID)
+                        onNotAShow()
+                    }
+                    .help("Edit this file as a movie instead")
+                }
                 Button("Skip", role: .cancel) {
                     pipeline.dismissClusterPick(clusterID)
                     onClose()

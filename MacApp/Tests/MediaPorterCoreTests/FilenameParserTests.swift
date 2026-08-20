@@ -208,6 +208,111 @@ final class FolderTitledEpisodeTests: XCTestCase {
         XCTAssertNil(FilenameParser.matchLeadingEpisode("Elysium"))
     }
 
+    /// "WEB-DLRip" survived the release-tag cut because the hyphen-split rule
+    /// needs one known part and "web" is excluded on purpose ("The Web"). The
+    /// leftover went to TMDb as part of the query.
+    func testWebDLRipIsCutFromTitle() {
+        XCTAssertEqual(FilenameParser.stripReleaseTail("Фонари 1 WEB-DLRip"), "Фонари 1")
+        XCTAssertEqual(FilenameParser.stripReleaseTail("Брат 2 WEB-DLRip-AVC"), "Брат 2")
+        XCTAssertEqual(FilenameParser.stripReleaseTail("Some Movie HDTVRip"), "Some Movie")
+        // The exclusion that makes "web" unusable must still hold.
+        XCTAssertEqual(FilenameParser.stripReleaseTail("The Web"), "The Web")
+    }
+
+    // MARK: filenameGuess (re-ask seeding)
+
+    /// The re-ask sheet must not seed itself with the raw stem — that is the
+    /// string the failed lookup already tried.
+    func testGuessForRussianSeasonFolder() {
+        let url = URL(fileURLWithPath: "/tmp/Фонари (Сезон 1)/Фонари 1.WEB-DLRip.avi")
+        let g = filenameGuess(for: url)
+        XCTAssertEqual(g.bestTitle, "Фонари")
+        XCTAssertTrue(g.isTVShow)
+        XCTAssertEqual(g.season, 1)
+        XCTAssertEqual(g.episode, 1)
+        XCTAssertFalse(g.titles.contains("Фонари 1.WEB-DLRip"))
+    }
+
+    func testGuessForMovie() {
+        let url = URL(fileURLWithPath: "/tmp/Movies/Interstellar (2014).mkv")
+        let g = filenameGuess(for: url)
+        XCTAssertEqual(g.bestTitle, "Interstellar")
+        XCTAssertFalse(g.isTVShow)
+        XCTAssertNil(g.season)
+    }
+
+    func testGuessOffersAlternatives() {
+        let url = URL(fileURLWithPath: "/tmp/Фонари (Сезон 1)/Фонари 1.WEB-DLRip.avi")
+        let g = filenameGuess(for: url)
+        // Folder title first, then the filename's own reading.
+        XCTAssertEqual(g.titles.first, "Фонари")
+        XCTAssertTrue(g.titles.contains("Фонари 1"), "got \(g.titles)")
+        // Deduped.
+        XCTAssertEqual(Set(g.titles).count, g.titles.count)
+    }
+
+    // MARK: Season markers in folder names
+
+    func testSeasonFromFolderEnglish() {
+        XCTAssertEqual(FilenameParser.extractSeasonFromFolder("Jujutsu.Kaisen.Season2.WEB-DL.1080p"), 2)
+        XCTAssertEqual(FilenameParser.extractSeasonFromFolder("Shingeki no Kyojin S3 60 FPS"), 3)
+        XCTAssertEqual(FilenameParser.extractSeasonFromFolder("Show Season 11"), 11)
+        XCTAssertNil(FilenameParser.extractSeasonFromFolder("Interstellar (2014)"))
+    }
+
+    /// Russian and Ukrainian trackers spell it out, usually in parentheses —
+    /// which also means the marker is bracket-delimited, not separator-delimited.
+    func testSeasonFromFolderCyrillic() {
+        XCTAssertEqual(FilenameParser.extractSeasonFromFolder("Фонари (Сезон 1)"), 1)
+        XCTAssertEqual(FilenameParser.extractSeasonFromFolder("Слово пацана [Сезон 2]"), 2)
+        XCTAssertEqual(FilenameParser.extractSeasonFromFolder("Ходячие мертвецы. Сезон 11"), 11)
+    }
+
+    func testShowTitleFromFolderCyrillic() {
+        XCTAssertEqual(FilenameParser.showTitleFromFolder("Фонари (Сезон 1)"), "Фонари")
+        XCTAssertEqual(FilenameParser.showTitleFromFolder("Слово пацана [Сезон 2]"), "Слово пацана")
+    }
+
+    // MARK: matchEpisodeAfterTitle
+
+    func testEpisodeAfterTitle() {
+        XCTAssertEqual(
+            FilenameParser.matchEpisodeAfterTitle(stem: "Фонари 1.WEB-DLRip", title: "Фонари"), 1)
+        XCTAssertEqual(
+            FilenameParser.matchEpisodeAfterTitle(stem: "Фонари 12.WEB-DLRip", title: "Фонари"), 12)
+        // Separator style and case don't have to agree between the two.
+        XCTAssertEqual(
+            FilenameParser.matchEpisodeAfterTitle(stem: "The.Wire.03.1080p", title: "the wire"), 3)
+    }
+
+    func testEpisodeAfterTitleRejectsNonEpisodes() {
+        // Year, not an episode.
+        XCTAssertNil(
+            FilenameParser.matchEpisodeAfterTitle(stem: "Фонари 2019.WEB-DLRip", title: "Фонари"))
+        // Nothing numeric follows the title.
+        XCTAssertNil(
+            FilenameParser.matchEpisodeAfterTitle(stem: "Фонари Extended", title: "Фонари"))
+        // Different show.
+        XCTAssertNil(
+            FilenameParser.matchEpisodeAfterTitle(stem: "Другой сериал 1", title: "Фонари"))
+        // Title alone, no episode token at all.
+        XCTAssertNil(
+            FilenameParser.matchEpisodeAfterTitle(stem: "Фонари", title: "Фонари"))
+        // Episode 0 isn't an episode.
+        XCTAssertNil(
+            FilenameParser.matchEpisodeAfterTitle(stem: "Фонари 0.WEB-DLRip", title: "Фонари"))
+    }
+
+    /// A filename carrying its own year is a movie making a positive claim;
+    /// a season-marked folder must not overrule it and turn "Dune 2.2024" into
+    /// S01E02. Guarded in PipelineController.detectFolderTitledSeason, which
+    /// relies on the parse below reporting .movie with a year.
+    func testMovieWithYearStillParsesAsMovie() {
+        let p = FilenameParser.parse("Dune 2.2024.1080p.mkv")
+        XCTAssertEqual(p.mediaType, .movie)
+        XCTAssertEqual(p.year, 2024)
+    }
+
     // MARK: showTitleFromFolder
 
     func testFolderTitleStripsSeasonAndFPS() {

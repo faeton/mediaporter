@@ -33,6 +33,66 @@ public func parseSeasonEpisode(from url: URL) -> (season: Int?, episode: Int?) {
     return (p.season, p.episode)
 }
 
+/// Plausible titles for a file plus the media-type call — what to offer when a
+/// TMDb lookup misses and the user re-asks by hand.
+///
+/// The re-ask sheet used to seed itself with the raw filename stem, which is
+/// the very string the failed lookup already tried, so re-querying reproduced
+/// the miss. ("Фонари 1.WEB-DLRip" went to `/search/movie` as-is.) These are
+/// the strings a person would try instead, best guess first.
+public struct FilenameGuess: Sendable {
+    /// Deduped, ordered best-first. Never empty for a real filename.
+    public let titles: [String]
+    public let isTVShow: Bool
+    public let season: Int?
+    public let episode: Int?
+
+    public var bestTitle: String { titles.first ?? "" }
+}
+
+/// Build the guess set for `url`, consulting the parent directory — a season
+/// folder names the show more reliably than the file inside it does.
+public func filenameGuess(for url: URL) -> FilenameGuess {
+    let name = url.lastPathComponent
+    let stem = (name as NSString).deletingPathExtension
+    let parentDir = url.deletingLastPathComponent().lastPathComponent
+    let parsed = FilenameParser.parse(name, parentDir: parentDir)
+    let folderShow = FilenameParser.showTitleFromFolder(parentDir)
+    let folderSeason = FilenameParser.extractSeasonFromFolder(parentDir)
+
+    var titles: [String] = []
+    func offer(_ candidate: String) {
+        let t = candidate.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty,
+              !titles.contains(where: { $0.caseInsensitiveCompare(t) == .orderedSame })
+        else { return }
+        titles.append(t)
+    }
+
+    // A folder that spells out a season is the strongest evidence in play —
+    // it's why the folder-titled path exists at all.
+    if folderSeason != nil { offer(folderShow) }
+    offer(parsed.title)
+    // The stem with separators normalized and release tags cut. Overlaps
+    // `parsed.title` most of the time; differs when the regex parser latched
+    // onto a year or an episode marker and cut somewhere else.
+    offer(FilenameParser.stripReleaseTail(
+        stem.replacingOccurrences(of: ".", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+    ))
+    offer(folderShow)
+
+    let isTV = parsed.mediaType == .tvShow || folderSeason != nil
+    let episode = parsed.episode
+        ?? (isTV ? FilenameParser.matchEpisodeAfterTitle(stem: stem, title: folderShow) : nil)
+    return FilenameGuess(
+        titles: titles,
+        isTVShow: isTV,
+        season: isTV ? (parsed.season ?? folderSeason ?? 1) : nil,
+        episode: episode
+    )
+}
+
 enum FilenameParser {
     // TV: "Show.Name.S01E02", "Show Name - S01E02", "Show - S1 - E01", "Show S01.E02".
     // The separators between S## and E## are optional + greedy because real-world
@@ -223,18 +283,25 @@ enum FilenameParser {
 
     // Pull a season number out of a directory name. Matches "Season 3",
     // "Season3", "Season.3", "S03" — common scene/WEB-DL folder layouts
-    // ("Jujutsu.Kaisen.Season3.WEB-DL.1080p"). Word-boundary anchors
-    // protect against accidental hits inside the show name itself.
+    // ("Jujutsu.Kaisen.Season3.WEB-DL.1080p") — plus the Cyrillic spelling
+    // "Сезон 3", which Russian and Ukrainian trackers use and which is
+    // usually parenthesised ("Фонари (Сезон 1)"). Word-boundary anchors
+    // protect against accidental hits inside the show name itself; brackets
+    // count as boundaries so the parenthesised form is reachable.
+    // Russian listings put the number on either side ("Сезон 1" and "1 сезон"
+    // are both everywhere) and often continue with an episode count, so a comma
+    // has to count as a trailing boundary: "Фонари (Сезон 1, 8 серий)".
     private static let folderSeasonPattern = try! NSRegularExpression(
-        pattern: #"(?:^|[\s._-])(?:[Ss]eason[\s._-]*(\d{1,2})|[Ss](\d{1,2}))(?:[\s._-]|$)"#
+        pattern: #"(?:^|[\s._(\[-])(?:season[\s._-]*(?<en>\d{1,2})|сезон[\s._-]*(?<ru>\d{1,2})|(?<runum>\d{1,2})[\s._-]*сезон|s(?<abbr>\d{1,2}))(?:[\s._,)\]-]|$)"#,
+        options: [.caseInsensitive]
     )
     static func extractSeasonFromFolder(_ folder: String) -> Int? {
         let range = NSRange(folder.startIndex..., in: folder)
         guard let m = folderSeasonPattern.firstMatch(in: folder, range: range) else {
             return nil
         }
-        for g in 1...2 {
-            if let r = Range(m.range(at: g), in: folder) {
+        for name in ["en", "ru", "runum", "abbr"] {
+            if let r = Range(m.range(withName: name), in: folder) {
                 return Int(folder[r])
             }
         }
@@ -262,6 +329,47 @@ enum FilenameParser {
         guard let m = leadingEpisodePattern.firstMatch(in: stem, range: range),
               let r = Range(m.range(at: 1), in: stem) else { return nil }
         return Int(stem[r])
+    }
+
+    /// Episode number in a filename that repeats the show name, puts the number
+    /// straight after it, and then trails release tags: "Фонари 1.WEB-DLRip.avi"
+    /// inside "Фонари (Сезон 1)".
+    ///
+    /// Neither existing shape reaches this. `parsePlainNumbered` wants the
+    /// number at the *end* of the stem, and it isn't — "WEB-DLRip" follows.
+    /// `matchLeadingEpisode` wants an "E##" marker at the front, and the show
+    /// name is there instead. What pins the number down is the folder's show
+    /// title: whatever immediately follows it is the episode.
+    ///
+    /// Both sides go through `normalizePrefix`, so case and separator style
+    /// don't have to agree. Returns nil unless the stem starts with the whole
+    /// title and the next token is a 1-3 digit number — a 4-digit year can't
+    /// match, and "Фонари Extended.avi" has no number to take.
+    static func matchEpisodeAfterTitle(stem: String, title: String) -> Int? {
+        let stemTokens = separatorTokens(stem)
+        let titleTokens = separatorTokens(title)
+        guard !titleTokens.isEmpty, stemTokens.count > titleTokens.count else { return nil }
+        guard Array(stemTokens.prefix(titleTokens.count)) == titleTokens else { return nil }
+
+        let candidate = stemTokens[titleTokens.count]
+        guard candidate.count <= 3, candidate.allSatisfy(\.isNumber),
+              let episode = Int(candidate), episode > 0 else { return nil }
+        // "Фонари 720 WEB-DLRip.avi" puts a resolution exactly where an episode
+        // number goes. 1080 and 2160 are already out on the 3-digit cap; these
+        // are not, and no show has 480 episodes named this way.
+        guard !resolutionNumbers.contains(episode) else { return nil }
+        return episode
+    }
+
+    /// Bare resolutions that collide with the episode-number slot.
+    private static let resolutionNumbers: Set<Int> = [480, 540, 576, 720]
+
+    /// Lowercased tokens split on every separator style a release name mixes
+    /// ("Фонари 1.WEB-DLRip" → ["фонари", "1", "web", "dlrip"]).
+    private static func separatorTokens(_ s: String) -> [String] {
+        s.lowercased()
+            .split(whereSeparator: { $0 == "." || $0 == "_" || $0 == "-" || $0 == " " })
+            .map(String.init)
     }
 
     /// True when a parsed "movie title" is really just an episode marker with
@@ -297,10 +405,21 @@ enum FilenameParser {
         var s = folder.replacingOccurrences(
             of: #"\[[^\]]*\]"#, with: " ", options: .regularExpression
         )
-        // Remove the season marker wherever it sits.
+        // Remove the season marker wherever it sits, in either spelling.
+        // Both boundaries are zero-width here (unlike `folderSeasonPattern`,
+        // which may consume them): eating the "(" of "Фонари (Сезон 1)" would
+        // leave a dangling ")" that the husk sweep below couldn't recognize.
         s = s.replacingOccurrences(
-            of: #"(?:^|[\s._-])(?:[Ss]eason[\s._-]*\d{1,2}|[Ss]\d{1,2})(?=[\s._-]|$)"#,
-            with: " ", options: .regularExpression
+            of: #"(?:(?<=[\s._(\[-])|^)(?:season[\s._-]*\d{1,2}|сезон[\s._-]*\d{1,2}|\d{1,2}[\s._-]*сезон|s\d{1,2})(?=[\s._,)\]-]|$)"#,
+            with: " ", options: [.regularExpression, .caseInsensitive]
+        )
+        // Drop what's left inside parentheses. That covers the husk the season
+        // marker leaves behind ("Фонари ( )") and the alt-title Russian
+        // trackers put beside the local one ("Фонари (The Lights) (Сезон 1)"),
+        // which would otherwise reach TMDb as two titles glued together — the
+        // same treatment `cleanTitle` already gives filenames.
+        s = s.replacingOccurrences(
+            of: #"\([^)]*\)"#, with: " ", options: .regularExpression
         )
         s = s.replacingOccurrences(of: ".", with: " ")
              .replacingOccurrences(of: "_", with: " ")
@@ -374,6 +493,10 @@ enum FilenameParser {
         "x264", "x265", "h264", "h265", "hevc", "avc", "xvid", "divx", "av1",
         "aac", "ac3", "eac3", "dts", "truehd", "flac",
         "10bit", "8bit", "hdr10", "repack", "proper",
+        // Russian-tracker rip tags. "dlrip" is what rescues "WEB-DLRip": the
+        // hyphen-split rule below needs one *known* part, and "web" is
+        // deliberately not one ("The Web").
+        "dlrip", "webdlrip", "hdtvrip", "satrip",
     ]
 
     /// True when a token is unambiguously release metadata rather than title.
