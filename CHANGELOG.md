@@ -31,6 +31,7 @@ Subtitles and season folders. External subtitle files that sit next to a video a
 ### Diagnostics
 
 - **`mediaporterctl heal` reports split seasons** — names the exact episodes to delete and re-sync to merge a duplicated season header, and leaves genuine multi-season shows alone.
+- **`mediaporterctl heal` also reports collapsed seasons** — the opposite fault, where two seasons of one show share a single sort key and the TV app lists them as one season with the episode numbers repeating. The previous check looked only for a season spread across two keys, so a collapsed pair was reported as healthy. Found on a real library: two seasons of one show, 33 episodes in a single section, passed as clean.
 
 ## 0.9.0 — 2026-08-10
 

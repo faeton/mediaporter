@@ -426,6 +426,46 @@ public struct SeasonOrderSplit: Sendable {
     public let minority: [Episode]
 }
 
+/// Two or more seasons of one show sharing a SINGLE `album_order` — the mirror
+/// image of `SeasonOrderSplit`, and the other half of the fault CLAUDE.md #6
+/// describes.
+///
+/// `item.album` is the show name for every season, so all seasons of a show
+/// live in one album row and separation rests entirely on `album_order`. When
+/// medialibraryd stamped that order from the album's sort string — the old
+/// `sort_album = showName` behaviour — two seasons synced in the SAME batch
+/// both took the show-name key and landed on the same value, so TV.app draws
+/// one section holding both seasons, with `episode_sort_id` repeating.
+///
+/// `findSeasonOrderSplits` cannot see this: it groups by (album, season) and
+/// asks for >1 distinct order, and here every season has exactly one. Measured
+/// on AkmPad12 2026-08-20 — Attack on Titan seasons 2 and 3, 33 rows, both on
+/// order 751619276800 under sort key "attack on titan", reported clean by heal.
+public struct SeasonOrderCollapse: Sendable {
+    public let albumPID: Int64
+    public let album: String
+    /// The single `album_order` every listed season sits on.
+    public let order: Int64
+    /// The `sort_map` string `order` resolves to (e.g. "attack on titan").
+    public let keyName: String
+    /// Seasons sharing `order`, ascending. Always ≥2.
+    public let seasons: [Int]
+    /// The season left in place; re-syncing it too would be wasted work, since
+    /// one season must keep the order for the album row to survive.
+    public let keptSeason: Int
+    /// Rows to delete and re-sync — every shipped row of every season except
+    /// `keptSeason`. Re-inserting stamps them from their own season number,
+    /// which is what separates them.
+    public let minority: [SeasonOrderSplit.Episode]
+}
+
+/// Both `album_order` faults found in one device pull.
+public struct SeasonOrderReport: Sendable {
+    public let splits: [SeasonOrderSplit]
+    public let collapses: [SeasonOrderCollapse]
+    public var isEmpty: Bool { splits.isEmpty && collapses.isEmpty }
+}
+
 /// Decode sqlite's `hex(...)` output. We hex every text column we select so
 /// that album names, sort-map names and episode titles — arbitrary user text
 /// that can contain tabs and newlines — cannot shift the field positions of
@@ -441,7 +481,13 @@ private func decodeHex(_ s: String) -> String {
     return String(decoding: bytes, as: UTF8.self)
 }
 
-/// Find TV seasons split across two or more `album_order` values.
+/// Find both `album_order` faults in one pass: seasons split across two or
+/// more orders, and distinct seasons collapsed onto a single order.
+///
+/// One DB pull feeds both. The query used to pre-filter to split groups in
+/// SQL; that filter is gone because it hid every collapse from the rows the
+/// pure parsers see. Both parsers re-derive their own condition, so the
+/// wider row set changes no verdict.
 ///
 /// medialibraryd stamps `album_order` from the album's sort string on the
 /// batch that creates the album and from `album.season_number` on every
@@ -453,12 +499,14 @@ private func decodeHex(_ s: String) -> String {
 ///
 /// Only reports albums holding at least one row we shipped (`item_store.
 /// sync_id != 0`) — a split in Apple's own content is not ours to touch.
-public func findSeasonOrderSplits(device: DeviceInfo) throws -> [SeasonOrderSplit] {
+public func findSeasonOrderIssues(device: DeviceInfo) throws -> SeasonOrderReport {
     let tmp = FileManager.default.temporaryDirectory
         .appendingPathComponent("mp-splits-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: tmp) }
-    guard let pull = try pullLibraryDB(device: device, into: tmp) else { return [] }
+    guard let pull = try pullLibraryDB(device: device, into: tmp) else {
+        return SeasonOrderReport(splits: [], collapses: [])
+    }
     let dbPath = pull.path
 
     // Numeric columns first, every text column `hex()`-encoded — see
@@ -488,19 +536,12 @@ public func findSeasonOrderSplits(device: DeviceInfo) throws -> [SeasonOrderSpli
     JOIN item_extra ie ON ie.item_pid = i.item_pid
     LEFT JOIN item_video iv ON iv.item_pid = i.item_pid
     LEFT JOIN item_store s ON s.item_pid = i.item_pid
-    WHERE \(tvWhere)
-      AND (i.album_pid, COALESCE(iv.season_number, 0)) IN (
-        SELECT i2.album_pid, COALESCE(iv2.season_number, 0) FROM item i2
-        JOIN item_extra ie2 ON ie2.item_pid = i2.item_pid
-        LEFT JOIN item_video iv2 ON iv2.item_pid = i2.item_pid
-        WHERE (i2.media_type = 512 OR ie2.media_kind = 64) AND i2.in_my_library = 1
-        GROUP BY i2.album_pid, COALESCE(iv2.season_number, 0)
-        HAVING COUNT(DISTINCT i2.album_order) > 1
-      );
+    WHERE \(tvWhere);
     """
     let text = try runSQLite3(["-readonly", "-separator", "\t", dbPath, sql],
                               captureStderr: true)
-    return parseSeasonOrderSplits(text)
+    return SeasonOrderReport(splits: parseSeasonOrderSplits(text),
+                             collapses: parseSeasonOrderCollapses(text))
 }
 
 /// Pure half of `findSeasonOrderSplits` — everything after the query. Split
@@ -560,6 +601,67 @@ func parseSeasonOrderSplits(_ text: String) -> [SeasonOrderSplit] {
                                 seasonNumber: key.season,
                                 keys: keys, minority: minority)
     }.sorted { ($0.album, $0.seasonNumber) < ($1.album, $1.seasonNumber) }
+}
+
+/// Pure half of the collapse check. Groups by (album_pid, album_order) and
+/// reports any order carrying more than one season.
+///
+/// Kept separate from `parseSeasonOrderSplits` rather than folded in: the two
+/// faults group on different keys, pick their survivor by different rules, and
+/// a season can legitimately appear in both reports (split across orders, one
+/// of which it shares with another season).
+func parseSeasonOrderCollapses(_ text: String) -> [SeasonOrderCollapse] {
+    struct Row {
+        let season: Int; let syncID: Int64; let title: String; let episode: Int
+    }
+    struct GroupKey: Hashable { let albumPID: Int64; let order: Int64 }
+    var groups: [GroupKey: (album: String, keyName: String, rows: [Row])] = [:]
+    for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+        let f = line.components(separatedBy: "\t")
+        guard f.count == 8,
+              let albumPID = Int64(f[0]), let season = Int(f[1]),
+              let order = Int64(f[2]), let syncID = Int64(f[3]),
+              let episode = Int(f[4]) else { continue }
+        let key = GroupKey(albumPID: albumPID, order: order)
+        var entry = groups[key] ?? (decodeHex(f[5]), decodeHex(f[6]), [])
+        entry.rows.append(Row(season: season, syncID: syncID,
+                              title: decodeHex(f[7]), episode: episode))
+        groups[key] = entry
+    }
+
+    return groups.compactMap { key, entry -> SeasonOrderCollapse? in
+        // Ours only, exactly as for splits — a collapse in Apple's own content
+        // is not ours to repair.
+        guard entry.rows.contains(where: { $0.syncID != 0 }) else { return nil }
+        let seasons = Set(entry.rows.map(\.season)).sorted()
+        guard seasons.count > 1 else { return nil }
+
+        // Keep whichever season is already correctly keyed — its order IS its
+        // season-number key, so re-syncing it would only move it back where it
+        // is. Otherwise keep the one with the most rows, so the user re-uploads
+        // as little as possible; lowest season number breaks a tie so the
+        // report is stable across runs.
+        let counts = Dictionary(grouping: entry.rows, by: \.season).mapValues(\.count)
+        let kept = seasons.first { entry.keyName == String($0) }
+            ?? seasons.sorted {
+                counts[$0, default: 0] != counts[$1, default: 0]
+                    ? counts[$0, default: 0] > counts[$1, default: 0]
+                    : $0 < $1
+            }[0]
+
+        let minority = entry.rows
+            .filter { $0.season != kept && $0.syncID != 0 }
+            .map { SeasonOrderSplit.Episode(syncID: $0.syncID, title: $0.title,
+                                            episodeSortID: $0.episode) }
+            .sorted { $0.episodeSortID < $1.episodeSortID }
+        // Every other season was Apple's — nothing of ours to move.
+        guard !minority.isEmpty else { return nil }
+
+        return SeasonOrderCollapse(albumPID: key.albumPID, album: entry.album,
+                                   order: key.order, keyName: entry.keyName,
+                                   seasons: seasons, keptSeason: kept,
+                                   minority: minority)
+    }.sorted { ($0.album, $0.order) < ($1.album, $1.order) }
 }
 
 public extension Array where Element == DeviceLibraryEntry {

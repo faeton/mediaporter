@@ -659,10 +659,12 @@ func runHeal(dryRun: Bool) -> Never {
     // re-uploading the files. That is the user's call, not something heal
     // should do behind their back — so we name the episodes and stop.
     do {
-        let splits = try findSeasonOrderSplits(device: device)
-        if splits.isEmpty {
-            print("Season sort keys: no split seasons.")
-        } else {
+        let report = try findSeasonOrderIssues(device: device)
+        let splits = report.splits
+        if report.isEmpty {
+            print("Season sort keys: no split or collapsed seasons.")
+        }
+        if !splits.isEmpty {
             print("Season sort keys: \(splits.count) split season(s) — each of these")
             print("draws a duplicate \"Season N\" header in TV.app:")
             for s in splits {
@@ -683,6 +685,19 @@ func runHeal(dryRun: Bool) -> Never {
             print("  Fix: delete those episodes and sync them again. As long as the rest")
             print("  of the season stays put, the album survives and the re-insert picks")
             print("  up the season-number key.")
+        }
+        for c in report.collapses {
+            let seasons = c.seasons.map(String.init).joined(separator: " + ")
+            print("Season sort keys: seasons \(seasons) of \(c.album) share one sort key")
+            print("(\"\(c.keyName)\"), so TV.app lists them as a SINGLE season with")
+            print("\(c.minority.count + 1) episode numbers repeating.")
+            print("  keeping season \(c.keptSeason); re-sync these \(c.minority.count) episode(s):")
+            for e in c.minority {
+                print("      E\(String(format: "%02d", e.episodeSortID))"
+                    + "  \(e.title)  [\(e.syncID)]")
+            }
+            print("  Fix: delete those episodes and sync them again. They re-insert under")
+            print("  their own season number, which is what splits the section back apart.")
         }
     } catch {
         healFailed = true
