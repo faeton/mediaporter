@@ -2,17 +2,37 @@
 
 The Swift MacApp under `MacApp/` is the shipping target. Versions starting with 0.4.0 track the MacApp; the 0.1.x – 0.3.x entries describe the now-frozen Python CLI under `python-reference/`.
 
-## Unreleased
+## 0.9.1 — 2026-08-20
+
+Subtitles and season folders. External subtitle files that sit next to a video are now found and labelled properly — including the single most common naming layout, which was skipped entirely — you can attach one by hand, and Russian-language season folders are understood.
 
 ### Fixed
 
+- **A subtitle named exactly like its video was ignored** — `Show.srt` sitting beside `Show.avi` is the most common sidecar layout there is, and it was skipped; only tagged names like `Show.en.srt` were picked up. Nothing else caught these either, so the subtitle simply never appeared.
+- **Untagged subtitles were labelled "Unknown"** — when the filename carries no language, the language is now identified from the subtitle text itself, so a bare `.srt` next to a Russian rip arrives as Russian. Files saved in Windows Cyrillic or Western encodings and UTF-16 are read correctly. A file with too little text to judge stays "Unknown" rather than being given a language at random.
+- **Compound language tags were thrown away** — `movie.en.forced.srt` and `movie.rus.full.srt` came out as "Unknown" instead of English and Russian.
+- **`.vtt` subtitles weren't recognized** at all.
+- **Chosen subtitles disappeared when a file was remuxed** — on the transcode-reuse path every external subtitle you had ticked was dropped from the finished file.
+- **Russian and Ukrainian season folders weren't understood** — `Фонари (Сезон 1)` and `1 сезон` now read as season 1, in either word order, and a trailing episode count (`Сезон 1, 8 серий`) no longer blocks the match.
+- **Every episode in a season folder landed in season 1** — `Фонари (Сезон 2)` was read as season 1 no matter what the folder said. This is not cosmetic: a wrong season makes TV.app draw a second, duplicate season header, the same fault fixed above.
+- **`Show 1.WEB-DLRip.avi` wasn't recognized as an episode** — filenames that repeat the show name, then the episode number, then release tags matched no pattern and were treated as films. Resolutions and files carrying their own year are excluded, so `Dune 2.2024.1080p.mkv` stays a film.
+- **A folder that names its season now needs only one episode in it** — dropping a single file into `Show (Season 1)` works, provided the filename backs the folder up by repeating the show name. Where the folder name is the only evidence, three episodes are still required so a stray file can't rename itself after its parent directory.
+- **Re-asking for a match repeated the search that had just failed** — the sheet was pre-filled with the raw filename, which is exactly the string that missed. It now offers cleaned-up guesses, best first.
 - **A show synced in two sittings showed the same season twice** — adding a few episodes now and the rest later drew two identical "Season 1" headers in TV.app, each listing every episode. iOS derives each episode's season sort key from the album's sort string when the album is first created, but from the episode's own season number every time after, and never revisits the earlier rows — so the two batches disagreed forever. Episodes now carry the season number as their sort key from the start, which is what iOS itself uses. The same fault could split a show two other ways: two seasons each synced in one sitting used to collapse into a *single* section, and orphan recovery re-registered episodes into a different album than the pipeline did. Both are fixed alongside.
 - **Deleting a TV episode left its show poster on the device forever** — each episode uploads two artwork files and the delete removed only one. Both go now, and `mediaporterctl heal` sweeps any left behind by earlier versions.
 - **A failed delete could remove the file of a title that still existed** — cleanup ran even when the device never confirmed the deletion, which strands a title in TV.app that can't play. Files are now removed only after the device confirms; otherwise the bytes stay put and can be reclaimed later.
 
+### New
+
+- **Attach a subtitle by hand** — drop a `.srt`, `.ass`, `.ssa`, or `.vtt` onto a file row, or use "Add subtitle…". It behaves exactly like one found next to the video, including having its language worked out, and it survives re-analysis.
+- **Set a subtitle's language yourself** — external subtitle rows have a language menu for when the guess is wrong or the file gives nothing to go on.
+- **"Not a show…" when picking a series** — a film misfiled as a TV episode used to be stuck, because that picker only searches TV shows and no query typed there could ever reach the film. It now hands the file back to the movie editor.
+
 ### Diagnostics
 
 - **`mediaporterctl heal` reports split seasons** — names the exact episodes to delete and re-sync to merge a duplicated season header, and leaves genuine multi-season shows alone.
+
+## 0.9.0 — 2026-08-10
 
 Large-batch release. Whole seasons now sync in one go: a 39-file / 73.6 GB batch (two Attack on Titan seasons plus five movies) landed 39/39 bound and playable on a real iPad. Getting there fixed a hard failure that made any sizeable batch impossible, taught us that the asset-expiry rule we'd been designing around measured the wrong thing, and closed several ways the app quietly wasted your time.
 

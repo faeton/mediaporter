@@ -4,6 +4,19 @@ import Base from "../layouts/Base.astro";
 // Keeping it static now to avoid coupling the site build to source layout changes in MacApp/.
 const releases = [
   {
+    version: "0.9.1",
+    date: "2026-08-20",
+    notes: [
+      "Subtitle files next to your video are found properly — a subtitle named exactly like the video (\"Show.srt\" beside \"Show.avi\") was being skipped entirely, which is the most common way they're named. Tags with extra words (\"movie.en.forced.srt\") are read correctly now, and .vtt files are recognised.",
+      "Subtitles get the right language even when the filename doesn't say — the language is worked out from the subtitle text itself, so a plain \"Show.srt\" next to a Russian rip arrives as Russian instead of \"Unknown\". Files saved in older Windows encodings are read correctly. If there isn't enough text to be sure, it stays Unknown rather than guessing.",
+      "Add a subtitle yourself — drag a .srt, .ass, .ssa or .vtt onto a file, or use \"Add subtitle…\". You can also set any subtitle's language by hand when the guess is wrong.",
+      "Russian season folders are understood — \"Фонари (Сезон 1)\" and \"1 сезон\" are read as season 1, in either word order. Episodes in a season folder also used to all land in season 1 regardless of what the folder said, which made the TV app draw a duplicate season heading.",
+      "More episode names recognised — files that repeat the show name then the episode number, with quality tags after (\"Show 1.WEB-DLRip.avi\"), are now matched. A folder that names its season needs only one episode in it, so single-episode drops work.",
+      "Fixed: subtitles you'd ticked could be dropped when a file was remuxed, and re-asking for a film match repeated the search that had just failed instead of offering better guesses.",
+      "A film misfiled as a TV episode is no longer stuck — the show picker has a \"Not a show…\" button that hands it back to the movie editor.",
+    ],
+  },
+  {
     version: "0.9.0",
     date: "2026-08-10",
     notes: [
