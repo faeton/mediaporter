@@ -450,6 +450,11 @@ public struct SeasonOrderCollapse: Sendable {
     public let keyName: String
     /// Seasons sharing `order`, ascending. Always ≥2.
     public let seasons: [Int]
+    /// Every row sitting on `order`, across all of `seasons` — what TV.app
+    /// actually draws in the merged section. NOT `minority.count + 1`: the
+    /// kept season contributes all of its rows, not one, and rows we did not
+    /// ship count toward what the user sees even though we cannot move them.
+    public let episodeCount: Int
     /// The season left in place; re-syncing it too would be wasted work, since
     /// one season must keep the order for the album row to survive.
     public let keptSeason: Int
@@ -659,8 +664,8 @@ func parseSeasonOrderCollapses(_ text: String) -> [SeasonOrderCollapse] {
 
         return SeasonOrderCollapse(albumPID: key.albumPID, album: entry.album,
                                    order: key.order, keyName: entry.keyName,
-                                   seasons: seasons, keptSeason: kept,
-                                   minority: minority)
+                                   seasons: seasons, episodeCount: entry.rows.count,
+                                   keptSeason: kept, minority: minority)
     }.sorted { ($0.album, $0.order) < ($1.album, $1.order) }
 }
 

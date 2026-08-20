@@ -54,6 +54,10 @@ final class SeasonOrderCollapseTests: XCTestCase {
         // Season 3 has more rows, so keeping it means the fewest re-uploads.
         XCTAssertEqual(collapses[0].keptSeason, 3)
         XCTAssertEqual(collapses[0].minority.map(\.syncID), [11])
+        // Every row on the shared order, not minority + 1 — the kept season
+        // contributes all of its rows. Shipped 0.9.1 reported 23 for a section
+        // TV.app was drawing with 33 episodes in it.
+        XCTAssertEqual(collapses[0].episodeCount, 3)
     }
 
     /// A season already sitting on its own season-number key must be the one
@@ -73,6 +77,24 @@ final class SeasonOrderCollapseTests: XCTestCase {
         XCTAssertEqual(collapses.count, 1)
         XCTAssertEqual(collapses[0].keptSeason, 2, "season 2 is already on key \"2\"")
         XCTAssertEqual(collapses[0].minority.map(\.syncID), [21, 22])
+    }
+
+    /// The counting bug directly: kept season 3 rows, minority 2 rows. The old
+    /// `minority.count + 1` said 3; the section holds 5.
+    func testEpisodeCountIsEveryRowOnTheOrder() {
+        var rows: [String] = []
+        for e in 1...3 {
+            rows.append(row(albumPID: 1, season: 2, order: 751, syncID: Int64(10 + e),
+                            episode: e, album: "Show", keyName: "2", title: "S2E0\(e)"))
+        }
+        for e in 1...2 {
+            rows.append(row(albumPID: 1, season: 3, order: 751, syncID: Int64(20 + e),
+                            episode: e, album: "Show", keyName: "2", title: "S3E0\(e)"))
+        }
+        let c = parseSeasonOrderCollapses(rows.joined(separator: "\n"))[0]
+        XCTAssertEqual(c.keptSeason, 2, "season 2 already sits on key \"2\"")
+        XCTAssertEqual(c.minority.count, 2)
+        XCTAssertEqual(c.episodeCount, 5)
     }
 
     // MARK: - what must NOT be reported

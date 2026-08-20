@@ -690,7 +690,7 @@ func runHeal(dryRun: Bool) -> Never {
             let seasons = c.seasons.map(String.init).joined(separator: " + ")
             print("Season sort keys: seasons \(seasons) of \(c.album) share one sort key")
             print("(\"\(c.keyName)\"), so TV.app lists them as a SINGLE season with")
-            print("\(c.minority.count + 1) episode numbers repeating.")
+            print("\(c.episodeCount) episodes and the numbering repeating.")
             print("  keeping season \(c.keptSeason); re-sync these \(c.minority.count) episode(s):")
             for e in c.minority {
                 print("      E\(String(format: "%02d", e.episodeSortID))"
