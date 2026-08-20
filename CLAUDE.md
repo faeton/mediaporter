@@ -41,6 +41,7 @@ Non-obvious — each silently fails if broken. Trace evidence in `research/docs/
     - `pipeline.verify` reads every shipped row back by `item_store.sync_id` after `finish()` and reports BOUND / UNBOUND / NO ROW. Never infer bound-ness from the joined path: `base_location_id=0` is a real row with `path=''`, so `bl.path || '/' || e.location` yields `"//"`, not NULL. Check the columns (`DeleteCandidate.isBound`).
     - Unbound rows the run just created are `delete_track`-ed immediately (`pipeline.verify.cleanup`) and their jobs marked failed — otherwise they poison every later sync.
     - `StuckAssetLedger` remembers stale IDs across sessions; one that reappears after its `FileError(0)` is escalated to `delete_track` by `healStuckAssets` **before** the next `RegisterSession.open` (deletes need their own session). Gated: seen ≥2×, not ours, row exists, row unbound. Manual: `mediaporterctl heal [--dry-run]`, `mediaporterctl verify <syncID>…`.
+17. **`delete_track` destroys the bound file** — medialibraryd sweeps the media itself when the row binding it is deleted; passing empty `mediaPaths` only suppresses OUR AFC cleanup. There is no delete-row-keep-bytes primitive, so repairing a wrong season key always costs a re-upload — if the originals are gone, recover them from the device with `mediaporterctl pull` FIRST, then delete and re-sync. A row re-registered onto swept bytes reads `BOUND` and passes `verify`: **bind-ness does not imply the file exists.** Measured 2026-08-20 on AkmPad12 — see HISTORY.md "2026-08-20".
 
 ## Design priorities
 

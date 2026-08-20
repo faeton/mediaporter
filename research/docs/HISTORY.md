@@ -6,6 +6,25 @@ If a finding here was later corrected, the correction is noted inline (or at the
 
 ---
 
+## 2026-08-20 — `delete_track` destroys the bound file (no-reupload repair is dead)
+
+**Question.** A collapsed season (CLAUDE.md #6) is repaired by deleting the wrongly-keyed rows and re-syncing them, because `album_order` is stamped from the row's own `season_number` at INSERT time. That needs the source files. Can the repair be done without them, reusing the bytes already on the device — the trick `recoverOrphansEndToEnd` uses ("No re-upload — purely reuses bytes already on the device", `OrphanRecovery.swift:56`)?
+
+**Design tested.** Read the row's metadata off the device DB, `deleteFromDevice(syncIDs:, mediaPaths: [], artworkSyncIDs: [])` — empty lists, so our own AFC cleanup removes nothing — then `registerUploadedFiles` against the same `devicePath`/`slot` with a fresh asset ID.
+
+**Result: the bytes do not survive the delete.** Measured on AkmPad12 with the disposable fixture `Mediaporter.Alpha.S01E01.mp4` at `/iTunes_Control/Music/F10/QUKJ.mp4` (65731 bytes):
+
+- Before: row bound, `afc.fileSize` returns the size, so the pre-flight "bytes present" guard passed.
+- After the round trip: the new row reads **BOUND** at the same path, and `mediaporterctl verify` reports it as healthy — but `AFC open '/iTunes_Control/Music/F10/QUKJ.mp4'` fails with **error 8**. A 1 GB control file in `/iTunes_Control/Music/F15/` pulled fine in the same session, so AFC itself was healthy and the file is genuinely gone.
+
+**Cause, already documented in our own delete path.** `mediaporterctl delete` prints it: *"AFC cleanup: 0 media file(s) … (zero is normal — medialibraryd typically deletes the bound file itself when delete_track commits)."* Passing empty `mediaPaths` only suppresses OUR AFC cleanup; medialibraryd sweeps the file on its own when the row that binds it goes away. There is no "delete the row, keep the bytes" primitive.
+
+**Worse, it fails silently.** The re-registered row is `base_location_id != 0` and passes every bind check we have, so `pipeline.verify` and `mediaporterctl verify` both call it BOUND. This is the "title in TV.app that won't play" state of CLAUDE.md #14, reached from a new direction — bind-ness does not imply the bytes exist. Any future repair that deletes a row must assume the file dies with it.
+
+**Consequence.** Repairing a collapsed season always costs a re-upload. When the original sources are gone, the only route is to recover them FROM the device first (`mediaporterctl pull` each `/iTunes_Control/Music/Fxx/*.mp4`), and only then delete and re-sync. The experiment code was reverted; nothing shipped.
+
+---
+
 ## 2026-04-01
 
 - Finder sync creates TV app entries with `media_type=8192`, `media_kind=1024` ("Home Video") — later confirmed wrong target; correct values are 2048/2/4.
