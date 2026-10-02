@@ -169,7 +169,9 @@ public enum Transcoder {
     ///   when an embedded audio stream has no language tag (or "und").
     ///   Typically the TMDb `original_language` of the title. Without this,
     ///   anime EAC3 mixes that ship untagged surface as "Unknown" in the
-    ///   iPad TV-app audio switcher.
+    ///   iPad TV-app audio switcher. Applied only when exactly one selected
+    ///   track is untagged — with several there's no telling which is the
+    ///   original, and labeling them all the same is worse than "und".
     static func buildCommand(
         mediaInfo: MediaInfo,
         decision: TranscodeDecision,
@@ -370,6 +372,20 @@ public enum Transcoder {
             return 0
         }()
 
+        // The original-language fallback names ONE track. Stamped onto every
+        // untagged track it mislabels the rest: an AVI carrying a Russian dub
+        // plus the English original has no tags at all, and both landed in
+        // the TV-app switcher as "English" — two identical rows, the dub
+        // playing under either. With 2+ untagged tracks there's no telling
+        // which one is original, so leave them "und" for the user to label.
+        func isUntagged(_ audioIdx: Int) -> Bool {
+            let override = LanguageCodes.toIso6392T(audioLanguageOverrides[audioIdx])
+            let probed = audioActions[audioIdx].stream.language?.lowercased()
+            return [override, probed].allSatisfy { $0 == nil || $0!.isEmpty || $0 == "und" }
+        }
+        let untaggedCount = audioIndices.filter { $0 < audioActions.count && isUntagged($0) }.count
+        let effectiveFallback = untaggedCount == 1 ? langFallback : nil
+
         for (outIdx, audioIdx) in audioIndices.enumerated() {
             guard audioIdx < audioActions.count else { continue }
             let aa = audioActions[audioIdx]
@@ -404,7 +420,7 @@ public enum Transcoder {
             } else if let probed, !probed.isEmpty, probed != "und" {
                 lang = probed
             } else {
-                lang = langFallback ?? "und"
+                lang = effectiveFallback ?? "und"
             }
             cmd += ["-metadata:s:a:\(outIdx)", "language=\(lang)"]
             if let title = aa.stream.title {
